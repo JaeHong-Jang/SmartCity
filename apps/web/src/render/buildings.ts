@@ -3,15 +3,40 @@
 // placing or moving buildings only rewrites instance matrices.
 
 import * as THREE from 'three';
-import type { BuildingType, CityDoc } from '@smartcity/shared';
+import { AREA_PER_JOB, AREA_PER_PERSON, buildingMetrics, type BuildingType, type CityDoc } from '@smartcity/shared';
+import type { SimSnapshot } from '@smartcity/sim';
 import { bakeBuildingGeometry, createBuildingMaterial } from './buildingGeometry';
 
 export { roofHeight, wallHeight } from './buildingGeometry';
 
 const _m = new THREE.Matrix4();
 
+/** Share of windows lit at night when the simulation reports no occupancy at all. */
+const IDLE_OCCUPANCY = 0.3;
+/** Occupancy level of a building with people but no known capacity. */
+const UNKNOWN_CAPACITY_OCCUPANCY = 0.6;
+
+/** People a design can hold (homes + jobs), in residents. */
+export function buildingCapacity(type: BuildingType): number {
+  const m = buildingMetrics(type);
+  let cap = m.areaByUse.residential / AREA_PER_PERSON;
+  for (const use of Object.keys(AREA_PER_JOB) as (keyof typeof AREA_PER_JOB)[]) cap += m.areaByUse[use] / AREA_PER_JOB[use];
+  return cap;
+}
+
+/** aOccupancy in [0,1]: people inside (each agent stands for `scale` residents) over capacity. */
+export function occupancyLevel(people: number, scale: number, capacity: number): number {
+  if (!(people > 0)) return 0;
+  if (!(capacity > 0)) return UNKNOWN_CAPACITY_OCCUPANCY;
+  return Math.min(1, (people * Math.max(1, scale)) / capacity);
+}
+
 interface TypeEntry {
   rev: number;
+  /** Building id of each instance slot, and the per-instance window-light level. */
+  ids: string[];
+  occ: THREE.InstancedBufferAttribute;
+  cap: number;
   /** The doc object the geometry was baked from (fast path), and its design signature (after a resync). */
   ref: BuildingType;
   sig: string;
@@ -19,12 +44,15 @@ interface TypeEntry {
   capacity: number;
 }
 
-const designSig = (t: BuildingType): string => JSON.stringify([t.parts, t.smart ?? null]);
+const designSig = (t: BuildingType): string => JSON.stringify([t.parts, t.smart ?? null, t.props ?? null]);
 
 export class BuildingLayer {
   readonly group = new THREE.Group();
   private readonly material = createBuildingMaterial();
   private types = new Map<string, TypeEntry>();
+  private slotOf = new Map<string, { e: TypeEntry; slot: number }>();
+  private occSnapshot: SimSnapshot | null = null;
+  private occStale = true;
 
   constructor() {
     this.group.name = 'buildings';
@@ -37,7 +65,13 @@ export class BuildingLayer {
     return true;
   }
 
-  private createMesh(id: string, geo: THREE.BufferGeometry, capacity: number): THREE.InstancedMesh {
+  /** 0 = day, 1 = night: windows of occupied buildings glow. */
+  setNight(night: number): void {
+    (this.material.userData.uNight as { value: number }).value = night;
+  }
+
+  private createMesh(id: string, geo: THREE.BufferGeometry, capacity: number, occ: THREE.InstancedBufferAttribute): THREE.InstancedMesh {
+    geo.setAttribute('aOccupancy', occ);
     const mesh = new THREE.InstancedMesh(geo, this.material, capacity);
     mesh.name = `buildings-${id}`;
     mesh.count = 0;
@@ -71,7 +105,8 @@ export class BuildingLayer {
       if (!e) {
         let capacity = 16;
         while (capacity < n) capacity *= 2;
-        e = { rev: t.rev ?? 0, ref: t, sig: designSig(t), mesh: this.createMesh(id, bakeBuildingGeometry(t), capacity), capacity };
+        const occ = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+        e = { rev: t.rev ?? 0, ids: [], occ, cap: buildingCapacity(t), ref: t, sig: designSig(t), mesh: this.createMesh(id, bakeBuildingGeometry(t), capacity, occ), capacity };
         this.types.set(id, e);
       } else if (n > e.capacity) {
         let capacity = e.capacity;
@@ -79,23 +114,53 @@ export class BuildingLayer {
         const geo = e.mesh.geometry;
         this.group.remove(e.mesh);
         e.mesh.dispose();
-        e.mesh = this.createMesh(id, geo, capacity);
+        e.occ = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+        e.mesh = this.createMesh(id, geo, capacity, e.occ);
         e.capacity = capacity;
       }
     }
 
-    for (const e of this.types.values()) e.mesh.count = 0;
+    for (const e of this.types.values()) {
+      e.mesh.count = 0;
+      e.ids.length = 0;
+    }
+    this.slotOf.clear();
     for (const b of Object.values(doc.buildings)) {
       const e = this.types.get(b.typeId);
       if (!e) continue;
       _m.makeRotationY(b.rotation).setPosition(b.pos.x, 0, b.pos.z);
+      this.slotOf.set(b.id, { e, slot: e.mesh.count });
+      e.ids.push(b.id);
       e.mesh.setMatrixAt(e.mesh.count++, _m);
     }
+    this.occStale = true;
     for (const e of this.types.values()) {
       e.mesh.visible = e.mesh.count > 0;
       e.mesh.instanceMatrix.needsUpdate = true;
       if (e.mesh.count > 0) e.mesh.computeBoundingSphere();
     }
+  }
+
+  /**
+   * Window light level per building from the latest snapshot (`occupancy` in `buildingIds` order).
+   * Without citizen data every building gets a modest default so the night city is not black.
+   */
+  setOccupancy(snap: SimSnapshot | null): void {
+    if (snap === this.occSnapshot && !this.occStale) return;
+    this.occSnapshot = snap;
+    this.occStale = false;
+    const known = !!snap && snap.buildingIds?.length > 0 && !!snap.occupancy;
+    const scale = snap?.stats.citizens?.scale ?? 1;
+    for (const e of this.types.values()) e.occ.array.fill(known ? 0 : IDLE_OCCUPANCY);
+    if (known) {
+      const ids = snap!.buildingIds;
+      const occ = snap!.occupancy;
+      for (let i = 0; i < ids.length; i++) {
+        const at = this.slotOf.get(ids[i]!);
+        if (at) (at.e.occ.array as Float32Array)[at.slot] = occupancyLevel(occ[i] ?? 0, scale, at.e.cap);
+      }
+    }
+    for (const e of this.types.values()) e.occ.needsUpdate = true;
   }
 
   /** Number of instanced meshes currently drawn (one per design in use). */

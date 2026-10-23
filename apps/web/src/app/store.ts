@@ -16,7 +16,9 @@ import {
 } from '@smartcity/shared';
 import type { SimStats } from '@smartcity/sim';
 
-export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel';
+export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel' | 'street';
+/** Traffic facility tool sub-modes (교통 시설). */
+export type StreetMode = 'crosswalk' | 'signalCrosswalk' | 'speedBump' | 'schoolZone' | 'remove';
 /** Snap resolution in meters; 0 = off. Personal UI state, never stored in the doc. */
 export type SnapStep = 0 | 1 | 2 | 4 | 8;
 export type SimSpeed = 0 | 1 | 2 | 4;
@@ -41,6 +43,7 @@ export interface ToolOptions {
   parcelZone: ParcelZone;
   /** Parcel tool: click a polygon instead of dragging a rectangle (P toggles). */
   parcelPolygon: boolean;
+  streetMode: StreetMode;
 }
 
 export interface PendingEntry {
@@ -141,6 +144,12 @@ const ERROR_KO: [RegExp, string][] = [
   [/parcel\.polygon must be a simple polygon/, '필지 경계가 스스로 교차합니다'],
   [/unknown building/, '건물이 이미 바뀌었습니다. 다시 시도하세요'],
   [/unknown parcel/, '필지가 이미 바뀌었습니다. 다시 시도하세요'],
+  [/road features must be at least/, '구간 끝에서 12m 이상 떨어져야 합니다'],
+  [/too close to another road feature/, '다른 시설과 6m 이상 떨어져야 합니다'],
+  [/crosswalks need a road with sidewalks/, '횡단보도는 보도가 있는 도로에만 놓을 수 있습니다'],
+  [/too many road features/, '시설이 너무 많습니다'],
+  [/unknown road feature/, '시설이 이미 바뀌었습니다. 다시 시도하세요'],
+  [/crosswalk leg is not connected/, '이 교차로에 연결되지 않은 도로입니다'],
   [/conflict: the design was changed/, '다른 사용자가 이 설계를 먼저 바꿨습니다'],
 ];
 
@@ -170,7 +179,7 @@ export function initialState(room: string, name: string): ClientState {
     connection: 'connecting',
     ready: false,
     tool: 'select',
-    toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false },
+    toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk' },
     toolHint: '',
     selection: null,
     phaseHighlight: null,

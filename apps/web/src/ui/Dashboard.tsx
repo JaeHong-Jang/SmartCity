@@ -84,6 +84,16 @@ export function Dashboard({ onClose }: { onClose(): void }) {
         </span>
         <b className={st.violations ? 'warn' : 'ok'}>{st.violations}건</b>
       </div>
+      <h4>시민 (시뮬레이션)</h4>
+      <div className="dash-grid">
+        <Stat label="설계 인구" value={n0(st.population)} unit="명" />
+        <Stat label="시뮬 시민" value={n0(sim?.citizens?.total ?? 0)} unit="명" />
+        <Stat label="집" value={n0(sim?.citizens?.home ?? 0)} unit="명" />
+        <Stat label="직장·상점" value={n0(sim?.citizens?.atWork ?? 0)} unit="명" />
+        <Stat label="보행" value={n0(sim?.citizens?.walking ?? 0)} unit="명" />
+        <Stat label="운전" value={n0(sim?.citizens?.driving ?? 0)} unit="명" />
+      </div>
+      <span className="muted">설계 인구는 건물 면적 기준 추정치이고, 시뮬 시민은 이 화면의 시뮬레이션이 움직이는 에이전트 수입니다 (에이전트 1명 = 주민 {n0(sim?.citizens?.scale ?? 1)}명).</span>
       <h4>교통(내 화면 미리보기)</h4>
       <div className="dash-grid">
         <Stat label="차량" value={n0(sim?.vehicles ?? 0)} unit="대" />

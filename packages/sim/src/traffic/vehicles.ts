@@ -1,12 +1,18 @@
 // Car following: leader search over per-edge ordered lists, IDM acceleration from the previous state,
 // ballistic integration with a hard no-overlap clamp, and edge transitions with tail-based release.
+// Stop lines: lane ends without a connector grant and mid-block crossing lines without a pass.
 
+import type { Passage } from '../network/crossings.js';
+import { bumpAccel } from './calming.js';
 import { idmAccel, MAX_DECEL } from './idm.js';
+import { mustStopAt, nextGate } from './zones.js';
 import { insertOnEdge, removeFromEdge, tailOverhang, type Obstacle, type Vehicle, type World } from './world.js';
 
 const LOOKAHEAD = 150;
 const CURVE_LOOKAHEAD = 100;
 const MIN_REQUEST_DIST = 12;
+/** At a line that requires a full stop, the IDM obstacle is shifted so the front halts this far before it. */
+const STOP_CREEP = 0.8;
 
 const scratch: Obstacle = { gap: Infinity, v: 0 };
 
@@ -15,12 +21,17 @@ export function requestDistance(v: Vehicle): number {
   return Math.max(MIN_REQUEST_DIST, (v.v * v.v) / (2 * v.b) + 5);
 }
 
+/** IDM gap for a stop line at distance d: lines that need a full stop pull the vehicle up close to them. */
+const stopGap = (v: Vehicle, d: number, full: boolean): number => (full ? d + v.s0 - STOP_CREEP : d);
+
 export function computeAccelerations(w: World): void {
   const net = w.net;
   const nLanes = net.nLanes;
+  const zl = w.zones.lane;
   for (let e = 0; e < net.nEdges; e++) {
     const list = w.onEdge[e]!;
     const L = net.len[e]!;
+    const stops = e < nLanes ? zl[e]! : null;
     for (let k = 0; k < list.length; k++) {
       const v = list[k]!;
       if (v.bus && v.bus.dwell > 0) {
@@ -34,28 +45,44 @@ export function computeAccelerations(w: World): void {
       // Virtual obstacles (stop lines, route end) always bound the motion; IDM only reacts to them inside
       // the request horizon, otherwise vehicles would brake for every junction before they may ask for it.
       let hard = Infinity;
+      const horizon = requestDistance(v) + v.v * v.T;
+      const gate: Passage | null = stops && stops.length ? nextGate(v, stops, e, v.s) : null;
       if (k > 0) {
         const l = list[k - 1]!;
         ob.gap = l.s - l.len - v.s;
         ob.v = l.v;
-      } else {
+      } else if (!gate) {
         tailOverhang(w, e, L - v.s, 0, ob);
-        const horizon = requestDistance(v) + v.v * v.T;
         let d = L - v.s;
         let j = v.ri;
         let cur = e;
         for (;;) {
           const nxt = v.route[j + 1];
           if (nxt === undefined || (cur < nLanes && (j > v.ri || v.grant !== nxt - nLanes))) {
-            hard = d;
+            hard = Math.min(hard, d);
             const arriving = nxt === undefined && !v.bus && v.destS < Infinity;
-            if (!arriving && d <= horizon && d < ob.gap) {
-              ob.gap = d;
+            const g = stopGap(v, d, cur < nLanes && w.laneStopReq[cur] === 1);
+            if (!arriving && d <= horizon && g < ob.gap) {
+              ob.gap = g;
               ob.v = 0;
             }
             break;
           }
           if (d > LOOKAHEAD) break;
+          let blocked = false;
+          if (nxt < nLanes && zl[nxt]!.length) {
+            const p = nextGate(v, zl[nxt]!, nxt, -Infinity);
+            if (p) {
+              const dd = d + p.enterS;
+              hard = Math.min(hard, dd);
+              const g = stopGap(v, dd, mustStopAt(w, p.z));
+              if (dd <= horizon && g < ob.gap) {
+                ob.gap = g;
+                ob.v = 0;
+              }
+              blocked = true;
+            }
+          }
           const l2 = w.onEdge[nxt]!;
           if (l2.length > 0) {
             const last = l2[l2.length - 1]!;
@@ -66,9 +93,19 @@ export function computeAccelerations(w: World): void {
             }
             break;
           }
+          if (blocked) break;
           d += net.len[nxt]!;
           cur = nxt;
           j++;
+        }
+      }
+      if (gate) {
+        const d = gate.enterS - v.s;
+        hard = Math.min(hard, d);
+        const g = stopGap(v, d, mustStopAt(w, gate.z));
+        if (d <= horizon && g < ob.gap) {
+          ob.gap = g;
+          ob.v = 0;
         }
       }
       v.gapHard = Math.min(ob.gap, hard);
@@ -91,6 +128,7 @@ export function computeAccelerations(w: World): void {
         const dEnd = L - v.s;
         if (v.v > vn && dEnd < CURVE_LOOKAHEAD) acc = Math.min(acc, (vn * vn - v.v * v.v) / (2 * Math.max(dEnd, 0.5)));
       }
+      if (w.hasBumps) acc = bumpAccel(w, v, acc);
       v.acc = Math.max(-MAX_DECEL, acc);
     }
   }
@@ -141,6 +179,9 @@ function advance(w: World, v: Vehicle, ds: number): void {
     e = nxt;
     v.ri++;
     s = over;
+    v.stopCnt = 0;
+    v.stopTick = -1;
+    for (const h of v.zones) if (h.edge === e && h.rel === Infinity) h.rel = v.odo - over + h.exitS + v.len;
     if (e < nLanes && v.resLane === e) {
       w.reserved[e]! -= v.resNeed;
       v.resLane = -1;
@@ -156,6 +197,14 @@ function advance(w: World, v: Vehicle, ds: number): void {
     if (h.rel <= v.odo + 1e-9) {
       w.holders[h.c]!--;
       v.held.splice(i, 1);
+    }
+  }
+  for (let i = v.zones.length - 1; i >= 0; i--) {
+    const h = v.zones[i]!;
+    if (h.rel <= v.odo + 1e-9) {
+      w.zs.veh[h.z]!--;
+      w.zs.passed[h.z]!++;
+      v.zones.splice(i, 1);
     }
   }
 }

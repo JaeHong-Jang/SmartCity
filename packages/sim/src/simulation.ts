@@ -13,18 +13,27 @@ import {
   type CityDoc,
   type Command,
 } from '@smartcity/shared';
+import { citizenGoal, citizenStats, fillOccupancy, refreshBuildingIndex, newCitizenWorld, processCitizenEvents, reconcileCitizens, retargetCitizens, updateCitizens } from './citizens/citizens.js';
+import { gaitPhase, movePeds, pedElevation, newPedWorld, pedRequests, PedPool, processPedQueue, removePed, reprojectPeds, resetBands, retargetWalkers, routeCrossers, walkerGoal, writePedPose } from './citizens/peds.js';
 import { compileNetwork } from './network/compile.js';
-import { buildNet } from './network/net.js';
+import { buildPedGraph, type PedGraph } from './network/pedGraph.js';
+import { buildNet, writePose } from './network/net.js';
 import { Router } from './network/route.js';
 import { maintainBuses, syncBusLines, updateBus } from './traffic/buses.js';
 import { buildDemand, generateTrips } from './traffic/demand.js';
 import { processRequests } from './traffic/intersections.js';
-import { edgeArrays, recompileWorld } from './traffic/recompile.js';
+import { edgeArrays, installStreet, recompileWorld } from './traffic/recompile.js';
 import { createVehicle, routeVehicle } from './traffic/ops.js';
 import { buildSignals, headColor, signalView, updateSignals } from './traffic/signals.js';
 import { computeAccelerations, integrate } from './traffic/vehicles.js';
 import { canPlace, despawn, STOP_SPEED, type Vehicle, type World } from './traffic/world.js';
+import { processInnerRequests, updateGates } from './traffic/zones.js';
 import {
+  CLOCK_SCALE,
+  CLOCK_START,
+  CROSSING_STRIDE,
+  PED_STRIDE,
+  PedSignal,
   SIGNAL_STRIDE,
   VEHICLE_STRIDE,
   type RoadGraph,
@@ -52,6 +61,9 @@ const NETWORK_COMMANDS = new Set<Command['type']>([
   'closure.remove',
   'intersection.set',
   'intersection.reset',
+  'segment.setSchoolZone',
+  'feature.upsert',
+  'feature.remove',
 ]);
 
 export class Simulation {
@@ -61,6 +73,8 @@ export class Simulation {
   /** Snapshot scratch for laneFlow (internal, never handed out). */
   private flowSum = new Float64Array(0);
   private flowCnt = new Int32Array(0);
+  /** Building layout signature: the pedestrian graph (doors) is rebuilt when it changes. */
+  private buildingSig = '';
 
   constructor(doc: CityDoc, opts: SimOptions = {}) {
     const d = normalizeDoc(cloneJson(doc));
@@ -73,7 +87,7 @@ export class Simulation {
       tickRate,
       dt: 1 / tickRate,
       tick: 0,
-      routeBudget: opts.routeBudget ?? 200,
+      routeBudget: opts.routeBudget ?? 100,
       maxVehicles: opts.maxVehicles ?? 10000,
       demandOn: opts.demand ?? true,
       rng: new Rng(d.meta.seed),
@@ -86,11 +100,23 @@ export class Simulation {
       holders: new Int32Array(graph.connectors.length),
       reserved: new Float64Array(nLanes),
       laneGreen: new Uint8Array(nLanes).fill(1),
+      zones: undefined as unknown as World['zones'],
+      zs: undefined as unknown as World['zs'],
+      crossingSig: 0,
+      bumps: [],
+      hasBumps: false,
+      laneStopReq: new Uint8Array(nLanes),
+      noGrantTick: -1,
+      ped: undefined as unknown as World['ped'],
+      peds: new PedPool(),
+      cz: newCitizenWorld(d.meta.seed, opts.citizens ?? true, opts.maxCitizens ?? 8000),
+      lostDrivers: [],
+      arrivedDrivers: [],
       stopped: new Int32Array(nLanes),
       queue: [],
       typeIds: [],
       types: new Map(),
-      signals: [],
+      signals: { plans: [], mids: [] },
       demand: buildDemand(d, net),
       lines: [],
       nextId: 1,
@@ -98,7 +124,12 @@ export class Simulation {
       arrived: 0,
       removed: 0,
     };
+    installStreet(this.w);
+    this.w.ped = newPedWorld(buildPedGraph(d, graph));
+    resetBands(this.w);
+    this.buildingSig = this.buildingSignature();
     this.refreshDerived();
+    reconcileCitizens(this.w);
   }
 
   applyCommand(cmd: Command): ApplyResult {
@@ -114,14 +145,26 @@ export class Simulation {
   step(): void {
     const w = this.w;
     this.flush();
-    updateSignals(w.signals, w.tick, w.laneGreen);
+    updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
+    processCitizenEvents(w);
     if (w.demandOn) generateTrips(w);
     maintainBuses(w);
     this.processQueue();
+    processPedQueue(w);
+    updateGates(w);
+    w.zs.elig.fill(0);
+    pedRequests(w);
     processRequests(w);
+    processInnerRequests(w);
     computeAccelerations(w);
     integrate(w);
+    movePeds(w);
     this.finalize();
+    updateCitizens(w);
+    w.ped.arrived.length = 0;
+    w.ped.failed.length = 0;
+    w.lostDrivers.length = 0;
+    w.arrivedDrivers.length = 0;
     w.tick++;
   }
 
@@ -130,30 +173,45 @@ export class Simulation {
     const n = w.vehicles.length;
     let vb = reuse?.vehicles;
     if (!vb || vb.length < n * VEHICLE_STRIDE) vb = new Float32Array(Math.ceil(n * 1.25) * VEHICLE_STRIDE);
+    const net = w.net;
     for (let i = 0; i < n; i++) {
       const v = w.vehicles[i]!;
-      const p = this.pose(v);
       const o = i * VEHICLE_STRIDE;
-      vb[o] = p.x;
-      vb[o + 1] = p.z;
-      vb[o + 2] = p.heading;
+      // Body center (it may sit on the previous edge), written without allocating.
+      let e = v.edge;
+      let s = v.s - v.len / 2;
+      if (s < 0 && v.ri > 0) {
+        e = v.route[v.ri - 1]!;
+        s = Math.max(0, net.len[e]! + s);
+      }
+      writePose(net.pts[e]!, net.cum[e]!, Math.max(0, s), false, 0, vb, o);
       vb[o + 3] = v.typeIdx;
       vb[o + 4] = v.v;
       vb[o + 5] = v.id;
     }
     let heads = 0;
-    for (const p of w.signals) heads += p.heads.length;
+    for (const p of w.signals.plans) heads += p.heads.length;
+    for (const m of w.signals.mids) heads += m.heads.length;
     let sb = reuse?.signals;
     if (!sb || sb.length < heads * SIGNAL_STRIDE) sb = new Float32Array(heads * SIGNAL_STRIDE);
     let o = 0;
-    for (const p of w.signals) {
+    const colorCode = (c: string): number => (c === 'green' ? 2 : c === 'yellow' ? 1 : 0);
+    for (const p of w.signals.plans) {
       for (let h = 0; h < p.heads.length; h++) {
         const head = p.heads[h]!;
-        const c = headColor(p, h);
         sb[o++] = head.x;
         sb[o++] = head.z;
         sb[o++] = head.heading;
-        sb[o++] = c === 'green' ? 2 : c === 'yellow' ? 1 : 0;
+        sb[o++] = colorCode(headColor(p, h));
+      }
+    }
+    // Mid-block crossing signals: one vehicle head per lane at its stop line.
+    for (const m of w.signals.mids) {
+      for (const head of m.heads) {
+        sb[o++] = head.x;
+        sb[o++] = head.z;
+        sb[o++] = head.heading;
+        sb[o++] = colorCode(m.color);
       }
     }
     const nLanes = w.net.nLanes;
@@ -171,6 +229,36 @@ export class Simulation {
       cnt[v.edge]!++;
     }
     for (let l = 0; l < nLanes; l++) lf[l] = cnt[l]! > 0 ? Math.min(1, sum[l]! / cnt[l]!) : -1;
+    const peds = w.peds;
+    const nPed = peds.count;
+    let pb = reuse?.pedestrians;
+    if (!pb || pb.length < nPed * PED_STRIDE) pb = new Float32Array(Math.ceil(nPed * 1.25) * PED_STRIDE);
+    let pi = reuse?.pedestrianIds;
+    if (!pi || pi.length < nPed) pi = new Uint32Array(Math.ceil(nPed * 1.25));
+    let k = 0;
+    for (let i = 0; i < peds.hi; i++) {
+      if (!peds.alive[i]) continue;
+      const o = k * PED_STRIDE;
+      writePedPose(w, i, pb, o);
+      pb[o + 3] = peds.vCur[i]!;
+      pb[o + 4] = gaitPhase(w, i);
+      pb[o + 5] = peds.style[i]!;
+      pb[o + 6] = peds.state[i]!;
+      pb[o + 7] = pedElevation(w, i);
+      pi[k++] = peds.pid[i]!;
+    }
+    const nCross = w.graph.crossings.length;
+    let cb = reuse?.crossings;
+    if (!cb || cb.length < nCross * CROSSING_STRIDE) cb = new Float32Array(nCross * CROSSING_STRIDE);
+    for (let z = 0; z < nCross; z++) {
+      cb[z * CROSSING_STRIDE] = w.zs.pedSig[z]!;
+      cb[z * CROSSING_STRIDE + 1] = w.zs.ped[z]!;
+      cb[z * CROSSING_STRIDE + 2] = w.zs.veh[z]!;
+    }
+    const buildingIds = w.ped.pg.buildingIds.slice();
+    let ob = reuse?.occupancy;
+    if (!ob || ob.length < buildingIds.length) ob = new Float32Array(buildingIds.length);
+    fillOccupancy(w, w.ped.pg.buildingIds, ob);
     return {
       tick: w.tick,
       time: w.tick / w.tickRate,
@@ -181,6 +269,14 @@ export class Simulation {
       signals: sb,
       signalCount: heads,
       laneFlow: lf,
+      pedestrians: pb,
+      pedestrianIds: pi,
+      pedestrianCount: nPed,
+      crossings: cb,
+      crossingCount: nCross,
+      crossingSig: w.crossingSig,
+      occupancy: ob,
+      buildingIds,
       stats: this.stats(),
     };
   }
@@ -194,9 +290,13 @@ export class Simulation {
       if (v.v < STOP_SPEED) stopped++;
     }
     const n = w.vehicles.length;
+    const game = CLOCK_START + (w.tick / w.tickRate) * CLOCK_SCALE;
     return {
       tick: w.tick,
       time: w.tick / w.tickRate,
+      clock: { dayTime: game % 86400, day: Math.floor(game / 86400) + 1 },
+      citizens: citizenStats(w),
+      pedestrians: w.peds.count,
       vehicles: n,
       spawned: w.spawned,
       arrived: w.arrived,
@@ -232,12 +332,13 @@ export class Simulation {
         state: v.bus && v.bus.dwell > 0 ? 'dwelling' : v.v < STOP_SPEED ? 'waiting' : 'driving',
       };
       if (v.bus) view.busLineId = v.bus.lineId;
+      if (v.person >= 0) view.personId = w.cz.slots[v.person]?.id;
       return view;
     });
   }
 
   signals(): SignalView[] {
-    return this.w.signals.map((p) => signalView(p, this.w.tickRate));
+    return this.w.signals.plans.map((p) => signalView(p, this.w.tickRate));
   }
 
   spawnVehicle(typeId: string, fromLaneId: string, toLaneId: string, s?: number): number | null {
@@ -279,8 +380,47 @@ export class Simulation {
     return { x: p.x, z: p.z, heading: Math.atan2(t.z, t.x) };
   }
 
+  /** Buildings (position, rotation, type and design revision) as one comparable string. */
+  private buildingSignature(): string {
+    const d = this.w.doc;
+    let sig = '';
+    for (const id of Object.keys(d.buildings).sort()) {
+      const b = d.buildings[id]!;
+      const t = d.buildingTypes[b.typeId];
+      sig += `${id}:${b.typeId}:${t?.rev ?? 0}:${t ? t.parts.length : -1}:${b.pos.x},${b.pos.z},${b.rotation};`;
+    }
+    return sig;
+  }
+
+  /** New pedestrian graph from the current doc and network; pedestrians are re-projected onto it. */
+  private rebuildPeds(oldPg: PedGraph, oldCrossingIds: string[]): void {
+    const w = this.w;
+    const next = w.ped.nextWalker;
+    w.ped = newPedWorld(buildPedGraph(w.doc, w.graph));
+    w.ped.nextWalker = next;
+    w.noGrantTick = w.tick;
+    refreshBuildingIndex(w);
+    const lost = new Set(reprojectPeds(w, oldPg, oldCrossingIds, (i) => (w.peds.owner[i]! >= 0 ? citizenGoal(w, w.peds.owner[i]!) : walkerGoal(w, i))));
+    reconcileCitizens(w);
+    retargetCitizens(w, lost);
+    const p = w.peds;
+    const walkers: number[] = [];
+    for (let i = 0; i < p.hi; i++) {
+      if (!p.alive[i] || p.owner[i]! >= 0) continue;
+      if (lost.has(i)) removePed(w, i);
+      else walkers.push(i);
+    }
+    retargetWalkers(w, walkers);
+    routeCrossers(w);
+  }
+
   private refreshDerived(): void {
     const w = this.w;
+    const sig = this.buildingSignature();
+    if (sig !== this.buildingSig) {
+      this.buildingSig = sig;
+      this.rebuildPeds(w.ped.pg, w.graph.crossings.map((c) => c.id));
+    }
     w.typeIds = Object.keys(w.doc.vehicleTypes).sort();
     w.types = new Map(w.typeIds.map((id) => [id, w.doc.vehicleTypes[id]!]));
     for (const v of w.vehicles) {
@@ -296,9 +436,11 @@ export class Simulation {
         w.removed++;
       }
     }
-    w.signals = buildSignals(w.doc, w.net, w.tickRate);
+    w.signals = buildSignals(w.doc, w.net, w.zones, w.tickRate);
     w.laneGreen.fill(1);
-    updateSignals(w.signals, w.tick, w.laneGreen);
+    w.zs.pedSig.fill(PedSignal.none);
+    w.zs.midColor.fill(2);
+    updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
     w.demand = buildDemand(w.doc, w.net);
     syncBusLines(w);
     w.vehicles = w.vehicles.filter((v) => v.alive);
@@ -306,7 +448,11 @@ export class Simulation {
 
   /** Rebuild the network; keep vehicles whose lane/connector survived (see AGENTS.md "재컴파일"). */
   private recompile(): void {
+    const oldPg = this.w.ped.pg;
+    const oldIds = this.w.graph.crossings.map((c) => c.id);
     recompileWorld(this.w);
+    this.buildingSig = this.buildingSignature();
+    this.rebuildPeds(oldPg, oldIds);
     this.refreshDerived();
   }
 
@@ -346,6 +492,8 @@ export class Simulation {
     for (const v of w.vehicles) {
       if (v.alive && v.bus) updateBus(w, v);
       else if (v.alive && v.ri === v.route.length - 1 && v.edge < nLanes && v.s >= v.destS - ARRIVE_TOLERANCE) {
+        if (v.person >= 0) w.arrivedDrivers.push({ person: v.person, lane: v.edge });
+        v.person = -1;
         despawn(w, v);
         w.arrived++;
       }

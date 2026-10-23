@@ -137,7 +137,8 @@ describe('intersection manager', () => {
       { type: 'segment.add', segment: { id: 'CE', a: 'c', b: 'ce', roadTypeId: 'road-2' } },
       {
         type: 'intersection.set',
-        control: { nodeId: 'c', kind: 'signal', phases: [{ approaches: ['CN', 'CS'], green: 60 }, { approaches: ['BC', 'CE'], green: 20 }], yellow: 3, allRed: 2, offset: 0 },
+        // No crosswalks here: the test is about the exit lane length, which the crossing zone would shorten.
+        control: { nodeId: 'c', kind: 'signal', crosswalkLegs: [], phases: [{ approaches: ['CN', 'CS'], green: 60 }, { approaches: ['BC', 'CE'], green: 20 }], yellow: 3, allRed: 2, offset: 0 },
       },
     ]);
     const sim = new Simulation(doc, { demand: false });

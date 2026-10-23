@@ -18,7 +18,7 @@ import {
   type RoadType,
   type Vec2,
 } from '@smartcity/shared';
-import { compileNetwork, type RoadGraph } from '@smartcity/sim';
+import { compileNetwork, type Crossing, type RoadGraph } from '@smartcity/sim';
 
 export interface RoadSegGeom {
   id: string;
@@ -31,6 +31,14 @@ export interface RoadSegGeom {
   closed: boolean;
   a: string;
   b: string;
+  /** Arc length from each end where the lanes (and stop lines) start: setback + crosswalk zone. */
+  laneStartA: number;
+  laneStartB: number;
+  /** Arc lengths from node a of speed bumps. */
+  speedBumps: number[];
+  schoolZone: boolean;
+  /** Crosswalks (junction and mid-block) on this segment. */
+  crossings: Crossing[];
 }
 
 export interface RoadNodeGeom {
@@ -39,13 +47,30 @@ export interface RoadNodeGeom {
   segments: string[];
   polygon: Vec2[];
   signalized: boolean;
+  /** Control kind and crosswalk legs from the doc, for change detection (a segment's markings depend on them). */
+  control: string;
 }
 
 export interface RoadNetworkGeom {
   segments: Map<string, RoadSegGeom>;
   nodes: Map<string, RoadNodeGeom>;
+  /** All crossings in RoadGraph.crossings order (snapshot.crossings is indexed the same way). */
+  crossings: Crossing[];
   /** The real compiled graph (lanes, connectors) when the sim is available. */
   graph: RoadGraph | null;
+}
+
+/** Signature of a node's doc-side control settings. */
+export function controlSig(doc: CityDoc, nodeId: string): string {
+  const c = doc.intersections[nodeId];
+  return c ? `${c.kind}:${c.crosswalkLegs ? c.crosswalkLegs.join(',') : '*'}` : 'auto';
+}
+
+/** Speed bump positions (arc length from node a) taken from the doc's road features. */
+function docSpeedBumps(doc: CityDoc, segId: string, length: number): number[] {
+  const out: number[] = [];
+  for (const f of Object.values(doc.features ?? {})) if (f.segmentId === segId && f.kind === 'speedBump') out.push(f.t * length);
+  return out.sort((x, y) => x - y);
 }
 
 let warned = false;
@@ -68,11 +93,18 @@ export function buildRoadNetwork(doc: CityDoc, compile: (doc: CityDoc) => RoadGr
         closed: cs.closed,
         a: s.a,
         b: s.b,
+        laneStartA: cs.laneStartA,
+        laneStartB: cs.laneStartB,
+        speedBumps: cs.speedBumps,
+        schoolZone: cs.schoolZone,
+        crossings: [],
       });
     }
+    const crossings = graph.crossings;
+    for (const c of crossings) segments.get(c.segmentId)?.crossings.push(c);
     const nodes = new Map<string, RoadNodeGeom>();
-    for (const [id, n] of graph.nodes) nodes.set(id, { id, pos: n.pos, segments: n.segments, polygon: n.polygon, signalized: n.signalized });
-    return { segments, nodes, graph };
+    for (const [id, n] of graph.nodes) nodes.set(id, { id, pos: n.pos, segments: n.segments, polygon: n.polygon, signalized: n.signalized, control: controlSig(doc, id) });
+    return { segments, nodes, crossings, graph };
   } catch (e) {
     if (!warned) {
       warned = true;
@@ -147,6 +179,11 @@ export function fallbackNetwork(doc: CityDoc): RoadNetworkGeom {
       closed: id in doc.closures,
       a: s.a,
       b: s.b,
+      laneStartA: sa,
+      laneStartB: sb,
+      speedBumps: docSpeedBumps(doc, id, length),
+      schoolZone: !!s.schoolZone,
+      crossings: [],
     });
   }
 
@@ -171,9 +208,9 @@ export function fallbackNetwork(doc: CityDoc): RoadNetworkGeom {
     const polygon = corners.length >= 3 ? sortAround(c, dedupe(corners)) : [];
     const custom = doc.intersections[nid];
     const signalized = custom ? custom.kind === 'signal' : list.length >= 3;
-    nodes.set(nid, { id: nid, pos: node.pos, segments: list, polygon: polygon.length >= 3 ? polygon : [], signalized });
+    nodes.set(nid, { id: nid, pos: node.pos, segments: list, polygon: polygon.length >= 3 ? polygon : [], signalized, control: controlSig(doc, nid) });
   }
-  return { segments, nodes, graph: null };
+  return { segments, nodes, crossings: [], graph: null };
 }
 
 function dedupe(pts: Vec2[]): Vec2[] {

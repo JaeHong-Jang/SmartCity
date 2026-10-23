@@ -11,11 +11,13 @@ import {
   type SignalPhase,
 } from '@smartcity/shared';
 import { bearing } from '../tools/roadTool';
+import { segmentFeatures } from '../tools/streetTool';
 import { useServices, useStore } from './context';
 import { BuildingPlanning, ParcelInspector } from './PlanningInspector';
 import { clampNum } from './RoadTypeEditor';
 
 const DIRS = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
+const CONTROL_KO: Record<IntersectionControl['kind'], string> = { signal: '사용자 신호', uncontrolled: '비신호', allStop: '모든 방향 일시정지' };
 const dirName = (deg: number): string => DIRS[Math.round(deg / 45) % 8]!;
 
 /** Bearing (deg) of the direction leaving `nodeId` along a segment. */
@@ -25,6 +27,12 @@ function leaveBearing(doc: CityDoc, segId: string, nodeId: string): number {
   const [p, q] = s.a === nodeId ? [pts[0]!, pts[1]!] : [pts[pts.length - 1]!, pts[pts.length - 2]!];
   const d = normalize(sub(q, p));
   return bearing({ x: 0, z: 0 }, d);
+}
+
+/** `d` with its crosswalk legs replaced (undefined = automatic, the key is dropped). */
+function withLegs(d: IntersectionControl, legs: string[] | undefined): IntersectionControl {
+  const { crosswalkLegs: _old, ...rest } = d;
+  return legs ? { ...rest, crosswalkLegs: legs } : rest;
 }
 
 /** Pair the most opposite approaches into shared phases (like the automatic plan). */
@@ -97,7 +105,7 @@ function NodeInspector({ id }: { id: string }) {
         <dt>연결 도로</dt>
         <dd>{segs.length}개</dd>
         <dt>제어 방식</dt>
-        <dd>{custom ? (custom.kind === 'signal' ? '사용자 신호' : '비신호') : segs.length >= 3 ? '자동 신호' : '없음'}</dd>
+        <dd>{custom ? CONTROL_KO[custom.kind] : segs.length >= 3 ? '자동 신호' : '없음'}</dd>
       </dl>
       {segs.length >= 2 && (
         <>
@@ -108,8 +116,37 @@ function NodeInspector({ id }: { id: string }) {
             <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as IntersectionControl['kind'] })}>
               <option value="signal">신호</option>
               <option value="uncontrolled">비신호 (선착순)</option>
+              <option value="allStop">모든 방향 일시정지</option>
             </select>
           </div>
+          {segs.length >= 3 && (
+            <>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={!draft.crosswalkLegs}
+                  onChange={(e) => setDraft(withLegs(draft, e.target.checked ? undefined : segs.filter((s) => doc.roadTypes[s.roadTypeId]?.sidewalk).map((s) => s.id)))}
+                />
+                횡단보도 자동 (보도 있는 모든 방향)
+              </label>
+              {draft.crosswalkLegs &&
+                segs.map((s) => {
+                  const walk = !!doc.roadTypes[s.roadTypeId]?.sidewalk;
+                  const legs = draft.crosswalkLegs!;
+                  return (
+                    <label key={s.id} className="toggle" title={walk ? undefined : '보도가 없는 도로입니다'}>
+                      <input
+                        type="checkbox"
+                        disabled={!walk}
+                        checked={legs.includes(s.id)}
+                        onChange={(e) => setDraft(withLegs(draft, e.target.checked ? [...legs, s.id] : legs.filter((l) => l !== s.id)))}
+                      />
+                      {label(s.id)} 횡단보도
+                    </label>
+                  );
+                })}
+            </>
+          )}
           {draft.kind === 'signal' && (
             <>
               <label className="toggle">
@@ -183,6 +220,8 @@ function SegmentInspector({ id }: { id: string }) {
   const seg = doc.segments[id]!;
   const closure = doc.closures[id];
   const [reason, setReason] = useState('공사');
+  const features = segmentFeatures(doc, id);
+  const len = segmentLength(doc, seg);
   return (
     <>
       <h3>도로</h3>
@@ -193,7 +232,34 @@ function SegmentInspector({ id }: { id: string }) {
         <dd>{seg.control ? '곡선' : '직선'}</dd>
         <dt>상태</dt>
         <dd style={{ color: closure ? '#fca5a5' : undefined }}>{closure ? `폐쇄됨 (${closure.reason})` : '통행 가능'}</dd>
+        <dt>구역</dt>
+        <dd>{seg.schoolZone ? '어린이보호구역 (30km/h)' : '일반'}</dd>
       </dl>
+      <label className="toggle">
+        <input type="checkbox" checked={!!seg.schoolZone} onChange={(e) => dispatcher.dispatch({ type: 'segment.setSchoolZone', id, schoolZone: e.target.checked })} />
+        어린이보호구역
+      </label>
+      <h3>교통 시설</h3>
+      {features.length === 0 ? (
+        <span className="muted">없음 — 교통 시설 도구(8)로 횡단보도·과속방지턱을 놓을 수 있습니다</span>
+      ) : (
+        features.map((f) => (
+          <div className="row" key={f.id} data-feature={f.id}>
+            <b style={{ flex: 1 }}>
+              {f.kind === 'crosswalk' ? '횡단보도' : '과속방지턱'} · {Math.round(f.t * len)}m
+            </b>
+            {f.kind === 'crosswalk' && (
+              <label className="toggle">
+                <input type="checkbox" checked={!!f.signal} onChange={(e) => dispatcher.dispatch({ type: 'feature.upsert', feature: { ...f, signal: e.target.checked } })} />
+                신호
+              </label>
+            )}
+            <button className="danger" aria-label="시설 삭제" onClick={() => dispatcher.dispatch({ type: 'feature.remove', id: f.id })}>
+              ×
+            </button>
+          </div>
+        ))
+      )}
       <div className="row">
         <label>도로 타입</label>
         <select value={seg.roadTypeId} onChange={(e) => dispatcher.dispatch({ type: 'segment.setType', id, roadTypeId: e.target.value })} style={{ flex: 1 }}>

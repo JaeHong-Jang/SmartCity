@@ -11,6 +11,7 @@ import type {
   IntersectionControl,
   Parcel,
   NodeId,
+  RoadFeature,
   RoadNode,
   RoadSegment,
   RoadType,
@@ -27,6 +28,7 @@ export type Command =
   /** Inserts node `nodeId` at parameter t; `segmentIds` = [a→node, node→b]. */
   | { type: 'segment.split'; id: SegmentId; t: number; nodeId: NodeId; segmentIds: [SegmentId, SegmentId] }
   | { type: 'segment.setType'; id: SegmentId; roadTypeId: string }
+  | { type: 'segment.setSchoolZone'; id: SegmentId; schoolZone: boolean }
   | { type: 'roadType.upsert'; roadType: RoadType }
   | { type: 'building.place'; building: Building }
   | { type: 'building.remove'; id: string }
@@ -49,6 +51,8 @@ export type Command =
   | { type: 'closure.remove'; segmentId: SegmentId }
   | { type: 'parcel.upsert'; parcel: Parcel }
   | { type: 'parcel.remove'; id: string }
+  | { type: 'feature.upsert'; feature: RoadFeature }
+  | { type: 'feature.remove'; id: string }
   | { type: 'meta.update'; name?: string; trafficDensity?: number }
   /** Applied atomically: if any command fails, none take effect. Not nestable. */
   | { type: 'batch'; commands: Command[] };

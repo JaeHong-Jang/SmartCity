@@ -1,9 +1,24 @@
 import type { ReactNode } from 'react';
 import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
-import type { ToolId } from '../app/store';
+import type { StreetMode, ToolId } from '../app/store';
 import { PARCEL_ZONES, ZONE_COLORS } from '../tools/parcelTool';
 import { useServices, useStore } from './context';
 import { IconBuilding, IconBulldoze, IconBus, IconClosure, IconParcel, IconRoad, IconSelect } from './Icons';
+
+const IconStreet = () => (
+  <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 8h18M3 16h18" />
+    <path d="M8 9.5v5M12 9.5v5M16 9.5v5" />
+  </svg>
+);
+
+const STREET_MODES: { id: StreetMode; label: string }[] = [
+  { id: 'crosswalk', label: '횡단보도' },
+  { id: 'signalCrosswalk', label: '신호 횡단보도' },
+  { id: 'speedBump', label: '과속방지턱' },
+  { id: 'schoolZone', label: '어린이보호구역' },
+  { id: 'remove', label: '제거' },
+];
 
 export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[] = [
   { id: 'select', label: '선택', key: '1', icon: <IconSelect /> },
@@ -13,6 +28,7 @@ export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[
   { id: 'busLine', label: '버스', key: '5', icon: <IconBus /> },
   { id: 'closure', label: '폐쇄', key: '6', icon: <IconClosure /> },
   { id: 'parcel', label: '필지', key: '7', icon: <IconParcel /> },
+  { id: 'street', label: '교통 시설', key: '8', icon: <IconStreet /> },
 ];
 
 export function Toolbar() {
@@ -109,6 +125,21 @@ export function ToolOptions() {
           </button>
         </div>
         <span className="muted">{opts.parcelPolygon ? '꼭짓점 클릭 · Enter/첫 점 클릭으로 닫기' : '드래그로 사각형'} · 규제값은 인스펙터에서 수정</span>
+      </section>
+    );
+  }
+  if (tool === 'street') {
+    return (
+      <section className="panel tool-options" aria-label="교통 시설 도구 옵션">
+        <h3>교통 시설</h3>
+        <div className="list">
+          {STREET_MODES.map((m) => (
+            <button key={m.id} data-street-mode={m.id} className={opts.streetMode === m.id ? 'active' : ''} onClick={() => store.setToolOptions({ streetMode: m.id })}>
+              <span style={{ flex: 1, whiteSpace: 'nowrap' }}>{m.label}</span>
+            </button>
+          ))}
+        </div>
+        <span className="muted">구간 끝 12m·시설 간 6m 이상 · 시설 클릭 = 신호 전환 · Delete/우클릭 제거 · 교차로 클릭 = 속성 패널</span>
       </section>
     );
   }

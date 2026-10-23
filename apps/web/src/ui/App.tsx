@@ -2,6 +2,7 @@ import { useRef, useState, type ChangeEvent } from 'react';
 import type { PanelId, SimSpeed } from '../app/store';
 import { SNAP_STEPS, snapLabel } from '../tools/snap';
 import { downloadText, exportDoc, startImport } from '../app/importExport';
+import { formatClock } from '../render/dayNight';
 import { BuildingEditor } from './BuildingEditor';
 import { BusLinePanel } from './BusLinePanel';
 import { useServices, useStore } from './context';
@@ -9,6 +10,8 @@ import { Dashboard } from './Dashboard';
 import { IconChart, IconCity, IconDownload, IconPause, IconUpload } from './Icons';
 import { Inspector } from './Inspector';
 import { RoadTypeEditor } from './RoadTypeEditor';
+import { StudioOverlay } from './studio/StudioOverlay';
+import { useStudioRequest } from './studio/studioHost';
 import { Toasts } from './Toasts';
 import { ToolOptions, Toolbar } from './Toolbar';
 import { VehicleEditor } from './VehicleEditor';
@@ -19,6 +22,17 @@ const CONNECTION_KO = {
   reconnecting: { text: '재연결 중…', color: '#fbbf24' },
   offline: { text: '오프라인(단독 모드)', color: '#94a3b8' },
 } as const;
+
+/** Game clock of the simulation, e.g. "07:32 · 1일차". */
+function GameClock() {
+  const clock = useStore((s) => s.simStats?.clock);
+  if (!clock) return null;
+  return (
+    <span className="game-clock" data-clock title="게임 시계 (물리 1초 = 게임 10초)">
+      {formatClock(clock.dayTime)} · {clock.day}일차
+    </span>
+  );
+}
 
 function TopBar() {
   const { store, dispatcher, setName } = useServices();
@@ -75,6 +89,7 @@ function TopBar() {
         </span>
       </button>
       {dashboard && <Dashboard onClose={() => setDashboard(false)} />}
+      <GameClock />
       <div className="spacer" />
       <div className="peers" aria-label="접속자">
         {peers.map((p) => (
@@ -174,6 +189,15 @@ function StatusBar() {
             <span>제거</span>
             <b>{stats?.removed ?? 0}</b>
           </div>
+          {stats?.citizens && (
+            <div className="stat" data-citizens title="시뮬레이션 시민: 집 / 직장·상점 / 보행 / 운전">
+              <span>시민</span>
+              <b>
+                {stats.citizens.total}
+                <small className="muted"> (보행 {stats.citizens.walking} · 운전 {stats.citizens.driving})</small>
+              </b>
+            </div>
+          )}
         </>
       )}
       <div className="sep" />
@@ -276,9 +300,15 @@ function ToolHint() {
   return <div className="panel hint">{hint}</div>;
 }
 
+function StudioHost() {
+  const req = useStudioRequest();
+  return req ? <StudioOverlay key={req.key} req={req} /> : null;
+}
+
 export function App() {
   return (
     <>
+      <StudioHost />
       <TopBar />
       <Toolbar />
       <ToolOptions />

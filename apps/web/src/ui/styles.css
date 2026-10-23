@@ -236,6 +236,16 @@ select:focus {
   flex: 1;
 }
 
+.game-clock {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
 .peers {
   display: flex;
   align-items: center;

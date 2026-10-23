@@ -12,6 +12,7 @@ import {
   polygonsOverlap,
   signedArea,
   type BuildingPart,
+  type BuildingProp,
   type BuildingType,
   type Facade,
   type FacadeStyle,
@@ -23,7 +24,7 @@ import {
 export const FACADE_STYLE_ID: Record<FacadeStyle, number> = { grid: 0, ribbon: 1, curtain: 2, none: 3 };
 export const GROUND_ID: Record<GroundFloor, number> = { none: 0, shop: 1, lobby: 2, pilotis: 3 };
 /** Negative aWall.z flags for non-wall surfaces. */
-export const SURFACE = { roof: -1, solar: -2, green: -3, pad: -4, mark: -5 } as const;
+export const SURFACE = { roof: -1, solar: -2, green: -3, pad: -4, mark: -5, prop: -6 } as const;
 
 const DEFAULT_FACADE: Facade = { style: 'grid', windowRatio: 0.45, ground: 'none' };
 const SOLAR_COLOR = '#1f3a6e';
@@ -351,8 +352,178 @@ function roofCovered(type: Pick<BuildingType, 'parts'>, p: BuildingPart): boolea
   return type.parts.some((q) => q !== p && Math.abs(q.baseHeight - top) < 0.5 && polygonsOverlap(partOutline(p), partOutline(q)));
 }
 
+/**
+ * Props (studio decorations) from primitives with vertex colors. Local frame of a prop: x along the
+ * wall, y up, z out of the wall (wall props start at z = 0) or centred (roof/ground props); rotated
+ * by `rot` quarter turns (local +z → (sin, cos) of rot·90°) and widened by `size`.
+ */
+class PropBaker {
+  private fx = 0;
+  private fz = 1;
+  private s: V3 = [1, 1, 1];
+  private o: V3 = [0, 0, 0];
+
+  constructor(private readonly gb: GeometryBuilder) {}
+
+  begin(p: BuildingProp, wide: boolean): void {
+    const r = ((Math.round(p.rot) % 4) + 4) % 4;
+    this.fx = [0, 1, 0, -1][r]!;
+    this.fz = [1, 0, -1, 0][r]!;
+    this.s = wide ? [p.size, 1, 1] : [p.size, p.size, p.size];
+    this.o = [p.pos.x, p.pos.y, p.pos.z];
+  }
+
+  private pt(l: V3): V3 {
+    const x = l[0] * this.s[0];
+    const z = l[2] * this.s[2];
+    return [this.o[0] + x * this.fz + z * this.fx, this.o[1] + l[1] * this.s[1], this.o[2] - x * this.fx + z * this.fz];
+  }
+
+  private dir(n: V3): V3 {
+    return [n[0] * this.fz + n[2] * this.fx, n[1], -n[0] * this.fx + n[2] * this.fz];
+  }
+
+  /** Convex planar face (local points) facing roughly along `want`. */
+  face(pts: V3[], want: V3): void {
+    const w = this.dir(want);
+    const a = this.pt(pts[0]!);
+    for (let i = 1; i + 1 < pts.length; i++) this.gb.tri(a, this.pt(pts[i]!), this.pt(pts[i + 1]!), w, SURFACE.prop);
+  }
+
+  box(color: string, x0: number, y0: number, z0: number, x1: number, y1: number, z1: number): void {
+    this.gb.color(color);
+    this.face([[x0, y1, z0], [x1, y1, z0], [x1, y1, z1], [x0, y1, z1]], [0, 1, 0]);
+    this.face([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0]);
+    this.face([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1]);
+    this.face([[x0, y0, z0], [x1, y0, z0], [x1, y1, z0], [x0, y1, z0]], [0, 0, -1]);
+    this.face([[x1, y0, z0], [x1, y0, z1], [x1, y1, z1], [x1, y1, z0]], [1, 0, 0]);
+    this.face([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0]);
+  }
+
+  /** Frustum around the local y axis at (cx, cz); r1 = 0 makes a cone. */
+  cyl(color: string, cx: number, cz: number, y0: number, y1: number, r0: number, r1: number, n = 8): void {
+    this.gb.color(color);
+    const ring = (y: number, r: number): V3[] => Array.from({ length: n }, (_, i) => [cx + Math.cos((i / n) * Math.PI * 2) * r, y, cz + Math.sin((i / n) * Math.PI * 2) * r] as V3);
+    const lo = ring(y0, r0);
+    const hi = ring(y1, r1);
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n;
+      const m = ((i + 0.5) / n) * Math.PI * 2;
+      const want: V3 = [Math.cos(m), 0.2, Math.sin(m)];
+      if (r1 > 1e-6) this.face([lo[i]!, lo[j]!, hi[j]!, hi[i]!], want);
+      else this.face([lo[i]!, lo[j]!, hi[0]!], want);
+    }
+    this.face(lo, [0, -1, 0]);
+    if (r1 > 1e-6) this.face(hi, [0, 1, 0]);
+  }
+
+  /** Convex cross-section in (z, y) extruded along local x from x0 to x1. */
+  extrudeX(color: string, section: [number, number][], x0: number, x1: number): void {
+    this.gb.color(color);
+    let cz = 0;
+    let cy = 0;
+    for (const [z, y] of section) {
+      cz += z / section.length;
+      cy += y / section.length;
+    }
+    this.face(section.map(([z, y]) => [x0, y, z] as V3), [-1, 0, 0]);
+    this.face(section.map(([z, y]) => [x1, y, z] as V3), [1, 0, 0]);
+    for (let i = 0; i < section.length; i++) {
+      const [za, ya] = section[i]!;
+      const [zb, yb] = section[(i + 1) % section.length]!;
+      this.face([[x0, ya, za], [x1, ya, za], [x1, yb, zb], [x0, yb, zb]], [0, (ya + yb) / 2 - cy, (za + zb) / 2 - cz]);
+    }
+  }
+}
+
+const PROP_DARK = '#374151';
+const PROP_GREEN = '#4f8a3c';
+const PROP_LIGHT = '#f8fafc';
+/** Props whose `size` widens them only (the rest scale uniformly). */
+const WIDE_PROPS = new Set<BuildingProp['kind']>(['balcony', 'awning', 'sign', 'canopy', 'planter', 'solarPanel', 'bench']);
+
+function bakeProp(pb: PropBaker, p: BuildingProp): void {
+  pb.begin(p, WIDE_PROPS.has(p.kind));
+  const c = p.color;
+  switch (p.kind) {
+    case 'balcony':
+      pb.box(c, -1.6, 0, 0, 1.6, 0.15, 1.2);
+      pb.box(c, -1.6, 0.15, 1.12, 1.6, 1.05, 1.2);
+      pb.box(c, -1.6, 0.15, 0, -1.52, 1.05, 1.12);
+      pb.box(c, 1.52, 0.15, 0, 1.6, 1.05, 1.12);
+      break;
+    case 'awning':
+      pb.extrudeX(c, [[0, 0.62], [0, 0.5], [1.25, 0], [1.25, 0.12]], -1.5, 1.5);
+      break;
+    case 'sign':
+      pb.box(c, -1.2, 0, 0.02, 1.2, 0.9, 0.16);
+      pb.box(PROP_LIGHT, -1.02, 0.14, 0.16, 1.02, 0.76, 0.19);
+      break;
+    case 'ac':
+      pb.box(c, -0.45, 0, 0, 0.45, 0.6, 0.45);
+      pb.box(PROP_DARK, -0.32, 0.1, 0.45, 0.32, 0.5, 0.48);
+      break;
+    case 'canopy':
+      pb.box(c, -1.5, 2.55, 0, 1.5, 2.75, 1.9);
+      pb.box(PROP_DARK, -1.45, 0, 1.72, -1.3, 2.55, 1.87);
+      pb.box(PROP_DARK, 1.3, 0, 1.72, 1.45, 2.55, 1.87);
+      break;
+    case 'antenna':
+      pb.box(PROP_DARK, -0.3, 0, -0.3, 0.3, 0.15, 0.3);
+      pb.cyl(c, 0, 0, 0.15, 4, 0.07, 0.04, 6);
+      pb.box(c, -0.4, 2.8, -0.03, 0.4, 2.86, 0.03);
+      pb.box(c, -0.28, 3.4, -0.03, 0.28, 3.46, 0.03);
+      break;
+    case 'waterTank':
+      for (const [x, z] of [[-0.7, -0.7], [0.7, -0.7], [0.7, 0.7], [-0.7, 0.7]] as const) pb.box('#6b7280', x - 0.07, 0, z - 0.07, x + 0.07, 0.6, z + 0.07);
+      pb.cyl(c, 0, 0, 0.6, 2, 0.95, 0.95, 10);
+      pb.cyl(c, 0, 0, 2, 2.2, 0.95, 0.2, 10);
+      break;
+    case 'chimney':
+      pb.box(c, -0.35, 0, -0.35, 0.35, 1.6, 0.35);
+      pb.box(PROP_DARK, -0.42, 1.6, -0.42, 0.42, 1.75, 0.42);
+      break;
+    case 'planter':
+      pb.box(c, -0.8, 0, -0.4, 0.8, 0.5, 0.4);
+      pb.box(PROP_GREEN, -0.72, 0.5, -0.32, 0.72, 0.62, 0.32);
+      pb.cyl(PROP_GREEN, -0.35, 0, 0.6, 0.9, 0.3, 0.15, 6);
+      pb.cyl(PROP_GREEN, 0.35, 0, 0.6, 0.85, 0.28, 0.12, 6);
+      break;
+    case 'tree':
+      pb.cyl('#6b4f3a', 0, 0, 0, 1.3, 0.15, 0.12, 6);
+      pb.cyl(c, 0, 0, 1.0, 2.6, 0.9, 1.2);
+      pb.cyl(c, 0, 0, 2.6, 4.2, 1.2, 0.15);
+      break;
+    case 'flag':
+      pb.cyl('#d1d5db', -0.6, 0, 0, 4, 0.05, 0.04, 6);
+      pb.box(c, -0.55, 3.2, -0.02, 0.65, 3.9, 0.02);
+      break;
+    case 'solarPanel':
+      pb.box(PROP_DARK, -0.95, 0, 0.45, -0.85, 0.78, 0.55);
+      pb.box(PROP_DARK, 0.85, 0, 0.45, 0.95, 0.78, 0.55);
+      pb.extrudeX(c, [[-0.6, 0.2], [0.6, 0.75], [0.6, 0.82], [-0.6, 0.27]], -1, 1);
+      break;
+    case 'helipad':
+      pb.box(c, -3, 0, -3, 3, 0.15, 3);
+      pb.box('#facc15', -2.7, 0.15, -2.7, 2.7, 0.18, -2.4);
+      pb.box('#facc15', -2.7, 0.15, 2.4, 2.7, 0.18, 2.7);
+      pb.box('#facc15', -2.7, 0.15, -2.4, -2.4, 0.18, 2.4);
+      pb.box('#facc15', 2.4, 0.15, -2.4, 2.7, 0.18, 2.4);
+      pb.box(PROP_LIGHT, -1.1, 0.15, -1.2, -0.7, 0.19, 1.2);
+      pb.box(PROP_LIGHT, 0.7, 0.15, -1.2, 1.1, 0.19, 1.2);
+      pb.box(PROP_LIGHT, -0.7, 0.15, -0.2, 0.7, 0.19, 0.2);
+      break;
+    case 'bench':
+      pb.box(c, -0.8, 0.42, -0.22, 0.8, 0.5, 0.22);
+      pb.box(c, -0.8, 0.5, -0.26, 0.8, 0.9, -0.18);
+      pb.box(PROP_DARK, -0.75, 0, -0.2, -0.65, 0.42, 0.2);
+      pb.box(PROP_DARK, 0.65, 0, -0.2, 0.75, 0.42, 0.2);
+      break;
+  }
+}
+
 /** Bake all volumes of a design into one geometry in the building frame (ground at y = 0). */
-export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart'>): THREE.BufferGeometry {
+export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' | 'props'>): THREE.BufferGeometry {
   const gb = new GeometryBuilder();
   for (const p of type.parts) {
     const f = p.facade ?? DEFAULT_FACADE;
@@ -373,28 +544,40 @@ export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart'>
       pitchedRoof(gb, p, top);
     }
   }
+  if (type.props?.length) {
+    gb.setFacade([3, FACADE_STYLE_ID.none, 0.1, 0]);
+    const pb = new PropBaker(gb);
+    for (const pr of type.props) bakeProp(pb, pr);
+  }
   return gb.build();
 }
 
 /** Shared material for baked building geometry: vertex colors plus the facade shader. */
 export function createBuildingMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.02 });
-  mat.customProgramCacheKey = () => 'smartcity-building-v2';
+  mat.customProgramCacheKey = () => 'smartcity-building-v3';
+  // uNight (0..1) is shared by reference; set `material.userData.uNight.value` each frame.
+  const uNight = { value: 0 };
+  mat.userData.uNight = uNight;
   mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uNight = uNight;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
         `#include <common>
         attribute vec3 aWall;
         attribute vec4 aFacade;
+        attribute float aOccupancy;
         varying vec3 vWall;
-        varying vec4 vFacade;`,
+        varying vec4 vFacade;
+        varying float vOcc;`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         vWall = aWall;
-        vFacade = aFacade;`,
+        vFacade = aFacade;
+        vOcc = aOccupancy;`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -402,12 +585,15 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         `#include <common>
         varying vec3 vWall;
         varying vec4 vFacade;
+        varying float vOcc;
+        uniform float uNight;
         float bHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }`,
       )
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
         float glassMask = 0.0;
+        vec3 winGlow = vec3(0.0);
         // Derivatives must be taken in uniform control flow (outside the branches below).
         // Whole number of window bays per wall; the small bias keeps lengths like 24 m / 3.2 m = 7.5
         // from flipping between 7 and 8 bays from pixel to pixel.
@@ -474,6 +660,10 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
           float slabLine = (1.0 - step(0.035, inFloor)) * step(0.5, v) * (style == 3 ? 0.5 : 1.0);
           diffuseColor.rgb = mix(wallC, glassC, win) * (1.0 - slabLine * 0.12);
           glassMask = win;
+          // Night: a share of the windows proportional to the building's occupancy glows warm.
+          float litP = vOcc > 0.0 ? 0.2 + 0.8 * vOcc : 0.0;
+          float lit = mix(step(bHash(vec2(floorIdx * 1.7 + 3.1, bayIdx * 2.3 + L)), litP), litP, blur);
+          winGlow = vec3(1.0, 0.76, 0.42) * (0.55 + 0.45 * rnd) * win * lit * uNight;
         } else if (vWall.z < -1.5 && vWall.z > -2.5) {
           vec2 cell = fract(vWall.xy / vec2(1.0, 0.65));
           float line = clamp(step(cell.x, 0.05) + step(cell.y, 0.06), 0.0, 1.0);
@@ -488,6 +678,11 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         '#include <roughnessmap_fragment>',
         `#include <roughnessmap_fragment>
         roughnessFactor = mix(roughnessFactor, 0.25, glassMask);`,
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+        totalEmissiveRadiance += winGlow * 1.1;`,
       );
   };
   return mat;

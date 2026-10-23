@@ -8,14 +8,16 @@ import type { SimulationStream } from '../sim/simStream';
 import type { GroundPan, ToolPreview } from '../tools/types';
 import { BuildingLayer } from './buildings';
 import { createCityCamera, type CityCamera } from './camera';
+import { computeDayNight, createDayNightState, NOON } from './dayNight';
 import { createGround, type Ground } from './ground';
 import { OverlayLayer } from './overlays';
+import { PedestrianLayer } from './pedestrians';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
-import { RoadLayer } from './roads';
-import { SignalLayer } from './signals';
+import { RoadLayer, Y_WALK } from './roads';
+import { PedSignalLayer, SignalLayer } from './signals';
 import { VehicleLayer } from './vehicles';
 
-const ROAD_COMMANDS = new Set<Command['type']>(['node.add', 'node.move', 'segment.add', 'segment.remove', 'segment.split', 'segment.setType', 'roadType.upsert', 'closure.set', 'closure.remove', 'intersection.set', 'intersection.reset']);
+const ROAD_COMMANDS = new Set<Command['type']>(['node.add', 'node.move', 'segment.add', 'segment.remove', 'segment.split', 'segment.setType', 'roadType.upsert', 'closure.set', 'closure.remove', 'intersection.set', 'intersection.reset', 'feature.upsert', 'feature.remove', 'segment.setSchoolZone']);
 const BUILDING_COMMANDS = new Set<Command['type']>(['building.place', 'building.remove', 'building.move', 'buildingType.upsert', 'buildingType.remove']);
 const VEHICLE_COMMANDS = new Set<Command['type']>(['vehicleType.upsert', 'vehicleType.remove']);
 
@@ -23,7 +25,8 @@ const _ray = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
 const _hit = new THREE.Vector3();
 const _plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-const _sunOffset = new THREE.Vector3(-260, 420, 180);
+const SUN_DISTANCE = 520;
+const _sunOffset = new THREE.Vector3();
 const _target = new THREE.Vector3();
 const _panHit = new THREE.Vector3();
 
@@ -36,12 +39,16 @@ export class CityRenderer {
   readonly scene = new THREE.Scene();
   readonly cam: CityCamera;
   private sun: THREE.DirectionalLight;
+  private hemi: THREE.HemisphereLight;
+  private readonly dayNight = createDayNightState();
   private roads = new RoadLayer();
   private buildings = new BuildingLayer();
   private vehicles: VehicleLayer;
   private signals: SignalLayer;
+  private pedestrians: PedestrianLayer;
+  private pedSignals: PedSignalLayer;
   private overlays: OverlayLayer;
-  private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), graph: null };
+  private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
   private dirty = { roads: true, buildings: true, vehicleTypes: true };
   private raf = 0;
   private last = performance.now();
@@ -60,7 +67,7 @@ export class CityRenderer {
     private readonly container: HTMLElement,
     labelRoot: HTMLElement,
     private readonly store: ClientStore,
-    stream: SimulationStream,
+    private readonly stream: SimulationStream,
   ) {
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -78,8 +85,8 @@ export class CityRenderer {
     this.scene.background = sky;
     this.scene.fog = new THREE.Fog(sky, 1400, 5200);
 
-    const hemi = new THREE.HemisphereLight('#dbeafe', '#56603f', 1.25);
-    this.scene.add(hemi);
+    this.hemi = new THREE.HemisphereLight('#dbeafe', '#56603f', 1.25);
+    this.scene.add(this.hemi);
     this.sun = new THREE.DirectionalLight('#fff3dd', 2.2);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
@@ -94,8 +101,10 @@ export class CityRenderer {
 
     this.vehicles = new VehicleLayer(stream);
     this.signals = new SignalLayer(stream);
+    this.pedestrians = new PedestrianLayer(stream);
+    this.pedSignals = new PedSignalLayer(stream);
     this.overlays = new OverlayLayer(store, stream, labelRoot, () => this.network);
-    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.signals.group, this.overlays.group);
+    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group);
 
     this.unsubs.push(
       store.onApplied((cmd) => {
@@ -187,6 +196,7 @@ export class CityRenderer {
       this.dirty.roads = false;
       this.network = buildRoadNetwork(s.doc);
       this.roads.update(this.network);
+      this.pedSignals.setCrossings(this.network.crossings);
     }
     if (this.dirty.buildings) {
       this.dirty.buildings = false;
@@ -208,6 +218,7 @@ export class CityRenderer {
     // Shadow frustum follows the camera target and scales with zoom.
     this.cam.controls.getTarget(_target);
     const d = Math.min(900, Math.max(120, this.cam.controls.distance * 0.9));
+    _sunOffset.copy(this.dayNight.lightDir).multiplyScalar(SUN_DISTANCE);
     this.sun.position.copy(_target).add(_sunOffset);
     this.sun.target.position.copy(_target);
     const sc = this.sun.shadow.camera;
@@ -222,6 +233,19 @@ export class CityRenderer {
     }
   }
 
+  /** Sun, sky, fog and window lights from the simulation's game clock (noon when it reports none). */
+  private applyDayNight(): void {
+    const dn = computeDayNight(this.stream.latest()?.stats.clock?.dayTime ?? NOON, this.dayNight);
+    this.sun.color.copy(dn.lightColor);
+    this.sun.intensity = dn.lightIntensity;
+    this.hemi.color.copy(dn.hemiSky);
+    this.hemi.groundColor.copy(dn.hemiGround);
+    this.hemi.intensity = dn.hemiIntensity;
+    (this.scene.background as THREE.Color).copy(dn.sky);
+    (this.scene.fog as THREE.Fog).color.copy(dn.sky);
+    this.buildings.setNight(dn.night);
+  }
+
   private frame = (): void => {
     this.raf = requestAnimationFrame(this.frame);
     const now = performance.now();
@@ -230,10 +254,14 @@ export class CityRenderer {
     this.syncScene();
     this.ground.setStep(this.store.getState().toolOptions.snapStep);
     this.cam.update(dt);
+    this.applyDayNight();
     this.updateSun();
     const s = this.store.getState();
     this.vehicles.update(now, s.doc);
+    this.pedestrians.update(now, this.cam.controls.distance);
+    this.buildings.setOccupancy(this.stream.latest());
     this.signals.update();
+    this.pedSignals.update(now, Y_WALK);
     this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.renderer.render(this.scene, this.cam.camera);
@@ -258,6 +286,7 @@ export class CityRenderer {
     this.resizeObserver.disconnect();
     this.cam.dispose();
     this.roads.dispose();
+    this.pedestrians.dispose();
     this.renderer.dispose();
   }
 }

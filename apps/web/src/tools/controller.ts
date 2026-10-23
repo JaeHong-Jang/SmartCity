@@ -12,11 +12,12 @@ import { ParcelTool } from './parcelTool';
 import { Picker } from './picking';
 import { RoadTool } from './roadTool';
 import { SelectTool } from './selectTool';
+import { StreetTool } from './streetTool';
 import { CLICK_SLOP_PX } from './gesture';
 import { nextSnapStep, snapLabel } from './snap';
 import type { GroundPan, Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
-export const TOOL_KEYS: Record<string, ToolId> = { '1': 'select', '2': 'road', '3': 'building', '4': 'bulldoze', '5': 'busLine', '6': 'closure', '7': 'parcel' };
+export const TOOL_KEYS: Record<string, ToolId> = { '1': 'select', '2': 'road', '3': 'building', '4': 'bulldoze', '5': 'busLine', '6': 'closure', '7': 'parcel', '8': 'street' };
 const PRESENCE_MS = 1000 / 15;
 /** Keys whose keyup the tools need (modifier state, rotation batching). */
 const KEYUP_CODES = new Set(['ShiftLeft', 'ShiftRight', 'BracketLeft', 'BracketRight']);
@@ -46,6 +47,7 @@ export class ToolController {
   private unsub: () => void;
   private lastDocVersion: number;
   private lastSnap: number;
+  private lastStreetMode: string;
 
   constructor(
     private readonly store: ClientStore,
@@ -76,10 +78,12 @@ export class ToolController {
       busLine: new BusLineTool(ctx, index),
       closure: new ClosureTool(ctx, index),
       parcel: new ParcelTool(ctx),
+      street: new StreetTool(ctx, index),
     };
     this.active = this.tools[store.getState().tool];
     this.lastDocVersion = store.getState().docVersion;
     this.lastSnap = store.getState().toolOptions.snapStep;
+    this.lastStreetMode = store.getState().toolOptions.streetMode;
 
     dom.addEventListener('pointerdown', this.down);
     dom.addEventListener('pointermove', this.move);
@@ -103,9 +107,10 @@ export class ToolController {
       if (this.lastPointer) this.active.onPointerMove(this.lastPointer);
       this.onPreview(this.active.preview());
     }
-    if (s.docVersion !== this.lastDocVersion || s.toolOptions.snapStep !== this.lastSnap) {
+    if (s.docVersion !== this.lastDocVersion || s.toolOptions.snapStep !== this.lastSnap || s.toolOptions.streetMode !== this.lastStreetMode) {
       this.lastDocVersion = s.docVersion;
       this.lastSnap = s.toolOptions.snapStep;
+      this.lastStreetMode = s.toolOptions.streetMode;
       // The doc or the snap step changed under the cursor: refresh snapping and validity.
       if (this.lastPointer) this.active.onPointerMove(this.lastPointer);
     }
@@ -157,7 +162,7 @@ export class ToolController {
       const moved = Math.hypot(e.clientX - this.rightDown.x, e.clientY - this.rightDown.y);
       this.rightDown = null;
       // A right click without dragging cancels; a drag pans the camera.
-      if (moved < CLICK_SLOP_PX) this.active.cancel();
+      if (moved < CLICK_SLOP_PX && !this.active.onSecondaryClick?.()) this.active.cancel();
       return;
     }
     if (this.dom.hasPointerCapture?.(e.pointerId)) this.dom.releasePointerCapture(e.pointerId);

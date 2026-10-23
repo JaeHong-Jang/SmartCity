@@ -15,10 +15,11 @@ describe('compileNetwork', () => {
     const f0 = g.lanes[g.laneById.get('W|f|0')!]!;
     expect(f0.fromNode).toBe('w');
     expect(f0.toNode).toBe('c');
-    // Trimmed by the junction setback at c (max half width 9.5 + 1) and nothing at the dead end.
+    // Trimmed by the junction setback at c (max half width 9.5 + 1) plus the 4 m crosswalk zone, nothing at the dead end.
     expect(seg.setbackB).toBeCloseTo(10.5);
     expect(seg.setbackA).toBe(0);
-    expect(f0.length).toBeCloseTo(120 - 10.5, 1);
+    expect(seg.laneStartB).toBeCloseTo(14.5);
+    expect(f0.length).toBeCloseTo(120 - 14.5, 1);
   });
 
   it('one-way roads only get forward lanes', () => {

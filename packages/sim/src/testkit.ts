@@ -91,3 +91,135 @@ export function checkInvariants(sim: Simulation): string[] {
   }
   return problems;
 }
+
+/** Straight road `a` → `b` (forward = +x) of the given length, both ends dead ends. Segment id `ab`. */
+export function lineDoc(length: number, roadTypeId = 'road-2', cmds: Command[] = []): CityDoc {
+  const doc = createEmptyDoc('line', 5);
+  return apply(doc, [
+    { type: 'node.add', node: { id: 'a', pos: { x: 0, z: 0 } } },
+    { type: 'node.add', node: { id: 'b', pos: { x: length, z: 0 } } },
+    { type: 'segment.add', segment: { id: 'ab', a: 'a', b: 'b', roadTypeId } },
+    ...cmds,
+  ]);
+}
+
+/**
+ * Conflict-zone checks (ADR 0008 §3): (0) every vehicle's route history covers its whole body,
+ * (1) every vehicle body inside a zone passage holds that zone,
+ * (2) holder counts match the vehicles' reservations, (3) no zone has a vehicle body and a pedestrian on
+ * its crossing at the same time, (4) pedestrian holder counts match the pedestrians' grants.
+ */
+export function checkZoneInvariants(sim: Simulation): string[] {
+  const w = internals(sim);
+  const net = w.net;
+  const nLanes = net.nLanes;
+  const nz = w.graph.crossings.length;
+  const problems: string[] = [];
+  const vehIn = new Int32Array(nz);
+  for (const v of w.vehicles) {
+    // The route history must reach back to the tail; otherwise a body over a zone could go unseen.
+    let covered = v.s;
+    for (let j = v.ri - 1; j >= 0 && covered < v.len - 1e-6; j--) covered += net.len[v.route[j]!]!;
+    if (covered < v.len - 1e-6) problems.push(`vehicle ${v.id}: body extends ${(v.len - covered).toFixed(2)} m past its route history`);
+    let front = v.s;
+    for (let j = v.ri; j >= 0; j--) {
+      const e = v.route[j]!;
+      if (j < v.ri) front += net.len[e]!;
+      if (j < v.ri && front - v.len >= net.len[e]!) break;
+      const list = e < nLanes ? w.zones.lane[e]! : w.zones.conn[e - nLanes]!;
+      for (const p of list) {
+        if (front <= p.enterS + 1e-6 || front - v.len >= p.exitS - 1e-6) continue;
+        vehIn[p.z]!++;
+        if (!v.zones.some((h) => h.z === p.z)) problems.push(`vehicle ${v.id} inside zone ${p.z} without a reservation`);
+      }
+    }
+  }
+  const held = new Int32Array(nz);
+  for (const v of w.vehicles) for (const h of v.zones) held[h.z]!++;
+  for (let z = 0; z < nz; z++) if (held[z] !== w.zs.veh[z]) problems.push(`zone ${z}: vehicle holders ${w.zs.veh[z]} but ${held[z]} reservations`);
+  const pedOn = pedestriansOnCrossings(sim);
+  const pedHeld = new Int32Array(nz);
+  const p = w.peds;
+  if (p) for (let i = 0; i < p.hi; i++) if (p.alive[i] && p.grant[i]! >= 0) pedHeld[p.grant[i]!]!++;
+  for (let z = 0; z < nz; z++) {
+    if (pedHeld[z] !== w.zs.ped[z]) problems.push(`zone ${z}: pedestrian holders ${w.zs.ped[z]} but ${pedHeld[z]} grants`);
+    if (pedOn[z]! > 0 && vehIn[z]! > 0) problems.push(`zone ${z} (${w.graph.crossings[z]!.id}): ${vehIn[z]} vehicle bodies and ${pedOn[z]} pedestrians at once`);
+    if (pedOn[z]! > 0 && w.zs.veh[z]! > 0) problems.push(`zone ${z}: pedestrians on it while vehicles hold it`);
+  }
+  return problems;
+}
+
+/** Pedestrians physically on each crossing edge. */
+export function pedestriansOnCrossings(sim: Simulation): Int32Array {
+  const w = internals(sim);
+  const out = new Int32Array(w.graph.crossings.length);
+  const p = w.peds;
+  if (!p) return out;
+  for (let i = 0; i < p.hi; i++) {
+    if (!p.alive[i] || p.edge[i]! < 0) continue;
+    const z = w.ped.pg.crossing[p.edge[i]!]!;
+    if (z >= 0) out[z]!++;
+  }
+  return out;
+}
+
+/**
+ * Citizen bookkeeping: per-state counts match the citizens, their sum is the total, every outdoor citizen
+ * owns exactly one live pedestrian or car (and nothing else does), indoor citizens are in an existing building.
+ */
+export function checkCitizenInvariants(sim: Simulation): string[] {
+  const w = internals(sim);
+  const cz = w.cz;
+  const p = w.peds;
+  const problems: string[] = [];
+  const counts = new Int32Array(cz.counts.length);
+  let n = 0;
+  const pedOwner = new Map<number, number>();
+  for (const c of cz.slots) {
+    if (!c) continue;
+    n++;
+    counts[c.state]!++;
+    const indoor = c.state === 0 || c.state === 5 || c.state === 6;
+    if (indoor) {
+      if (c.at === null || !w.doc.buildings[c.at]) problems.push(`citizen ${c.id} indoors in a missing building`);
+      if (c.ped >= 0 || c.car) problems.push(`citizen ${c.id} indoors with a pedestrian or car`);
+    } else if (c.state === 3) {
+      if (!c.car || !c.car.alive || c.car.person !== c.slot || c.ped >= 0) problems.push(`citizen ${c.id} driving without its car`);
+    } else {
+      if (c.ped < 0 || !p.alive[c.ped] || p.owner[c.ped] !== c.slot || p.pid[c.ped] !== c.id) problems.push(`citizen ${c.id} outdoors without its pedestrian`);
+      if (c.car) problems.push(`citizen ${c.id} walking with a car`);
+      pedOwner.set(c.ped, c.slot);
+    }
+  }
+  if (n !== cz.count) problems.push(`count ${cz.count} but ${n} citizens`);
+  let sum = 0;
+  for (let s = 0; s < counts.length; s++) {
+    sum += cz.counts[s]!;
+    if (counts[s] !== cz.counts[s]) problems.push(`state ${s}: counted ${cz.counts[s]} but ${counts[s]} citizens`);
+  }
+  if (sum !== cz.count) problems.push(`state sum ${sum} != total ${cz.count}`);
+  const st = sim.stats().citizens;
+  if (st.home + st.atWork + st.walking + st.driving + st.waitingBus + st.riding !== st.total) problems.push('stats.citizens does not add up');
+  for (let i = 0; i < p.hi; i++) if (p.alive[i] && p.owner[i]! >= 0 && pedOwner.get(i) !== p.owner[i]) problems.push(`pedestrian ${i} owned by citizen slot ${p.owner[i]} that does not own it`);
+  for (const v of w.vehicles) if (v.person >= 0 && cz.slots[v.person]?.car !== v) problems.push(`vehicle ${v.id} linked to a citizen that does not drive it`);
+  let alive = 0;
+  for (let i = 0; i < p.hi; i++) if (p.alive[i]) alive++;
+  if (alive !== p.count) problems.push(`pedestrian count ${p.count} but ${alive} alive`);
+  return problems;
+}
+
+/** 3 × 3 grid (spacing m, road-2) with homes, offices and shops placed inside the blocks. */
+export function cityDoc(spacing = 150, seed = 7): CityDoc {
+  const doc = gridDoc(3, spacing, 'road-2', seed);
+  const h = spacing;
+  const place = (id: string, typeId: string, x: number, z: number): Command => ({ type: 'building.place', building: { id, typeId, pos: { x, z }, rotation: 0 } });
+  return apply(doc, [
+    place('apt1', 'apartment', -h / 2, -h + 20),
+    place('apt2', 'apartment', -h / 2, h - 20),
+    place('house1', 'house', -h + 15, -h / 2),
+    place('house2', 'house', h - 15, h / 2),
+    place('office1', 'office-tower', h / 2, -h / 2),
+    place('shop1', 'shop', h / 2, h - 15),
+    place('shop2', 'shop', -15, 15),
+  ]);
+}

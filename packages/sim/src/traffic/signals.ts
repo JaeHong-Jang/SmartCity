@@ -1,12 +1,23 @@
 // Fixed-time signals. The state is a pure function of the tick (no drift, survives recompiles).
+// Pedestrian heads (ADR 0008 §3): a junction crossing on leg L shows WALK for 7 s from the start of every
+// green phase in which L's entry lanes are red and no green straight connector passes L's zone, then
+// CLEARANCE for ⌈length / 1.0 m/s⌉ s, then RED. Phase greens are stretched to max(green, 7 + clearance −
+// yellow). Signalized mid-block crossings run their own cycle: vehicles green 30 s, yellow 3 s, WALK 7 s +
+// CLEARANCE.
 
-import type { CityDoc, SegmentId, SignalPhase } from '@smartcity/shared';
+import { pointAtLength, tangentAtLength, type CityDoc, type SegmentId, type SignalPhase } from '@smartcity/shared';
+import type { ZoneIndex } from '../network/crossings.js';
 import type { Net } from '../network/net.js';
-import type { SignalColor, SignalView } from '../types.js';
+import { PedSignal, type SignalColor, type SignalView } from '../types.js';
 
 export const DEFAULT_GREEN = 20;
 export const DEFAULT_YELLOW = 3;
 export const DEFAULT_ALL_RED = 2;
+export const PED_WALK = 7;
+/** Design walking speed for the clearance interval, m/s. */
+export const PED_DESIGN_SPEED = 1;
+export const MID_GREEN = 30;
+export const MID_YELLOW = 3;
 
 interface Interval {
   phase: number;
@@ -22,6 +33,15 @@ export interface SignalHead {
   heading: number;
 }
 
+export interface PedHead {
+  /** Crossing index. */
+  ci: number;
+  /** Per phase: WALK starts with this phase's green. */
+  walks: boolean[];
+  walk: number;
+  clearance: number;
+}
+
 export interface SignalPlan {
   nodeId: string;
   phases: SignalPhase[];
@@ -31,9 +51,30 @@ export interface SignalPlan {
   heads: SignalHead[];
   /** Per head: the approach segment it controls. */
   headSeg: SegmentId[];
+  /** Per phase: cycle tick where its green starts. */
+  phaseStart: number[];
+  peds: PedHead[];
   /** Current state, updated by updateSignals. */
   cur: number;
   remaining: number;
+}
+
+/** Signalized mid-block crossing: fixed cycle green → yellow → red (WALK, CLEARANCE). */
+export interface MidSignal {
+  ci: number;
+  green: number;
+  yellow: number;
+  walk: number;
+  clearance: number;
+  cycle: number;
+  /** One head per lane crossing it, at the stop line. */
+  heads: SignalHead[];
+  color: SignalColor;
+}
+
+export interface SignalSet {
+  plans: SignalPlan[];
+  mids: MidSignal[];
 }
 
 /** Approaches of a node = segments with lanes entering it, with their outward angle. */
@@ -82,15 +123,25 @@ function autoPhases(list: { seg: SegmentId; angle: number }[]): SegmentId[][] {
   return sorted.map((a) => [a.seg]);
 }
 
-export function buildSignals(doc: CityDoc, net: Net, tickRate: number): SignalPlan[] {
+export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate: number): SignalSet {
   const plans: SignalPlan[] = [];
+  const g = net.graph;
+  const ticks = (sec: number): number => Math.max(0, Math.round(sec * tickRate));
+  const clearanceOf = (ci: number): number => Math.ceil(zones.length[ci]! / PED_DESIGN_SPEED);
+  const crossingsAt = new Map<string, number[]>();
+  for (const cr of g.crossings) {
+    if (cr.kind !== 'junction') continue;
+    const l = crossingsAt.get(cr.nodeId!);
+    if (l) l.push(cr.index);
+    else crossingsAt.set(cr.nodeId!, [cr.index]);
+  }
   for (let ni = 0; ni < net.nodeIds.length; ni++) {
     if (!net.nodeSignalized[ni]) continue;
     const nodeId = net.nodeIds[ni]!;
     const ctrl = doc.intersections[nodeId];
     const apps = approaches(net, nodeId);
     if (apps.length === 0) continue;
-    const atNode = new Set(net.graph.nodes.get(nodeId)!.segments);
+    const atNode = new Set(g.nodes.get(nodeId)!.segments);
     let phases: SignalPhase[] = [];
     if (ctrl?.phases) {
       for (const ph of ctrl.phases) {
@@ -105,12 +156,32 @@ export function buildSignals(doc: CityDoc, net: Net, tickRate: number): SignalPl
     if (phases.length === 0) phases = autoPhases(apps).map((a) => ({ approaches: a, green: DEFAULT_GREEN }));
     const yellow = ctrl ? ctrl.yellow : DEFAULT_YELLOW;
     const allRed = ctrl ? ctrl.allRed : DEFAULT_ALL_RED;
-    const ticks = (sec: number): number => Math.max(0, Math.round(sec * tickRate));
+    // Pedestrian heads: walk with a phase where the leg is red and no green straight movement crosses it.
+    const peds: PedHead[] = [];
+    for (const ci of crossingsAt.get(nodeId) ?? []) {
+      const leg = g.crossings[ci]!.segmentId;
+      const passes = (k: number): boolean => {
+        const green = phases[k]!.approaches;
+        for (const p of zones.byZone[ci]!) {
+          const c = g.connectors[p.edge - net.nLanes]!;
+          if (c.turn === 'straight' && green.includes(g.lanes[c.fromLane]!.segmentId)) return true;
+        }
+        return false;
+      };
+      let walks = phases.map((ph, k) => !ph.approaches.includes(leg) && !passes(k));
+      // Custom phases may leave no such phase: fall back to "leg red".
+      if (!walks.some(Boolean)) walks = phases.map((ph) => !ph.approaches.includes(leg));
+      peds.push({ ci, walks, walk: ticks(PED_WALK), clearance: ticks(clearanceOf(ci)) });
+    }
     const intervals: Interval[] = [];
+    const phaseStart: number[] = [];
     let t = 0;
     phases.forEach((ph, i) => {
+      let green = ph.green;
+      for (const p of peds) if (p.walks[i]) green = Math.max(green, PED_WALK + clearanceOf(p.ci) - yellow);
+      phaseStart.push(t);
       const parts: [Interval['color'], number][] = [
-        ['green', Math.max(1, ticks(ph.green))],
+        ['green', Math.max(1, ticks(green))],
         ['yellow', ticks(yellow)],
         ['allRed', ticks(allRed)],
       ];
@@ -124,20 +195,40 @@ export function buildSignals(doc: CityDoc, net: Net, tickRate: number): SignalPl
     const headSeg: SegmentId[] = [];
     for (const ap of apps)
       for (const l of ap.lanes) {
-        const p = net.graph.lanes[l]!.points;
+        const p = g.lanes[l]!.points;
         const end = p[p.length - 1]!;
         const prev = p[p.length - 2]!;
         heads.push({ lane: l, x: end.x, z: end.z, heading: Math.atan2(end.z - prev.z, end.x - prev.x) });
         headSeg.push(ap.seg);
       }
-    plans.push({ nodeId, phases, intervals, cycle: t, offset: ticks(ctrl?.offset ?? 0), heads, headSeg, cur: 0, remaining: 0 });
+    plans.push({ nodeId, phases, intervals, cycle: t, offset: ticks(ctrl?.offset ?? 0), heads, headSeg, phaseStart, peds, cur: 0, remaining: 0 });
   }
-  return plans;
+  const mids: MidSignal[] = [];
+  for (const cr of g.crossings) {
+    if (cr.kind !== 'midblock' || !cr.signal) continue;
+    const heads: SignalHead[] = [];
+    for (const { edge, p } of zones.byZone[cr.index]!) {
+      const l = g.lanes[edge]!;
+      const pos = pointAtLength(l.points, l.cum, p.enterS);
+      const tan = tangentAtLength(l.points, l.cum, Math.max(1e-6, p.enterS));
+      heads.push({ lane: edge, x: pos.x, z: pos.z, heading: Math.atan2(tan.z, tan.x) });
+    }
+    const green = ticks(MID_GREEN);
+    const yellow = ticks(MID_YELLOW);
+    const walk = ticks(PED_WALK);
+    const clearance = ticks(clearanceOf(cr.index));
+    mids.push({ ci: cr.index, green, yellow, walk, clearance, cycle: green + yellow + walk + clearance, heads, color: 'green' });
+  }
+  return { plans, mids };
 }
 
-/** Sets laneGreen for every lane entering a signalized node; other lanes stay 1. */
-export function updateSignals(plans: SignalPlan[], tick: number, laneGreen: Uint8Array): void {
-  for (const p of plans) {
+/**
+ * Sets laneGreen for every lane entering a signalized node (other lanes stay 1), the pedestrian signal of
+ * every signalized crossing (others keep PedSignal.none) and the vehicle color of mid-block signals
+ * (`midColor`, 2 = green also for crossings without a signal).
+ */
+export function updateSignals(set: SignalSet, tick: number, laneGreen: Uint8Array, pedSig: Uint8Array, midColor: Uint8Array): void {
+  for (const p of set.plans) {
     const tc = (tick + p.offset) % p.cycle;
     let i = 0;
     while (i < p.intervals.length - 1 && tc >= p.intervals[i]!.end) i++;
@@ -146,6 +237,21 @@ export function updateSignals(plans: SignalPlan[], tick: number, laneGreen: Uint
     const iv = p.intervals[i]!;
     const green = iv.color === 'green' ? p.phases[iv.phase]!.approaches : null;
     for (let h = 0; h < p.heads.length; h++) laneGreen[p.heads[h]!.lane] = green && green.includes(p.headSeg[h]!) ? 1 : 0;
+    for (const ph of p.peds) {
+      let sig: number = PedSignal.red;
+      if (ph.walks[iv.phase]) {
+        const el = tc - p.phaseStart[iv.phase]!;
+        sig = el < ph.walk ? PedSignal.walk : el < ph.walk + ph.clearance ? PedSignal.clearance : PedSignal.red;
+      }
+      pedSig[ph.ci] = sig;
+    }
+  }
+  for (const m of set.mids) {
+    const tc = tick % m.cycle;
+    m.color = tc < m.green ? 'green' : tc < m.green + m.yellow ? 'yellow' : 'red';
+    midColor[m.ci] = m.color === 'green' ? 2 : m.color === 'yellow' ? 1 : 0;
+    const el = tc - m.green - m.yellow;
+    pedSig[m.ci] = el < 0 ? PedSignal.red : el < m.walk ? PedSignal.walk : PedSignal.clearance;
   }
 }
 

@@ -2,6 +2,7 @@
 // runs it on untrusted input), and leaves the doc untouched when a command fails.
 
 import type { Command } from './commands.js';
+import { PROP_KINDS } from './model.js';
 import {
   bounds,
   boundsOverlap,
@@ -25,6 +26,7 @@ import type {
   CityDoc,
   IntersectionControl,
   Parcel,
+  RoadFeature,
   RoadSegment,
   RoadType,
   SegmentId,
@@ -39,7 +41,13 @@ export const LIMITS = {
   segments: 50_000,
   buildings: 100_000,
   buildingTypes: 2_000,
-  buildingParts: 16,
+  buildingParts: 48,
+  buildingProps: 64,
+  features: 50_000,
+  /** Point features keep this far (m, arc length) from the segment ends: the junction is there. */
+  featureEndClearance: 12,
+  /** Minimum distance between two point features on one segment, m. */
+  featureSpacing: 6,
   vehicleParts: 24,
   vehicleTypes: 500,
   roadTypes: 200,
@@ -270,6 +278,33 @@ function validateBuildingType(bt: BuildingType): void {
       }
     }
   }
+  if (bt.props !== undefined) {
+    if (!Array.isArray(bt.props) || bt.props.length > LIMITS.buildingProps) fail('invalid building props');
+    // Props hang on the building: within 2 m of its plan extent and at most 6 m above its top.
+    let x0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let z1 = -Infinity;
+    let top = 0;
+    for (const p of bt.parts) {
+      for (const v of partOutline(p)) {
+        x0 = Math.min(x0, v.x);
+        z0 = Math.min(z0, v.z);
+        x1 = Math.max(x1, v.x);
+        z1 = Math.max(z1, v.z);
+      }
+      top = Math.max(top, p.baseHeight + p.floors * p.floorHeight);
+    }
+    for (const pr of bt.props) {
+      if (!(PROP_KINDS as readonly string[]).includes(pr?.kind)) fail('invalid prop kind');
+      checkNum(pr.pos?.x, x0 - 2, x1 + 2, 'prop.pos.x');
+      checkNum(pr.pos.y, 0, top + 6, 'prop.pos.y');
+      checkNum(pr.pos.z, z0 - 2, z1 + 2, 'prop.pos.z');
+      checkInt(pr.rot, 0, 3, 'prop.rot');
+      checkNum(pr.size, 0.5, 4, 'prop.size');
+      checkColor(pr.color, 'prop');
+    }
+  }
   if (bt.smart !== undefined) {
     const m = bt.smart;
     checkNum(m?.solarRoof, 0, 1, 'solarRoof');
@@ -361,7 +396,12 @@ function validateVehicleType(vt: VehicleType): void {
 function validateControl(doc: CityDoc, c: IntersectionControl): void {
   checkId(c.nodeId, 'node');
   if (!has(doc.nodes, c.nodeId)) fail('unknown node');
-  if (c.kind !== 'signal' && c.kind !== 'uncontrolled') fail('invalid intersection kind');
+  if (c.kind !== 'signal' && c.kind !== 'uncontrolled' && c.kind !== 'allStop') fail('invalid intersection kind');
+  if (c.crosswalkLegs !== undefined) {
+    if (!Array.isArray(c.crosswalkLegs) || c.crosswalkLegs.length > 16) fail('invalid crosswalk legs');
+    const atNode = new Set(segmentsAtNode(doc, c.nodeId).map((s) => s.id));
+    for (const leg of c.crosswalkLegs) if (!atNode.has(leg)) fail('crosswalk leg is not connected to this node');
+  }
   checkNum(c.yellow, 0, 10, 'yellow');
   checkNum(c.allRed, 0, 10, 'allRed');
   checkNum(c.offset, 0, 600, 'offset');
@@ -422,6 +462,7 @@ function cleanVehicleType(vt: VehicleType): VehicleType {
 function cleanControl(c: IntersectionControl): IntersectionControl {
   const out: IntersectionControl = { nodeId: c.nodeId, kind: c.kind, yellow: c.yellow, allRed: c.allRed, offset: c.offset };
   if (c.phases) out.phases = c.phases.map((p) => ({ approaches: p.approaches.slice(), green: p.green }));
+  if (c.crosswalkLegs !== undefined) out.crosswalkLegs = [...new Set(c.crosswalkLegs)].sort();
   return out;
 }
 
@@ -445,6 +486,8 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       tx.set(doc.nodes, n.id, { id: n.id, pos: { x: cmd.pos.x, z: cmd.pos.z } });
       for (const s of segmentsAtNode(doc, n.id)) checkSegmentShape(doc, s);
       checkNoNewCrossings(doc, n.id);
+      // Moving a node stretches its roads: features that no longer fit are removed with the move.
+      for (const s of segmentsAtNode(doc, n.id)) pruneFeatures(doc, s.id, tx);
       return;
     }
     case 'segment.add': {
@@ -461,6 +504,8 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       }
       const seg: RoadSegment = { id: s.id, a: s.a, b: s.b, roadTypeId: s.roadTypeId };
       if (s.control) seg.control = { x: s.control.x, z: s.control.z };
+      if (s.schoolZone !== undefined && typeof s.schoolZone !== 'boolean') fail('invalid schoolZone flag');
+      if (s.schoolZone) seg.schoolZone = true;
       checkSegmentShape(doc, seg);
       tx.set(doc.segments, seg.id, seg);
       return;
@@ -480,15 +525,25 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       const rt = get(doc.roadTypes, cmd.roadTypeId);
       if (!rt) fail('unknown road type');
       tx.set(doc.segments, s.id, { ...s, roadTypeId: rt.id });
+      if (!rt.sidewalk) dropCrosswalks(doc, (f) => f.segmentId === s.id, tx);
       for (const stop of Object.values(doc.busStops)) {
         if (stop.segmentId === s.id && stop.dir === 'backward' && rt.lanesBackward === 0) removeStop(doc, stop.id, tx);
       }
+      return;
+    }
+    case 'segment.setSchoolZone': {
+      const s = get(doc.segments, cmd.id);
+      if (!s) fail('unknown segment');
+      if (typeof cmd.schoolZone !== 'boolean') fail('invalid schoolZone flag');
+      const { schoolZone: _old, ...rest } = s;
+      tx.set(doc.segments, s.id, cmd.schoolZone ? { ...rest, schoolZone: true } : rest);
       return;
     }
     case 'roadType.upsert': {
       validateRoadType(cmd.roadType);
       checkCapacity(doc.roadTypes, cmd.roadType.id, LIMITS.roadTypes, 'road types');
       const rt = cmd.roadType;
+      if (!rt.sidewalk) dropCrosswalks(doc, (f) => doc.segments[f.segmentId]?.roadTypeId === rt.id, tx);
       tx.set(doc.roadTypes, rt.id, {
         id: rt.id,
         name: rt.name,
@@ -583,6 +638,17 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
               },
             }
           : {}),
+        ...(bt.props
+          ? {
+              props: bt.props.map((pr) => ({
+                kind: pr.kind,
+                pos: { x: pr.pos.x, y: pr.pos.y, z: pr.pos.z },
+                rot: pr.rot,
+                size: pr.size,
+                color: pr.color,
+              })),
+            }
+          : {}),
       });
       return;
     }
@@ -644,6 +710,19 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!has(doc.closures, cmd.segmentId)) fail('segment is not closed');
       tx.set(doc.closures, cmd.segmentId, undefined);
       return;
+    case 'feature.upsert': {
+      const f = cmd.feature;
+      validateFeature(doc, f);
+      checkCapacity(doc.features, f.id, LIMITS.features, 'road features');
+      const out: RoadFeature = { id: f.id, segmentId: f.segmentId, kind: f.kind, t: f.t };
+      if (f.kind === 'crosswalk' && f.signal !== undefined) out.signal = f.signal;
+      tx.set(doc.features, f.id, out);
+      return;
+    }
+    case 'feature.remove':
+      if (!has(doc.features, cmd.id)) fail('unknown road feature');
+      tx.set(doc.features, cmd.id, undefined);
+      return;
     case 'meta.update':
       if (cmd.name !== undefined) {
         checkName(cmd.name, 'city');
@@ -659,6 +738,57 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
   }
 }
 
+const FEATURE_KINDS = ['crosswalk', 'speedBump'];
+
+/** Crosswalks need sidewalks to land on: removing the sidewalks removes them. */
+function dropCrosswalks(doc: CityDoc, match: (f: RoadFeature) => boolean, tx: Tx): void {
+  for (const f of Object.values(doc.features)) if (f.kind === 'crosswalk' && match(f)) tx.set(doc.features, f.id, undefined);
+}
+
+function validateFeature(doc: CityDoc, f: RoadFeature): void {
+  checkId(f?.id, 'road feature');
+  if (!FEATURE_KINDS.includes(f.kind)) fail('invalid road feature kind');
+  const seg = get(doc.segments, f.segmentId);
+  if (!seg) fail('unknown segment');
+  checkNum(f.t, 0, 1, 'feature.t');
+  if (f.signal !== undefined && (f.kind !== 'crosswalk' || typeof f.signal !== 'boolean')) fail('invalid feature signal flag');
+  const others = Object.values(doc.features).filter((o) => o.segmentId === seg.id && o.id !== f.id);
+  if (f.kind === 'crosswalk' && !doc.roadTypes[seg.roadTypeId]!.sidewalk) fail('crosswalks need a road with sidewalks');
+  const len = segmentLength(doc, seg);
+  const s = f.t * len;
+  const c = LIMITS.featureEndClearance;
+  if (s < c - FEATURE_EPS || len - s < c - FEATURE_EPS) fail(`road features must be at least ${c}m from the segment ends`);
+  for (const o of others) {
+    if (Math.abs(o.t * len - s) < LIMITS.featureSpacing - FEATURE_EPS) fail('too close to another road feature');
+  }
+}
+
+/** Tolerance of the feature distance rules, so remapped positions re-validate exactly. */
+const FEATURE_EPS = 1e-6;
+
+/**
+ * After a segment changed shape: keep its features that still satisfy the end clearance and spacing
+ * rules (in t order, ties by id) and remove the others — the same rules validateFeature applies.
+ */
+function pruneFeatures(doc: CityDoc, segId: SegmentId, tx: Tx): void {
+  const seg = doc.segments[segId];
+  if (!seg) return;
+  const len = segmentLength(doc, seg);
+  const c = LIMITS.featureEndClearance - FEATURE_EPS;
+  const list = Object.values(doc.features)
+    .filter((f) => f.segmentId === segId)
+    .sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1));
+  let last = -Infinity;
+  for (const f of list) {
+    const s = f.t * len;
+    if (s < c || len - s < c || s - last < LIMITS.featureSpacing - FEATURE_EPS) {
+      tx.set(doc.features, f.id, undefined);
+      continue;
+    }
+    last = s;
+  }
+}
+
 function removeStop(doc: CityDoc, stopId: string, tx: Tx): void {
   tx.set(doc.busStops, stopId, undefined);
   for (const line of Object.values(doc.busLines)) {
@@ -670,7 +800,11 @@ function removeStop(doc: CityDoc, stopId: string, tx: Tx): void {
 }
 
 function replaceApproach(doc: CityDoc, nodeId: string, from: SegmentId, to: SegmentId[], tx: Tx): void {
-  const c = doc.intersections[nodeId];
+  let c = doc.intersections[nodeId];
+  if (c?.crosswalkLegs?.includes(from)) {
+    c = { ...c, crosswalkLegs: c.crosswalkLegs.flatMap((l) => (l === from ? to : [l])).sort() };
+    tx.set(doc.intersections, nodeId, c);
+  }
   if (!c?.phases) return;
   const phases = c.phases
     .map((p) => ({ ...p, approaches: p.approaches.flatMap((a) => (a === from ? to : [a])) }))
@@ -687,6 +821,7 @@ function removeSegment(doc: CityDoc, s: RoadSegment, tx: Tx): void {
   tx.set(doc.segments, s.id, undefined);
   for (const stop of Object.values(doc.busStops)) if (stop.segmentId === s.id) removeStop(doc, stop.id, tx);
   if (has(doc.closures, s.id)) tx.set(doc.closures, s.id, undefined);
+  for (const f of Object.values(doc.features)) if (f.segmentId === s.id) tx.set(doc.features, f.id, undefined);
   for (const nodeId of [s.a, s.b]) {
     replaceApproach(doc, nodeId, s.id, [], tx);
     if (segmentsAtNode(doc, nodeId).length === 0) {
@@ -729,6 +864,7 @@ function splitSegment(
 
   const first: RoadSegment = { id: ids[0], a: s.a, b: nodeId, roadTypeId: s.roadTypeId };
   const second: RoadSegment = { id: ids[1], a: nodeId, b: s.b, roadTypeId: s.roadTypeId };
+  if (s.schoolZone) first.schoolZone = second.schoolZone = true;
   if (c0 && c1) {
     first.control = c0;
     second.control = c1;
@@ -753,6 +889,18 @@ function splitSegment(
         : { ...stop, segmentId: second.id, t: (stop.t - splitS) / (1 - splitS) };
     tx.set(doc.busStops, stop.id, moved);
   }
+  // Features move with their arc-length position (each piece measured on its own curve); those that
+  // now sit in the new junction are dropped by the same rules that validate a new feature.
+  const secondLen = segmentLength(doc, second);
+  for (const f of Object.values(doc.features)) {
+    if (f.segmentId !== s.id) continue;
+    const onFirst = f.t < splitS;
+    const local = onFirst ? f.t * total : f.t * total - firstLen;
+    const t = Math.min(1, Math.max(0, onFirst ? local / firstLen : local / secondLen));
+    tx.set(doc.features, f.id, { ...f, segmentId: onFirst ? first.id : second.id, t });
+  }
+  pruneFeatures(doc, first.id, tx);
+  pruneFeatures(doc, second.id, tx);
   const closure = doc.closures[s.id];
   if (closure) {
     tx.set(doc.closures, s.id, undefined);

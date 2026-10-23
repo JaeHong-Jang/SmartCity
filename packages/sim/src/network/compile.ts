@@ -1,9 +1,11 @@
-// compileNetwork: CityDoc nodes/segments → lanes, connectors, conflict table and junction polygons.
+// compileNetwork: CityDoc nodes/segments → lanes, connectors, conflict table, junction polygons and
+// street features (crosswalks, speed bumps, school zones; ADR 0008 §3).
 // Pure and deterministic (segments and nodes are visited in sorted-id order). Renderers use it too.
 
 import {
   add,
   angleBetween,
+  carriagewayWidth,
   cubicBezier,
   cumulativeLengths,
   dist,
@@ -25,7 +27,7 @@ import {
   type TravelDir,
   type Vec2,
 } from '@smartcity/shared';
-import type { CompiledNode, CompiledSegment, Connector, Lane, RoadGraph, Turn } from '../types.js';
+import { SCHOOL_ZONE_SPEED, type CompiledNode, type CompiledSegment, type Connector, type Crossing, type Lane, type RoadGraph, type Turn } from '../types.js';
 
 const DEG = Math.PI / 180;
 const STRAIGHT_ANGLE = 35 * DEG;
@@ -33,6 +35,10 @@ const CONTINUE_ANGLE = 20 * DEG;
 export const CONFLICT_DISTANCE = 2.5;
 const MIN_LANE_LENGTH = 2;
 const MIN_CONNECTOR_SPEED = 2;
+/** Extra lane trim at a junction end with a crosswalk: the crossing zone in front of the stop line. */
+export const CROSSWALK_ZONE = 4;
+/** Zebra width along the road. */
+export const ZEBRA_WIDTH = 3;
 
 interface SegInfo {
   seg: RoadSegment;
@@ -42,6 +48,11 @@ interface SegInfo {
   length: number;
   setbackA: number;
   setbackB: number;
+  /** Junction crosswalk at end a / b. */
+  cwA: boolean;
+  cwB: boolean;
+  laneStartA: number;
+  laneStartB: number;
   fwd: number[];
   bwd: number[];
 }
@@ -72,14 +83,21 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
     const cum = cumulativeLengths(pts);
     const length = cum[cum.length - 1]!;
     if (length < 1e-6) continue;
-    const info: SegInfo = { seg, rt, pts, cum, length, setbackA: 0, setbackB: 0, fwd: [], bwd: [] };
+    const info: SegInfo = { seg, rt, pts, cum, length, setbackA: 0, setbackB: 0, cwA: false, cwB: false, laneStartA: 0, laneStartB: 0, fwd: [], bwd: [] };
     infos.push(info);
     pushEnd(seg.a, { info, atA: true, out: normalize(sub(pts[1]!, pts[0]!)) });
     pushEnd(seg.b, { info, atA: false, out: normalize(sub(pts[pts.length - 2]!, pts[pts.length - 1]!)) });
   }
 
-  // Setbacks: the junction area is cut away from every segment end.
-  for (const [, list] of ends) {
+  // Setbacks: the junction area is cut away from every segment end. Junctions of degree ≥ 3 get a
+  // crosswalk on every leg with sidewalks that `crosswalkLegs` lists (omitted = all).
+  for (const [nodeId, list] of ends) {
+    const legs = doc.intersections[nodeId]?.crosswalkLegs;
+    for (const e of list) {
+      const cw = list.length >= 3 && e.info.rt.sidewalk && (!legs || legs.includes(e.info.seg.id));
+      if (e.atA) e.info.cwA = cw;
+      else e.info.cwB = cw;
+    }
     let sb: number;
     if (list.length === 1) sb = 0;
     else if (
@@ -106,8 +124,17 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
       info.setbackA *= k;
       info.setbackB *= k;
     }
-    const trim = slicePolyline(info.pts, info.setbackA, info.length - info.setbackB);
+    // Lanes stop short of the crossing zone; a lane that would get too short drops its crosswalks.
+    info.laneStartA = info.setbackA + (info.cwA ? CROSSWALK_ZONE : 0);
+    info.laneStartB = info.setbackB + (info.cwB ? CROSSWALK_ZONE : 0);
+    if (info.length - info.laneStartA - info.laneStartB < MIN_LANE_LENGTH) {
+      info.cwA = info.cwB = false;
+      info.laneStartA = info.setbackA;
+      info.laneStartB = info.setbackB;
+    }
+    const trim = slicePolyline(info.pts, info.laneStartA, info.length - info.laneStartB);
     const { rt, seg } = info;
+    const speedLimit = seg.schoolZone ? Math.min(rt.speedLimit, SCHOOL_ZONE_SPEED) : rt.speedLimit;
     const addLane = (dir: TravelDir, i: number, n: number, points: Vec2[]): number => {
       const cum = cumulativeLengths(points);
       const lane: Lane = {
@@ -121,7 +148,7 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
         points,
         cum,
         length: Math.max(cum[cum.length - 1]!, 0.1),
-        speedLimit: rt.speedLimit,
+        speedLimit,
         busOnly: rt.busOnlyRightLane && n > 1 && i === n - 1,
         out: [],
       };
@@ -143,6 +170,10 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
       halfWidth: roadHalfWidth(rt),
       closed: Object.prototype.hasOwnProperty.call(doc.closures, seg.id),
       lanes: [...info.fwd, ...info.bwd],
+      laneStartA: info.laneStartA,
+      laneStartB: info.laneStartB,
+      speedBumps: [],
+      schoolZone: seg.schoolZone === true,
     });
   }
 
@@ -164,7 +195,60 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
     });
   }
 
-  return { lanes, connectors, segments, nodes, laneById };
+  const crossings = buildFeatures(doc, infos, segments, nodes);
+  return { lanes, connectors, segments, nodes, laneById, crossings };
+}
+
+/** Junction crosswalks, mid-block crosswalks and speed bumps. Crossings are sorted by id. */
+function buildFeatures(doc: CityDoc, infos: SegInfo[], segments: Map<string, CompiledSegment>, nodes: Map<NodeId, CompiledNode>): Crossing[] {
+  const crossings: Crossing[] = [];
+  const byId = new Map(infos.map((i) => [i.seg.id, i]));
+  const make = (info: SegInfo, id: string, kind: Crossing['kind'], s: number, signal: boolean, nodeId?: NodeId): void => {
+    const c = pointAtLength(info.pts, info.cum, s);
+    const t = tangentAtLength(info.pts, info.cum, Math.max(1e-6, Math.min(info.length, s)));
+    const n = rightNormal(t);
+    const hw = carriagewayWidth(info.rt) / 2;
+    const a = add(c, scale(n, hw));
+    const b = add(c, scale(n, -hw));
+    const h = scale(t, ZEBRA_WIDTH / 2);
+    const cr: Crossing = {
+      index: 0,
+      id,
+      kind,
+      segmentId: info.seg.id,
+      s,
+      a,
+      b,
+      width: ZEBRA_WIDTH,
+      polygon: [sub(a, h), add(a, h), add(b, h), sub(b, h)],
+      signal,
+      schoolZone: info.seg.schoolZone === true,
+    };
+    if (nodeId !== undefined) cr.nodeId = nodeId;
+    crossings.push(cr);
+  };
+  for (const info of infos) {
+    const { seg } = info;
+    if (info.cwA) make(info, `${seg.a}|${seg.id}`, 'junction', info.setbackA + CROSSWALK_ZONE / 2, nodes.get(seg.a)!.signalized, seg.a);
+    if (info.cwB) make(info, `${seg.b}|${seg.id}`, 'junction', info.length - info.setbackB - CROSSWALK_ZONE / 2, nodes.get(seg.b)!.signalized, seg.b);
+  }
+  for (const id of Object.keys(doc.features ?? {}).sort()) {
+    const f = doc.features[id]!;
+    const info = byId.get(f.segmentId);
+    if (!info) continue;
+    const s = f.t * info.length;
+    if (f.kind === 'speedBump') {
+      segments.get(f.segmentId)!.speedBumps.push(s);
+      continue;
+    }
+    // A mid-block crosswalk needs sidewalks and its whole zone on the lanes, clear of the junction zones.
+    if (!info.rt.sidewalk || s < info.laneStartA + CROSSWALK_ZONE || info.length - s < info.laneStartB + CROSSWALK_ZONE) continue;
+    make(info, f.id, 'midblock', s, f.signal === true);
+  }
+  for (const cs of segments.values()) cs.speedBumps.sort((p, q) => p - q);
+  crossings.sort((p, q) => (p.id < q.id ? -1 : p.id > q.id ? 1 : 0));
+  crossings.forEach((c, i) => (c.index = i));
+  return crossings;
 }
 
 const endTangent = (l: Lane): Vec2 => normalize(sub(l.points[l.points.length - 1]!, l.points[l.points.length - 2]!));

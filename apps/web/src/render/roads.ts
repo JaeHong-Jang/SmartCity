@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { carriagewayWidth, slicePolyline, type RoadType, type Vec2 } from '@smartcity/shared';
 import { MeshBuilder } from './meshBuilder';
 import type { RoadNetworkGeom, RoadSegGeom, RoadNodeGeom } from './roadNetwork';
+import { speedBump, zebra } from './streetMarks';
 
 export const CHUNK_SIZE = 256;
 export const Y_ROAD = 0.06;
@@ -20,6 +21,7 @@ const C_WHITE = new THREE.Color('#e9ecef');
 const C_WALK = new THREE.Color('#b9b5ab');
 const C_CURB = new THREE.Color('#9d9a92');
 const C_SHOULDER = new THREE.Color('#6d7077');
+const C_SCHOOL = new THREE.Color('#7a4638');
 
 export const chunkKey = (p: Vec2): string => `${Math.floor(p.x / CHUNK_SIZE)},${Math.floor(p.z / CHUNK_SIZE)}`;
 
@@ -39,7 +41,13 @@ function segSig(g: RoadSegGeom, net: RoadNetworkGeom): string {
   const last = g.centerline[g.centerline.length - 1]!;
   const mid = g.centerline[g.centerline.length >> 1]!;
   const deg = (n: string): number => net.nodes.get(n)?.segments.length ?? 0;
-  return [r2(first.x), r2(first.z), r2(mid.x), r2(mid.z), r2(last.x), r2(last.z), g.centerline.length, r2(g.setbackA), r2(g.setbackB), JSON.stringify(g.roadType), deg(g.a) >= 3, deg(g.b) >= 3].join('|');
+  const control = (n: string): string => net.nodes.get(n)?.control ?? '';
+  const crossings = g.crossings.map((c) => `${c.id}:${c.signal ? 1 : 0}:${c.polygon.map((p) => `${r2(p.x)},${r2(p.z)}`).join(';')}`).join('/');
+  return [
+    r2(first.x), r2(first.z), r2(mid.x), r2(mid.z), r2(last.x), r2(last.z), g.centerline.length, r2(g.setbackA), r2(g.setbackB),
+    JSON.stringify(g.roadType), deg(g.a) >= 3, deg(g.b) >= 3,
+    r2(g.laneStartA), r2(g.laneStartB), g.speedBumps.map(r2).join(','), g.schoolZone, control(g.a), control(g.b), crossings,
+  ].join('|');
 }
 
 function nodeSig(n: RoadNodeGeom): string {
@@ -158,7 +166,7 @@ function buildSegment(g: RoadSegGeom, net: RoadNetworkGeom, b: MeshBuilder): voi
   const w = rt.laneWidth;
   const oneWay = rt.lanesBackward === 0;
 
-  b.band(pts, -hc, hc, Y_ROAD, C_ASPHALT);
+  b.band(pts, -hc, hc, Y_ROAD, g.schoolZone ? C_SCHOOL : C_ASPHALT);
 
   // Bus-only lanes: red surface on the curb lane of each direction.
   if (rt.busOnlyRightLane) {
@@ -187,28 +195,41 @@ function buildSegment(g: RoadSegGeom, net: RoadNetworkGeom, b: MeshBuilder): voi
   b.band(pts, hc - 0.35, hc - 0.2, Y_MARK, C_WHITE);
   b.band(pts, -hc + 0.2, -hc + 0.35, Y_MARK, C_WHITE);
 
-  // Center line: double solid yellow on two-way roads.
-  if (!oneWay) {
-    b.band(pts, -0.27, -0.12, Y_MARK, C_YELLOW);
-    b.band(pts, 0.12, 0.27, Y_MARK, C_YELLOW);
+  // Lane markings start where the lanes do (after the crosswalk zone at junction ends).
+  const l0 = Math.max(s0, g.laneStartA);
+  const l1 = Math.min(s1, g.length - g.laneStartB);
+  const len = l1 - l0;
+  if (len > 0.2) {
+    const lanePts = slicePolyline(g.centerline, l0, l1);
+    // Center line: double solid yellow on two-way roads.
+    if (!oneWay) {
+      b.band(lanePts, -0.27, -0.12, Y_MARK, C_YELLOW);
+      b.band(lanePts, 0.12, 0.27, Y_MARK, C_YELLOW);
+    }
+    const div = dividerOffsets(rt);
+    for (const o of [...div.forward, ...div.backward]) b.dashed(lanePts, o, 0.15, 3, 5, Y_MARK, C_WHITE);
+
+    // Stop lines where the road enters a junction (degree ≥ 3), at the lane end.
+    if (len > 3) {
+      const degB = net.nodes.get(g.b)?.segments.length ?? 0;
+      const degA = net.nodes.get(g.a)?.segments.length ?? 0;
+      if (degB >= 3) {
+        const piece = slicePolyline(lanePts, len - 1.1, len - 0.6);
+        if (oneWay) b.band(piece, -hc + 0.3, hc - 0.3, Y_MARK, C_WHITE);
+        else b.band(piece, 0.3, hc - 0.3, Y_MARK, C_WHITE);
+      }
+      if (degA >= 3 && !oneWay) {
+        const piece = slicePolyline(lanePts, 0.6, 1.1);
+        b.band(piece, -hc + 0.3, -0.3, Y_MARK, C_WHITE);
+      }
+    }
+    // School zone: yellow ladder marks along both edges of the carriageway.
+    if (g.schoolZone) {
+      b.dashed(lanePts, hc - 0.9, 0.5, 1.2, 1.2, Y_MARK, C_YELLOW);
+      b.dashed(lanePts, -hc + 0.9, 0.5, 1.2, 1.2, Y_MARK, C_YELLOW);
+    }
   }
 
-  const div = dividerOffsets(rt);
-  for (const o of [...div.forward, ...div.backward]) b.dashed(pts, o, 0.15, 3, 5, Y_MARK, C_WHITE);
-
-  // Stop lines where the road enters a junction (degree ≥ 3).
-  const len = s1 - s0;
-  if (len > 3) {
-    const degB = net.nodes.get(g.b)?.segments.length ?? 0;
-    const degA = net.nodes.get(g.a)?.segments.length ?? 0;
-    if (degB >= 3) {
-      const piece = slicePolyline(pts, len - 1.1, len - 0.6);
-      if (oneWay) b.band(piece, -hc + 0.3, hc - 0.3, Y_MARK, C_WHITE);
-      else b.band(piece, 0.3, hc - 0.3, Y_MARK, C_WHITE);
-    }
-    if (degA >= 3 && !oneWay) {
-      const piece = slicePolyline(pts, 0.6, 1.1);
-      b.band(piece, -hc + 0.3, -0.3, Y_MARK, C_WHITE);
-    }
-  }
+  for (const c of g.crossings) zebra(b, c.polygon, c.a, c.b, Y_MARK, C_WHITE);
+  for (const s of g.speedBumps) speedBump(b, g.centerline, s, hc, Y_MARK + 0.005);
 }

@@ -1,7 +1,11 @@
 // Intersection manager (ADR 0004): the lead vehicle of each lane near the stop line requests its next
 // connector; grants need green, no held conflicting connector, and exit space that is reserved atomically.
+// ADR 0008: the grant also needs every crossing zone on the connector free of pedestrians (held, or
+// eligible to enter) and reserves those zones with it. allStop approaches (and school-zone crossings at
+// unsignalized junctions) first need a full stop; they are served in stop-completion order.
 
 import { requestDistance } from './vehicles.js';
+import { pedBlocks, reservePassage, updateStop } from './zones.js';
 import type { Vehicle, World } from './world.js';
 
 const EXIT_MARGIN = 2;
@@ -11,6 +15,8 @@ interface Req {
   c: number;
   node: number;
   pri: number;
+  /** Arrival order: request tick, or the full-stop tick at stop-required lines. */
+  order: number;
 }
 
 // Scratch marks for "blocked by a conflict this tick"; stamps never repeat, so instances cannot interfere.
@@ -18,7 +24,7 @@ let blockedMark = new Uint32Array(0);
 let blockedStamp = 0;
 
 function byOrder(a: Req, b: Req): number {
-  return a.node - b.node || a.pri - b.pri || a.v.reqTick - b.v.reqTick || a.v.id - b.v.id;
+  return a.node - b.node || a.pri - b.pri || a.order - b.order || a.v.id - b.v.id;
 }
 
 export function exitNeed(w: World, v: Vehicle, lane: number): number {
@@ -48,12 +54,17 @@ export function processRequests(w: World): void {
     const d = net.len[l]! - v.s;
     if (d > requestDistance(v)) continue;
     if (v.reqTick < 0) v.reqTick = w.tick;
+    const stopReq = w.laneStopReq[l] === 1;
+    if (stopReq) {
+      updateStop(w, v, d);
+      if (v.stopTick < 0) continue;
+    }
     const c = nxt - nLanes;
     const node = net.connNode[c]!;
     // Turn priority only applies at signals; uncontrolled junctions are first come, first served.
-    reqs.push({ v, c, node, pri: net.nodeSignalized[node] ? net.connPri[c]! : 0 });
+    reqs.push({ v, c, node, pri: net.nodeSignalized[node] ? net.connPri[c]! : 0, order: stopReq ? v.stopTick : v.reqTick });
   }
-  if (reqs.length === 0) return;
+  if (reqs.length === 0 || w.noGrantTick === w.tick) return;
   reqs.sort(byOrder);
 
   if (blockedMark.length < conns.length) blockedMark = new Uint32Array(conns.length * 2);
@@ -78,10 +89,22 @@ export function processRequests(w: World): void {
       blockedMark[c] = st;
       continue;
     }
+    // Yielding to pedestrians does not count as a vehicle conflict (it must not starve other movements).
+    const zones = w.zones.conn[c]!;
+    let peds = false;
+    for (const p of zones)
+      if (pedBlocks(w, p.z)) {
+        peds = true;
+        w.zs.vehWait[p.z] = w.tick;
+      }
+    if (peds) continue;
     const need = exitNeed(w, v, conn.toLane);
     if (freeSpace(w, conn.toLane) - w.reserved[conn.toLane]! < need - 1e-9) continue;
     v.grant = c;
     v.reqTick = -1;
+    v.stopTick = -1;
+    v.stopCnt = 0;
+    for (const p of zones) reservePassage(w, v, p, net.nLanes + c);
     v.held.push({ c, rel: Infinity });
     w.holders[c]!++;
     w.reserved[conn.toLane]! += need;

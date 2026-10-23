@@ -7,6 +7,7 @@ import {
   cloneJson,
   createEmptyDoc,
   DEFAULT_REGULATIONS,
+  DOC_VERSION,
   designStats,
   docToCommands,
   normalizeDoc,
@@ -265,7 +266,7 @@ describe('Sol review of Phase 2a shared (2026-10-23)', () => {
     v1.buildingTypes['city-hall']!.parts[1]!.offset.z = 14;
     delete v1.buildingTypes['city-hall']!.rev;
     const doc = normalizeDoc(v1);
-    expect(doc.version).toBe(2);
+    expect(doc.version).toBe(DOC_VERSION);
     expect(doc.buildingTypes['city-hall']!.rev).toBe(1);
     const fresh = createEmptyDoc();
     ok(fresh, { type: 'buildingType.upsert', buildingType: { ...doc.buildingTypes['city-hall']!, id: 'hall2' } });

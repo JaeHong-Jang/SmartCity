@@ -1,48 +1,52 @@
-// Signal heads: one instanced pole + one instanced lamp per incoming lane, lamp color from the snapshot.
+// Signal heads. Vehicle signals: one instanced pole + housing with three lamps per incoming lane, the
+// lit lamp from the snapshot. Pedestrian signals: a two-lamp head (red / green) on each curb of a
+// signalized crossing, state from snapshot.crossings.
 
 import * as THREE from 'three';
-import { SIGNAL_STRIDE } from '@smartcity/sim';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { CROSSING_STRIDE, crossingSignature, PedSignal, SIGNAL_STRIDE, type Crossing } from '@smartcity/sim';
 import type { SimulationStream } from '../sim/simStream';
 
-const COLORS = [new THREE.Color('#ff3b30'), new THREE.Color('#ffcc00'), new THREE.Color('#34c759')];
+const LAMP_ON = [new THREE.Color('#ff3b30'), new THREE.Color('#ffcc00'), new THREE.Color('#34c759')];
+const LAMP_OFF = [new THREE.Color('#3a1512'), new THREE.Color('#3a3010'), new THREE.Color('#10301a')];
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _p = new THREE.Vector3();
 const _s = new THREE.Vector3(1, 1, 1);
 const _up = new THREE.Vector3(0, 1, 0);
 
+function makeInstanced(group: THREE.Group, geo: THREE.BufferGeometry, mat: THREE.Material, cap: number, colored = true): THREE.InstancedMesh {
+  const m = new THREE.InstancedMesh(geo, mat, cap);
+  m.count = 0;
+  m.frustumCulled = false;
+  if (colored) m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
+  group.add(m);
+  return m;
+}
+
 export class SignalLayer {
   readonly group = new THREE.Group();
   private poles: THREE.InstancedMesh;
-  private lamps: THREE.InstancedMesh;
+  private lamps: THREE.InstancedMesh[];
   private capacity = 0;
-  private readonly poleGeo = new THREE.CylinderGeometry(0.12, 0.12, 4.2, 6).translate(0, 2.1, 0);
-  private readonly lampGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5).translate(0, 4.3, 0);
+  private readonly poleGeo = mergePole(new THREE.CylinderGeometry(0.12, 0.12, 4.2, 6).translate(0, 2.1, 0), new THREE.BoxGeometry(0.3, 1.5, 0.5).translate(0, 4.3, 0));
+  private readonly lampGeos = [4.7, 4.3, 3.9].map((y) => new THREE.BoxGeometry(0.1, 0.32, 0.32).translate(-0.18, y, 0));
   private readonly poleMat = new THREE.MeshStandardMaterial({ color: '#2b2f36', roughness: 0.6 });
   private readonly lampMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
   private lastSnapshot: unknown = null;
 
   constructor(private readonly stream: SimulationStream) {
     this.group.name = 'signals';
-    this.poles = this.make(this.poleGeo, this.poleMat, 64);
-    this.lamps = this.make(this.lampGeo, this.lampMat, 64);
+    this.poles = makeInstanced(this.group, this.poleGeo, this.poleMat, 64, false);
+    this.lamps = this.lampGeos.map((g) => makeInstanced(this.group, g, this.lampMat, 64));
     this.capacity = 64;
-  }
-
-  private make(geo: THREE.BufferGeometry, mat: THREE.Material, cap: number): THREE.InstancedMesh {
-    const m = new THREE.InstancedMesh(geo, mat, cap);
-    m.count = 0;
-    m.frustumCulled = false;
-    m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-    this.group.add(m);
-    return m;
   }
 
   update(): void {
     const snap = this.stream.latest();
     if (!snap) {
       this.poles.count = 0;
-      this.lamps.count = 0;
+      for (const l of this.lamps) l.count = 0;
       return;
     }
     if (snap === this.lastSnapshot) return;
@@ -51,11 +55,11 @@ export class SignalLayer {
     if (n > this.capacity) {
       let cap = this.capacity;
       while (cap < n) cap *= 2;
-      this.group.remove(this.poles, this.lamps);
+      this.group.remove(this.poles, ...this.lamps);
       this.poles.dispose();
-      this.lamps.dispose();
-      this.poles = this.make(this.poleGeo, this.poleMat, cap);
-      this.lamps = this.make(this.lampGeo, this.lampMat, cap);
+      for (const l of this.lamps) l.dispose();
+      this.poles = makeInstanced(this.group, this.poleGeo, this.poleMat, cap, false);
+      this.lamps = this.lampGeos.map((g) => makeInstanced(this.group, g, this.lampMat, cap));
       this.capacity = cap;
     }
     const a = snap.signals;
@@ -65,13 +69,161 @@ export class SignalLayer {
       _q.setFromAxisAngle(_up, -a[o + 2]!);
       _m.compose(_p, _q, _s);
       this.poles.setMatrixAt(i, _m);
-      this.lamps.setMatrixAt(i, _m);
-      this.lamps.setColorAt(i, COLORS[a[o + 3]! | 0] ?? COLORS[0]!);
+      const lit = Math.min(2, Math.max(0, a[o + 3]! | 0));
+      for (let k = 0; k < 3; k++) {
+        this.lamps[k]!.setMatrixAt(i, _m);
+        this.lamps[k]!.setColorAt(i, k === lit ? LAMP_ON[k]! : LAMP_OFF[k]!);
+      }
     }
     this.poles.count = n;
-    this.lamps.count = n;
     this.poles.instanceMatrix.needsUpdate = true;
-    this.lamps.instanceMatrix.needsUpdate = true;
-    if (this.lamps.instanceColor) this.lamps.instanceColor.needsUpdate = true;
+    for (const l of this.lamps) {
+      l.count = n;
+      l.instanceMatrix.needsUpdate = true;
+      if (l.instanceColor) l.instanceColor.needsUpdate = true;
+    }
+  }
+}
+
+function mergePole(pole: THREE.BufferGeometry, housing: THREE.BufferGeometry): THREE.BufferGeometry {
+  const parts = [pole, housing].map((g) => {
+    const flat = g.toNonIndexed();
+    flat.deleteAttribute('uv');
+    g.dispose();
+    return flat;
+  });
+  const merged = mergeGeometries(parts, false)!;
+  for (const g of parts) g.dispose();
+  return merged;
+}
+
+// ---------- pedestrian signals ----------
+
+export interface PedHead {
+  /** Index into the crossings array (and snapshot.crossings). */
+  crossing: number;
+  x: number;
+  z: number;
+  /** Unit vector the lamps face. */
+  dx: number;
+  dz: number;
+}
+
+const HEAD_BACK = 0.45;
+const HEAD_SIDE = 0.5;
+
+/** Two heads per signalized crossing, one on each curb, facing across the road, just outside the zebra. */
+export function pedSignalHeads(crossings: readonly Crossing[]): PedHead[] {
+  const out: PedHead[] = [];
+  crossings.forEach((c, i) => {
+    if (!c.signal) return;
+    let ux = c.b.x - c.a.x;
+    let uz = c.b.z - c.a.z;
+    const l = Math.hypot(ux, uz);
+    if (l < 1) return;
+    ux /= l;
+    uz /= l;
+    const side = c.width / 2 + HEAD_SIDE;
+    const vx = -uz * side;
+    const vz = ux * side;
+    out.push({ crossing: i, x: c.a.x - ux * HEAD_BACK + vx, z: c.a.z - uz * HEAD_BACK + vz, dx: ux, dz: uz });
+    out.push({ crossing: i, x: c.b.x + ux * HEAD_BACK + vx, z: c.b.z + uz * HEAD_BACK + vz, dx: -ux, dz: -uz });
+  });
+  return out;
+}
+
+/** Lamp states of a pedestrian signal: which lamps are lit at `now` (ms). */
+export function pedLampState(signal: number, now: number): { red: boolean; green: boolean } | null {
+  switch (signal) {
+    case PedSignal.walk:
+      return { red: false, green: true };
+    case PedSignal.clearance:
+      return { red: false, green: Math.floor(now / 300) % 2 === 0 };
+    case PedSignal.red:
+      return { red: true, green: false };
+    default:
+      return null;
+  }
+}
+
+const PED_RED = new THREE.Color('#ff3b30');
+const PED_GREEN = new THREE.Color('#3cff7a');
+const PED_RED_OFF = new THREE.Color('#3a1512');
+const PED_GREEN_OFF = new THREE.Color('#10301a');
+
+export class PedSignalLayer {
+  readonly group = new THREE.Group();
+  private heads: PedHead[] = [];
+  private capacity = 0;
+  private poles!: THREE.InstancedMesh;
+  private red!: THREE.InstancedMesh;
+  private green!: THREE.InstancedMesh;
+  private crossings: readonly Crossing[] | null = null;
+  /** crossingSignature of `crossings`, compared with the snapshot's crossingSig. */
+  private sig = 0;
+  private readonly poleGeo = mergePole(new THREE.CylinderGeometry(0.06, 0.06, 2.4, 6).translate(0, 1.2, 0), new THREE.BoxGeometry(0.16, 0.62, 0.3).translate(0, 2.55, 0));
+  private readonly redGeo = new THREE.BoxGeometry(0.06, 0.2, 0.2).translate(0.1, 2.7, 0);
+  private readonly greenGeo = new THREE.BoxGeometry(0.06, 0.2, 0.2).translate(0.1, 2.42, 0);
+  private readonly poleMat = new THREE.MeshStandardMaterial({ color: '#2b2f36', roughness: 0.6 });
+  private readonly lampMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
+
+  constructor(private readonly stream: SimulationStream) {
+    this.group.name = 'ped-signals';
+    this.allocate(32);
+  }
+
+  private allocate(cap: number): void {
+    if (this.poles) {
+      this.group.remove(this.poles, this.red, this.green);
+      this.poles.dispose();
+      this.red.dispose();
+      this.green.dispose();
+    }
+    this.capacity = cap;
+    this.poles = makeInstanced(this.group, this.poleGeo, this.poleMat, cap, false);
+    this.red = makeInstanced(this.group, this.redGeo, this.lampMat, cap);
+    this.green = makeInstanced(this.group, this.greenGeo, this.lampMat, cap);
+  }
+
+  /** Recompute head positions when the road network (and so the crossing list) changed. */
+  setCrossings(crossings: readonly Crossing[]): void {
+    if (crossings === this.crossings) return;
+    this.crossings = crossings;
+    this.sig = crossingSignature(crossings.map((c) => c.id));
+    this.heads = pedSignalHeads(crossings);
+    if (this.heads.length > this.capacity) {
+      let cap = this.capacity;
+      while (cap < this.heads.length) cap *= 2;
+      this.allocate(cap);
+    }
+  }
+
+  update(now: number, y: number): void {
+    const snap = this.stream.latest();
+    const data = snap?.crossings;
+    // Indexes are only meaningful for the same crossing list; until the sim catches up with an edit,
+    // signalized crossings show red.
+    const known = !!data && (snap?.crossingCount ?? 0) > 0 && snap!.crossingSig === this.sig;
+    let n = 0;
+    for (const h of this.heads) {
+      // Without crossing data from the simulation a signalized crossing shows red.
+      const code = known ? (data[h.crossing * CROSSING_STRIDE] ?? PedSignal.none) : PedSignal.red;
+      const lamps = pedLampState(code, now);
+      if (!lamps) continue;
+      _p.set(h.x, y, h.z);
+      _q.setFromAxisAngle(_up, -Math.atan2(h.dz, h.dx));
+      _m.compose(_p, _q, _s);
+      this.poles.setMatrixAt(n, _m);
+      this.red.setMatrixAt(n, _m);
+      this.green.setMatrixAt(n, _m);
+      this.red.setColorAt(n, lamps.red ? PED_RED : PED_RED_OFF);
+      this.green.setColorAt(n, lamps.green ? PED_GREEN : PED_GREEN_OFF);
+      n++;
+    }
+    for (const m of [this.poles, this.red, this.green]) {
+      m.count = n;
+      m.instanceMatrix.needsUpdate = true;
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    }
   }
 }

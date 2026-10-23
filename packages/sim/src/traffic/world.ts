@@ -1,12 +1,16 @@
 // Mutable simulation state shared by the traffic modules. Never handed to consumers directly.
 
 import type { CityDoc, Rng, TravelDir, VehicleKind, VehicleType } from '@smartcity/shared';
+import type { CitizenWorld } from '../citizens/citizens.js';
+import type { PedPool, PedWorld } from '../citizens/peds.js';
+import type { ZoneIndex } from '../network/crossings.js';
 import type { Net } from '../network/net.js';
 import type { Router } from '../network/route.js';
 import type { RoadGraph } from '../types.js';
 import type { DemandModel } from './demand.js';
 import type { BusLineState } from './buses.js';
-import type { SignalPlan } from './signals.js';
+import type { SignalSet } from './signals.js';
+import type { ZoneState } from './zones.js';
 
 /** Destination: lanes of one segment direction; `laneIndex` −1 = any usable lane. */
 export interface Goal {
@@ -23,6 +27,14 @@ export interface Goal {
 /** A connector reservation. `rel` = odometer value at which the tail clears it (Infinity until the front leaves). */
 export interface Held {
   c: number;
+  rel: number;
+}
+
+/** A conflict-zone reservation; `rel` = odometer value at which the tail clears the zone (Infinity until the front reaches `edge`). */
+export interface ZoneHold {
+  z: number;
+  edge: number;
+  exitS: number;
   rel: number;
 }
 
@@ -61,6 +73,14 @@ export interface Vehicle {
   grant: number;
   reqTick: number;
   held: Held[];
+  /** Conflict zones (crossings) reserved by this vehicle. */
+  zones: ZoneHold[];
+  /** Full-stop detection at a stop-required line (allStop, school-zone crossings). */
+  stopCnt: number;
+  /** Tick the full stop was completed for the current approach, −1 = not yet. */
+  stopTick: number;
+  /** Citizen driving this car (citizen slot), −1 = none. */
+  person: number;
   resLane: number;
   resNeed: number;
   odo: number;
@@ -100,11 +120,30 @@ export interface World {
   /** Per lane: exit space promised to granted vehicles that have not reached the lane yet. */
   reserved: Float64Array;
   laneGreen: Uint8Array;
+  zones: ZoneIndex;
+  zs: ZoneState;
+  /** crossingSignature of graph.crossings. */
+  crossingSig: number;
+  /** Per lane: speed bumps in lane coordinates, ascending. */
+  bumps: number[][];
+  hasBumps: boolean;
+  /** Per lane: vehicles must come to a full stop at the lane end before a grant (allStop, school-zone crossing). */
+  laneStopReq: Uint8Array;
+  /** No new zone/connector grants on this tick (the tick right after a recompile). */
+  noGrantTick: number;
+  /** Pedestrian graph, router and route queue. */
+  ped: PedWorld;
+  peds: PedPool;
+  cz: CitizenWorld;
+  /** Citizens whose car vanished this tick (removed, not arrived). */
+  lostDrivers: number[];
+  /** Citizens whose car arrived this tick, with the lane it stopped on. */
+  arrivedDrivers: { person: number; lane: number }[];
   stopped: Int32Array;
   queue: QueueItem[];
   typeIds: string[];
   types: Map<string, VehicleType>;
-  signals: SignalPlan[];
+  signals: SignalSet;
   demand: DemandModel;
   lines: BusLineState[];
   nextId: number;
@@ -138,6 +177,10 @@ export function despawn(w: World, v: Vehicle): void {
   removeFromEdge(w.onEdge[v.edge]!, v);
   for (const h of v.held) w.holders[h.c]!--;
   v.held = [];
+  for (const h of v.zones) w.zs.veh[h.z]!--;
+  v.zones = [];
+  if (v.person >= 0) w.lostDrivers.push(v.person);
+  v.person = -1;
   if (v.resLane >= 0) w.reserved[v.resLane]! -= v.resNeed;
   v.resLane = -1;
   v.grant = -1;
@@ -185,6 +228,8 @@ export function canPlace(w: World, lane: number, s: number, len: number, margin:
     return false;
   }
   if (last && s - len - margin < w.reserved[lane]!) return false;
+  // Never inside a mid-block conflict zone.
+  for (const p of w.zones.lane[lane]!) if (s + margin > p.enterS && s - len - margin < p.exitS) return false;
   const ob: Obstacle = { gap: Infinity, v: 0 };
   tailOverhang(w, lane, w.net.len[lane]! - s, 0, ob);
   return ob.gap >= margin;

@@ -1,7 +1,7 @@
 // SimulationStream: what renderers subscribe to (ADR 0005). Phase 1 = WorkerSimStream.
 
 import type { CityDoc, Command } from '@smartcity/shared';
-import type { SimSnapshot } from '@smartcity/sim';
+import type { SimSnapshot, SnapshotBuffers } from '@smartcity/sim';
 import { snapshotTransferables, type FromWorker, type ToWorker, type WorkerSpeed } from './protocol';
 
 export interface SimulationStream {
@@ -67,7 +67,15 @@ export class WorkerSimStream implements SimulationStream, SimControl {
   }
 
   private giveBack(s: SimSnapshot): void {
-    const buffers = { vehicles: s.vehicles, signals: s.signals, laneFlow: s.laneFlow };
+    const buffers: SnapshotBuffers = {
+      vehicles: s.vehicles,
+      signals: s.signals,
+      laneFlow: s.laneFlow,
+      pedestrians: s.pedestrians,
+      pedestrianIds: s.pedestrianIds,
+      crossings: s.crossings,
+      occupancy: s.occupancy,
+    };
     this.post({ t: 'returnBuffers', buffers }, snapshotTransferables(buffers));
   }
 

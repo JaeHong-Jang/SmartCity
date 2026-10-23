@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Command } from '@smartcity/shared';
 import { Simulation } from './simulation.js';
-import { apply, checkInvariants, crossDoc, gridDoc, internals } from './testkit.js';
+import { apply, checkInvariants, checkZoneInvariants, cityDoc, crossDoc, gridDoc, internals } from './testkit.js';
 
 function snapshotBytes(sim: Simulation): string {
   const s = sim.snapshot();
@@ -36,6 +36,67 @@ describe('Simulation', () => {
     expect(a.length).toBe(10);
     for (let i = 0; i < a.length; i++) expect(a[i]).toBe(b[i]);
   });
+
+  it('is deterministic with citizens: pedestrians, crossings and occupancy match byte for byte', () => {
+    const script: Record<number, Command> = {
+      3700: { type: 'feature.upsert', feature: { id: 'zebra', segmentId: 'h_0_0', kind: 'crosswalk', t: 0.5, signal: true } },
+      4300: { type: 'building.remove', id: 'house1' },
+      4800: { type: 'segment.remove', id: 'v_2_0' },
+    };
+    const bytes = (sim: Simulation): string => {
+      const s = sim.snapshot();
+      const parts = [
+        new Uint8Array(s.vehicles.buffer, 0, s.vehicleCount * 6 * 4),
+        new Uint8Array(s.pedestrians.buffer, 0, s.pedestrianCount * 8 * 4),
+        new Uint8Array(s.pedestrianIds.buffer, 0, s.pedestrianCount * 4),
+        new Uint8Array(s.crossings.buffer, 0, s.crossingCount * 3 * 4),
+        new Uint8Array(s.occupancy.buffer, 0, s.buildingIds.length * 4),
+        new Uint8Array(s.signals.buffer, 0, s.signalCount * 4 * 4),
+      ];
+      return parts.map((p) => Array.from(p).join(',')).join('|') + JSON.stringify(s.stats) + s.buildingIds.join(',');
+    };
+    const run = (): string[] => {
+      const sim = new Simulation(cityDoc());
+      const out: string[] = [];
+      for (let t = 0; t < 5400; t++) {
+        const cmd = script[t];
+        if (cmd) expect(sim.applyCommand(cmd).ok).toBe(true);
+        sim.step();
+        if (t >= 3600 && t % 200 === 0) out.push(bytes(sim));
+      }
+      expect(sim.stats().pedestrians).toBeGreaterThan(20);
+      return out;
+    };
+    const a = run();
+    const b = run();
+    expect(a.length).toBe(9);
+    for (let i = 0; i < a.length; i++) expect(a[i]).toBe(b[i]);
+  }, 60_000);
+
+  it('restores zone occupancy from real bodies on recompile and grants nothing new on that tick', () => {
+    const sim = new Simulation(cityDoc());
+    const w = internals(sim);
+    for (let t = 0; t < 4400; t++) sim.step();
+    const busy = (): number => Array.from(w.zs.veh).reduce((a, b) => a + b, 0) + Array.from(w.zs.ped).reduce((a, b) => a + b, 0);
+    expect(busy()).toBeGreaterThan(0);
+    // Keeps every lane: vehicles and pedestrians stay, zone holders are rebuilt.
+    expect(sim.applyCommand({ type: 'intersection.set', control: { nodeId: 'n_1_1', kind: 'signal', yellow: 3, allRed: 2, offset: 7 } }).ok).toBe(true);
+    const grants = new Map(w.vehicles.map((v) => [v.id, v.grant]));
+    const zones = new Map(w.vehicles.map((v) => [v.id, v.zones.length]));
+    sim.step();
+    expect(w.noGrantTick).toBe(sim.stats().tick - 1);
+    for (const v of w.vehicles) {
+      if (!grants.has(v.id)) continue;
+      // No connector granted on the recompile tick (pending grants were dropped, none re-issued).
+      if (v.edge < w.net.nLanes) expect(v.grant).toBe(-1);
+      expect(v.zones.length).toBeLessThanOrEqual(zones.get(v.id)!);
+    }
+    expect(checkZoneInvariants(sim)).toEqual([]);
+    for (let t = 0; t < 400; t++) {
+      sim.step();
+      expect(checkZoneInvariants(sim)).toEqual([]);
+    }
+  }, 60_000);
 
   it('keeps vehicles across a recompile that keeps their lanes', () => {
     const sim = new Simulation(gridDoc(3, 150));
@@ -87,7 +148,7 @@ describe('Simulation', () => {
     expect(planned).toContain('h_1_1');
     sim.applyCommand({ type: 'closure.set', closure: { segmentId: 'h_1_1', reason: 'roadworks' } });
     let usedClosed = false;
-    for (let t = 0; t < 20 * 120 && sim.stats().arrived === 0; t++) {
+    for (let t = 0; t < 20 * 180 && sim.stats().arrived === 0; t++) {
       sim.step();
       const v = sim.vehicles()[0];
       if (v && v.edge.kind === 'lane' && sim.graph.lanes[v.edge.index]!.segmentId === 'h_1_1') usedClosed = true;
@@ -127,6 +188,45 @@ describe('Simulation', () => {
     // Vehicle ids in the buffer match the views.
     const ids = sim.vehicles().map((v) => v.id);
     expect(Array.from({ length: small.vehicleCount }, (_, i) => small.vehicles[i * 6 + 5])).toEqual(ids);
+  });
+
+  it('reuses the pedestrian, crossing and occupancy buffers too', () => {
+    const sim = new Simulation(cityDoc());
+    for (let t = 0; t < 4200; t++) sim.step();
+    const first = sim.snapshot();
+    expect(first.pedestrianCount).toBeGreaterThan(0);
+    expect(first.crossingCount).toBe(sim.graph.crossings.length);
+    expect(first.buildingIds.length).toBe(7);
+    const reuse = { pedestrians: first.pedestrians, pedestrianIds: first.pedestrianIds, crossings: first.crossings, occupancy: first.occupancy };
+    sim.step();
+    const second = sim.snapshot(reuse);
+    expect(second.crossings).toBe(reuse.crossings);
+    expect(second.occupancy).toBe(reuse.occupancy);
+    if (second.pedestrianCount <= reuse.pedestrianIds.length) {
+      expect(second.pedestrians).toBe(reuse.pedestrians);
+      expect(second.pedestrianIds).toBe(reuse.pedestrianIds);
+    }
+    const w = internals(sim);
+    // Never the internal arrays.
+    expect(second.pedestrians).not.toBe(w.peds.pos);
+    // Ids are the citizens', states and styles in range, positions finite.
+    const ids = new Set(w.cz.byId.keys());
+    let inside = 0;
+    for (let k = 0; k < second.buildingIds.length; k++) inside += second.occupancy[k]!;
+    const st = second.stats.citizens;
+    expect(inside).toBe(st.home + st.atWork);
+    expect(second.stats.pedestrians).toBe(second.pedestrianCount);
+    for (let k = 0; k < second.pedestrianCount; k++) {
+      expect(ids.has(second.pedestrianIds[k]!)).toBe(true);
+      const o = k * 8;
+      expect(Number.isFinite(second.pedestrians[o]!) && Number.isFinite(second.pedestrians[o + 1]!)).toBe(true);
+      expect(second.pedestrians[o + 4]!).toBeGreaterThanOrEqual(0);
+      expect(second.pedestrians[o + 4]!).toBeLessThan(2 * Math.PI + 1e-6);
+      expect(second.pedestrians[o + 5]!).toBeLessThan(16);
+      expect([0, 1, 2]).toContain(second.pedestrians[o + 6]);
+    }
+    // Clock: 06:30 + 10 × physical seconds.
+    expect(second.stats.clock.dayTime).toBeCloseTo(6.5 * 3600 + (second.stats.time * 10), 6);
   });
 
   it('spawnVehicle rejects unknown lanes, types and occupied spots', () => {
@@ -185,7 +285,8 @@ describe('Simulation', () => {
       { type: 'building.place', building: { id: 'shop1', typeId: 'shop', pos: { x: 100, z: 40 }, rotation: 0 } },
       { type: 'building.place', building: { id: 'far', typeId: 'shop', pos: { x: 900, z: 900 }, rotation: 0 } },
     ]);
-    const sim = new Simulation(doc);
+    // Without citizens (with them, their own trips replace this demand; see citizens.test.ts).
+    const sim = new Simulation(doc, { citizens: false });
     const w = internals(sim);
     expect(w.demand.homes.length).toBe(2);
     // The far shop has no road within 80 m and is not attached.

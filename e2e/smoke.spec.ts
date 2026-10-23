@@ -378,3 +378,76 @@ test('real traffic on a road grid', async ({ page }) => {
   await page.screenshot({ path: 'test-results/traffic-flow.png' });
   expect(errors).toEqual([]);
 });
+
+test('phase 2b: street features, citizens walking out of homes, building studio', async ({ page }) => {
+  test.setTimeout(240_000);
+  const errors = trackErrors(page);
+  await page.goto(`/?offline=1&room=e2e-2b-${Date.now().toString(36)}`);
+  await page.waitForFunction(() => !!(window as unknown as { __smartcity?: CityHook }).__smartcity);
+  await lookAt(page, -40, 260, 260, 0, 20);
+  const state = () => page.evaluate(() => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState() as unknown as {
+    doc: { features: Record<string, { kind: string; signal?: boolean }>; segments: Record<string, { schoolZone?: boolean }>; buildingTypes: Record<string, unknown> };
+    simStats: { pedestrians?: number; citizens?: { total: number; walking: number } } | null;
+  });
+
+  // A cross of two-lane roads (with sidewalks).
+  await page.locator('[data-tool="road"]').click();
+  await clickWorld(page, -160, 0);
+  await clickWorld(page, 160, 0);
+  await page.keyboard.press('Escape');
+  await clickWorld(page, 0, -120);
+  await clickWorld(page, 0, 120);
+  await page.keyboard.press('Escape');
+  await expect.poll(async () => (await counts(page)).segments, { timeout: 5000 }).toBeGreaterThanOrEqual(4);
+
+  // Street tool (8): a mid-block crosswalk and a speed bump, far from the junction.
+  await page.keyboard.press('8');
+  await page.locator('[data-street-mode="signalCrosswalk"]').click();
+  await clickWorld(page, 90, 0);
+  await page.locator('[data-street-mode="speedBump"]').click();
+  await clickWorld(page, -90, 0);
+  await expect.poll(async () => Object.values((await state()).doc.features).map((f) => f.kind).sort(), { timeout: 5000 }).toEqual(['crosswalk', 'speedBump']);
+  // Too close to the junction: refused (red ghost, nothing placed).
+  await clickWorld(page, 8, 0);
+  await page.waitForTimeout(300);
+  expect(Object.keys((await state()).doc.features)).toHaveLength(2);
+  await page.screenshot({ path: 'test-results/phase2b-street-features.png' });
+
+  // Homes first, workplaces after (citizens must still find jobs), all next to the roads.
+  await page.keyboard.press('3');
+  await page.locator('.tool-options button', { hasText: '아파트' }).click();
+  await clickWorld(page, -60, 30);
+  await clickWorld(page, 60, -30);
+  await page.locator('.tool-options button', { hasText: '오피스 타워' }).click();
+  await clickWorld(page, 60, 34);
+  await page.locator('.tool-options button', { hasText: '근린상가' }).click();
+  await clickWorld(page, -60, -26);
+  await expect.poll(async () => (await counts(page)).buildings, { timeout: 5000 }).toBe(4);
+
+  // Citizens leave their homes and walk: run at 4× until pedestrians are out.
+  await page.locator('.row.speed button', { hasText: '4×' }).first().click();
+  await expect.poll(async () => (await state()).simStats?.pedestrians ?? 0, { timeout: 150_000, intervals: [2000] }).toBeGreaterThan(0);
+  const citizens = (await state()).simStats!.citizens!;
+  expect(citizens.total).toBeGreaterThan(0);
+  await lookAt(page, -10, 70, 90, 0, 10);
+  await page.screenshot({ path: 'test-results/phase2b-pedestrians.png' });
+
+  // Building studio: stack a few blocks with clicks and save a new design.
+  const typesBefore = Object.keys((await state()).doc.buildingTypes).length;
+  await page.locator('[role="tab"]', { hasText: '건물' }).click();
+  await page.locator('[data-studio-new]').click();
+  await expect(page.locator('[data-studio]')).toBeVisible();
+  const canvas = page.locator('[data-studio] canvas').first();
+  const box = (await canvas.boundingBox())!;
+  for (const [dx, dy] of [[0, 0], [0, 0], [30, 10], [-30, 10]]) {
+    await page.mouse.click(box.x + box.width / 2 + dx!, box.y + box.height / 2 + dy!);
+    await page.waitForTimeout(150);
+  }
+  await expect(page.locator('[data-studio-save]')).toBeEnabled({ timeout: 5000 });
+  await page.screenshot({ path: 'test-results/phase2b-studio.png' });
+  await page.locator('[data-studio-save]').click();
+  await expect(page.locator('[data-studio-notice]')).toBeVisible({ timeout: 5000 });
+  expect(Object.keys((await state()).doc.buildingTypes).length).toBe(typesBefore + 1);
+
+  expect(errors).toEqual([]);
+});

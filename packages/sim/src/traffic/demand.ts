@@ -90,11 +90,14 @@ function originLane(net: Net, segId: string, dir: TravelDir): number {
 export function generateTrips(w: World): void {
   const m = w.demand;
   if (m.typeIds.length === 0) return;
-  const rate = (w.doc.meta.trafficDensity * Math.min(m.totalLen / 60, 2000)) / 30;
+  // With citizens their own trips replace home ↔ work demand; what remains is background traffic
+  // between random lanes at 0.3 × the rate (ADR 0008 §4).
+  const citizens = w.cz.count > 0;
+  const rate = ((citizens ? 0.3 : 1) * (w.doc.meta.trafficDensity * Math.min(m.totalLen / 60, 2000))) / 30;
   const lam = rate * w.dt;
   const base = Math.floor(lam);
   const n = base + (w.rng.next() < lam - base ? 1 : 0);
-  const useBuildings = m.homes.length > 0 && m.works.length > 0;
+  const useBuildings = !citizens && m.homes.length > 0 && m.works.length > 0;
   for (let i = 0; i < n; i++) {
     if (w.vehicles.length + w.queue.length >= w.maxVehicles) return;
     const typeId = m.typeIds[w.rng.weighted(m.typeW)]!;

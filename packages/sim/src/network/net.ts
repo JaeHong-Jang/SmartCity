@@ -34,6 +34,43 @@ export interface Net {
   groups: Map<string, number[]>;
 }
 
+/**
+ * Allocation-free pose on a polyline for snapshots: writes x, z and heading at arc length `s` into
+ * out[o..o+2]. `back` = travelling against the polyline; `lateral` = offset to the right of travel.
+ */
+export function writePose(pts: readonly Vec2[], cum: readonly number[], s: number, back: boolean, lateral: number, out: Float32Array, o: number): void {
+  const last = cum.length - 1;
+  const t = Math.max(0, Math.min(cum[last]!, s));
+  let lo = 0;
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid]! <= t) lo = mid;
+    else hi = mid;
+  }
+  const a = pts[lo]!;
+  const b = pts[hi]!;
+  const seg = cum[hi]! - cum[lo]!;
+  const u = seg > 0 ? (t - cum[lo]!) / seg : 0;
+  let tx = b.x - a.x;
+  let tz = b.z - a.z;
+  const l = Math.hypot(tx, tz);
+  if (l > 0) {
+    tx /= l;
+    tz /= l;
+  } else {
+    tx = 1;
+    tz = 0;
+  }
+  if (back) {
+    tx = -tx;
+    tz = -tz;
+  }
+  out[o] = a.x + (b.x - a.x) * u - tz * lateral;
+  out[o + 1] = a.z + (b.z - a.z) * u + tx * lateral;
+  out[o + 2] = Math.atan2(tz, tx);
+}
+
 export const groupKey = (segmentId: string, dir: 'forward' | 'backward'): string => `${segmentId}|${dir === 'forward' ? 'f' : 'b'}`;
 
 export function buildNet(graph: RoadGraph): Net {

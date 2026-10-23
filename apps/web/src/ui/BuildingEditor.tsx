@@ -3,7 +3,7 @@
 // from, so a concurrent edit is rejected instead of silently overwritten (ADR 0007 §5).
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { cloneJson, partOutline, SMART_CITY_PRESETS, type BuildingPart, type BuildingType, type CellKey, type Command, type Zone } from '@smartcity/shared';
+import { cloneJson, partOutline, partsToVoxels, SMART_CITY_PRESETS, type BuildingPart, type BuildingType, type CellKey, type Command, type Zone } from '@smartcity/shared';
 import { buildingPreview } from '../render/buildings';
 import { FootprintPainter } from './building/FootprintPainter';
 import { MetricsPanel } from './building/MetricsPanel';
@@ -14,6 +14,8 @@ import './building/building.css';
 import { translateError } from '../app/store';
 import { useServices, useStore } from './context';
 import { PartPreview } from './PartPreview';
+import { TOO_LARGE_KO } from '../studio/design';
+import { openStudio } from './studio/studioHost';
 import { ZONE_KO } from './Toolbar';
 
 const PLOTS = [40, 60, 80, 120, 160];
@@ -58,6 +60,7 @@ export function BuildingEditor() {
   const inUse = bt ? (counts.get(bt.id) ?? 0) : 0;
   const part = bt?.parts[Math.min(partIdx, (bt?.parts.length ?? 1) - 1)];
   const plot = plotChoice ?? (bt ? autoPlot(bt.parts) : 60);
+  const studioTooLarge = useMemo(() => (bt ? partsToVoxels(bt.parts).tooLarge : false), [bt]);
 
   const cmd: Upsert | null = draft ? { type: 'buildingType.upsert', buildingType: draft, expectedRev: baseRev } : null;
   const check = useMemo(() => (cmd ? preflight(doc, cmd) : null), [doc, docVersion, draft, baseRev]);
@@ -151,7 +154,7 @@ export function BuildingEditor() {
     if (ref !== null) setSaving({ ref, id: cmd.buildingType.id, seq: editSeq.current, rev: baseRev });
   };
 
-  const previewKey = bt ? JSON.stringify([bt.parts, bt.smart ?? null, plot]) : '';
+  const previewKey = bt ? JSON.stringify([bt.parts, bt.smart ?? null, bt.props ?? null, plot]) : '';
   const conflict = (check && !check.ok && check.error === CONFLICT_KO) || saveError === CONFLICT_KO;
   const error = saveError ?? (check && !check.ok ? check.error : null);
   const painterKey = bt && part ? `${bt.id}|${partIdx}|${gen}|${part.footprint ? 'fp' : JSON.stringify([part.offset, part.width, part.depth])}` : '';
@@ -160,7 +163,10 @@ export function BuildingEditor() {
     <>
       <div className="row">
         <h3 style={{ flex: 1 }}>건물 설계</h3>
-        <button onClick={() => startNew({ id: dispatcher.ids().next('bt'), name: '새 설계', zone: 'residential', parts: [newPart()] })}>+ 새 설계</button>
+        <button className="primary" data-studio-new title="3D에서 블록을 쌓고 칠하고 꾸며서 만들기" onClick={() => openStudio({ type: null, baseRev: 0 })}>
+          3D 스튜디오로 새로 만들기
+        </button>
+        <button title="숫자·평면으로 만드는 정밀 모드" onClick={() => startNew({ id: dispatcher.ids().next('bt'), name: '새 설계', zone: 'residential', parts: [newPart()] })}>+ 새 설계</button>
       </div>
       <div className="list bp-designs">
         {Object.values(doc.buildingTypes).map((t) => (
@@ -193,6 +199,15 @@ export function BuildingEditor() {
         <>
           <hr />
           <PartPreview deps={previewKey} height={200} build={() => buildingPreview(bt, plot)} />
+          <button
+            className="primary"
+            data-studio-open
+            disabled={studioTooLarge}
+            title={studioTooLarge ? TOO_LARGE_KO : '이 설계를 3D 스튜디오에서 블록으로 편집합니다'}
+            onClick={() => openStudio({ type: cloneJson(bt), baseRev: draft ? baseRev : (bt.rev ?? 0), onPrecise: (id) => (doc.buildingTypes[id] ? select(id) : undefined) })}
+          >
+            3D 스튜디오로 열기
+          </button>
           <div className="row">
             <label>이름</label>
             <input type="text" value={bt.name} maxLength={80} onChange={(e) => edit((t) => void (t.name = e.target.value))} style={{ flex: 1 }} />
@@ -211,7 +226,9 @@ export function BuildingEditor() {
 
           <div className="bp-section">
             <div className="row">
-              <h3 style={{ flex: 1 }}>볼륨(매스)</h3>
+              <h3 style={{ flex: 1 }}>
+                볼륨(매스) <span className="muted">· 정밀 모드</span>
+              </h3>
               <button
                 disabled={bt.parts.length >= 16}
                 onClick={() => {

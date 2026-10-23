@@ -18,7 +18,7 @@ export interface RouteResult {
 const HEURISTIC_SPEED = 40;
 const QUEUE_COST = 2;
 
-class MinHeap {
+export class MinHeap {
   private f = new Float64Array(256);
   private e = new Int32Array(256);
   size = 0;

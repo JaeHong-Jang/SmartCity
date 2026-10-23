@@ -24,6 +24,8 @@ export interface RoadSegment {
   b: NodeId;
   roadTypeId: RoadTypeId;
   control?: Vec2;
+  /** 어린이보호구역: 30 km/h, and vehicles stop before every unsignalized crosswalk on it. */
+  schoolZone?: boolean;
 }
 
 export interface RoadType {
@@ -89,12 +91,43 @@ export interface SmartFeatures {
   dronePort: boolean;
 }
 
+/** Decorations snapped onto a design in the building studio (closed set; rendered from primitives). */
+export const PROP_KINDS = [
+  'balcony',
+  'awning',
+  'sign',
+  'ac',
+  'antenna',
+  'waterTank',
+  'chimney',
+  'planter',
+  'tree',
+  'flag',
+  'solarPanel',
+  'helipad',
+  'canopy',
+  'bench',
+] as const;
+export type PropKind = (typeof PROP_KINDS)[number];
+
+export interface BuildingProp {
+  kind: PropKind;
+  /** Building frame, meters; y = height of the prop's base. */
+  pos: { x: number; y: number; z: number };
+  /** Quarter turns 0..3; wall props face away from the wall they are attached to. */
+  rot: number;
+  /** Width multiplier, 0.5..4. */
+  size: number;
+  color: string;
+}
+
 export interface BuildingType {
   id: BuildingTypeId;
   name: string;
   zone: Zone;
   parts: BuildingPart[];
   smart?: SmartFeatures;
+  props?: BuildingProp[];
   /** Revision, incremented by applyCommand on every upsert (clients send `expectedRev` to avoid lost updates). */
   rev?: number;
 }
@@ -150,7 +183,13 @@ export interface SignalPhase {
 
 export interface IntersectionControl {
   nodeId: NodeId;
-  kind: 'signal' | 'uncontrolled';
+  /** allStop = every approach stops at the line before entering (모든 방향 일시정지). */
+  kind: 'signal' | 'uncontrolled' | 'allStop';
+  /**
+   * Legs (approach segments) that get an automatic crosswalk. Omitted = every leg with a sidewalk at a
+   * junction of degree ≥ 3; [] = none.
+   */
+  crosswalkLegs?: SegmentId[];
   /** Omitted = phases are derived automatically from geometry. */
   phases?: SignalPhase[];
   yellow: number;
@@ -202,6 +241,20 @@ export interface Parcel {
   regulation: Regulation;
 }
 
+export type RoadFeatureKind = 'crosswalk' | 'speedBump';
+export type RoadFeatureId = string;
+
+/** Point equipment placed on a segment (횡단보도, 과속방지턱). */
+export interface RoadFeature {
+  id: RoadFeatureId;
+  segmentId: SegmentId;
+  kind: RoadFeatureKind;
+  /** Fraction (0..1) of the segment's arc length from node a (not the Bezier parameter of segment.split). */
+  t: number;
+  /** crosswalk only: has its own pedestrian signal. */
+  signal?: boolean;
+}
+
 /** A closed road. First hook for incident simulation. */
 export interface Closure {
   segmentId: SegmentId;
@@ -218,7 +271,7 @@ export interface CityMeta {
 }
 
 /** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
-export const DOC_VERSION = 2;
+export const DOC_VERSION = 3;
 
 export interface CityDoc {
   version: number;
@@ -234,15 +287,18 @@ export interface CityDoc {
   busLines: Record<BusLineId, BusLine>;
   closures: Record<SegmentId, Closure>;
   parcels: Record<ParcelId, Parcel>;
+  features: Record<RoadFeatureId, RoadFeature>;
 }
 
 /**
  * Migrate a doc saved by an older version (in place). v1 → v2: parcels collection, design
  * revisions, and the v1 city-hall preset whose wings overlapped by 1 m (v2 forbids overlapping volumes).
+ * v2 → v3: road features collection.
  */
 export function normalizeDoc(doc: CityDoc): CityDoc {
   // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
   doc.parcels ??= {};
+  doc.features ??= {};
   if (doc.version < 2) {
     for (const t of Object.values(doc.buildingTypes)) {
       t.rev ??= 1;
@@ -252,6 +308,7 @@ export function normalizeDoc(doc: CityDoc): CityDoc {
     }
     doc.version = 2;
   }
+  if (doc.version < 3) doc.version = 3;
   return doc;
 }
 

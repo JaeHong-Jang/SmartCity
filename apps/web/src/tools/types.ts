@@ -66,6 +66,8 @@ export interface Tool {
   onPointerUp(e: ToolPointer): void;
   /** Pointer left the viewport: drop hover-only state (not an in-progress drawing). */
   onLeave?(): void;
+  /** Right click without drag: return true when handled (otherwise the tool is cancelled). */
+  onSecondaryClick?(): boolean;
   /** Return true when the key was handled. */
   onKey?(e: KeyboardEvent): boolean;
   /** Return true to consume the wheel event (the camera does not zoom). */
