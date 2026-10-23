@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+harness/runs/*
+!harness/runs/.gitkeep
+apps/server/data/
+.omc/
+.fablize/
+test-results/
+playwright-report/

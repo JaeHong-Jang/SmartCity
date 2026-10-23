@@ -1,0 +1,266 @@
+import { useRef, useState, type ChangeEvent } from 'react';
+import type { PanelId, SimSpeed } from '../app/store';
+import { downloadText, exportDoc, startImport } from '../app/importExport';
+import { BuildingEditor } from './BuildingEditor';
+import { BusLinePanel } from './BusLinePanel';
+import { useServices, useStore } from './context';
+import { IconCity, IconDownload, IconPause, IconUpload } from './Icons';
+import { Inspector } from './Inspector';
+import { RoadTypeEditor } from './RoadTypeEditor';
+import { Toasts } from './Toasts';
+import { ToolOptions, Toolbar } from './Toolbar';
+import { VehicleEditor } from './VehicleEditor';
+
+const CONNECTION_KO = {
+  connecting: { text: '연결 중…', color: '#fbbf24' },
+  online: { text: '온라인', color: '#4ade80' },
+  reconnecting: { text: '재연결 중…', color: '#fbbf24' },
+  offline: { text: '오프라인(단독 모드)', color: '#94a3b8' },
+} as const;
+
+function TopBar() {
+  const { store, dispatcher, setName } = useServices();
+  const docVersion = useStore((s) => s.docVersion);
+  const doc = useStore((s) => s.doc);
+  const connection = useStore((s) => s.connection);
+  const peers = useStore((s) => s.peers);
+  const room = useStore((s) => s.room);
+  const myName = useStore((s) => s.name);
+  const clientId = useStore((s) => s.clientId);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const c = CONNECTION_KO[connection];
+
+  const onImport = async (e: ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    const text = await f.text();
+    const err = startImport(text, sessionStorage, (r) => {
+      location.search = `?room=${r}`;
+    });
+    if (err) store.toast(`가져오기 실패: ${err}`, 'error');
+  };
+
+  return (
+    <header className="panel topbar">
+      <div className="brand">
+        <IconCity />
+        <span>스마트시티</span>
+      </div>
+      <input
+        key={docVersion}
+        className="city-name"
+        aria-label="도시 이름"
+        defaultValue={doc.meta.name}
+        onBlur={(e) => {
+          const v = e.target.value.trim();
+          if (v && v !== doc.meta.name) dispatcher.dispatch({ type: 'meta.update', name: v.slice(0, 80) });
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+        }}
+      />
+      <span className="room">방: {room}</span>
+      <span className="badge" data-connection={connection}>
+        <span className="dot" style={{ background: c.color }} />
+        {c.text}
+      </span>
+      <div className="spacer" />
+      <div className="peers" aria-label="접속자">
+        {peers.map((p) => (
+          <div key={p.clientId} className="avatar" title={p.clientId === clientId ? `${p.name} (나)` : p.name} style={{ background: p.color }}>
+            {p.name.length > 2 ? p.name.slice(-2) : p.name}
+          </div>
+        ))}
+        <span className="muted" style={{ marginLeft: 4 }}>
+          {peers.length}명
+        </span>
+      </div>
+      <div className="sep" />
+      {nameDraft === null ? (
+        <button title="내 이름 바꾸기" onClick={() => setNameDraft(myName)}>
+          {myName}
+        </button>
+      ) : (
+        <input
+          type="text"
+          autoFocus
+          aria-label="내 이름"
+          value={nameDraft}
+          maxLength={32}
+          style={{ width: 110 }}
+          onChange={(e) => setNameDraft(e.target.value)}
+          onBlur={() => {
+            if (nameDraft.trim() && nameDraft !== myName) setName(nameDraft);
+            setNameDraft(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+            if (e.key === 'Escape') setNameDraft(null);
+          }}
+        />
+      )}
+      <button title="도시를 JSON 파일로 내보내기" onClick={() => downloadText(`${doc.meta.name || 'city'}.json`, exportDoc(doc))}>
+        <span className="row" style={{ gap: 5 }}>
+          <IconDownload /> 내보내기
+        </span>
+      </button>
+      <button title="JSON 파일을 새 방으로 가져오기" onClick={() => fileRef.current?.click()}>
+        <span className="row" style={{ gap: 5 }}>
+          <IconUpload /> 가져오기
+        </span>
+      </button>
+      <input ref={fileRef} className="hidden-file" type="file" accept="application/json,.json" onChange={onImport} />
+    </header>
+  );
+}
+
+const SPEEDS: { v: SimSpeed; label: string }[] = [
+  { v: 0, label: '정지' },
+  { v: 1, label: '1×' },
+  { v: 2, label: '2×' },
+  { v: 4, label: '4×' },
+];
+
+function StatusBar() {
+  const { store, dispatcher } = useServices();
+  const render = useStore((s) => s.render);
+  const stats = useStore((s) => s.simStats);
+  const simStatus = useStore((s) => s.simStatus);
+  const speed = useStore((s) => s.simSpeed);
+  const overlays = useStore((s) => s.overlays);
+  const density = useStore((s) => s.doc.meta.trafficDensity);
+  useStore((s) => s.docVersion);
+  const [densityDraft, setDensityDraft] = useState<number | null>(null);
+  const simText = simStatus === 'ready' ? null : simStatus === 'starting' ? '시뮬레이션 준비 중' : '시뮬레이션 준비 중 (교통 엔진 대기)';
+
+  return (
+    <footer className="panel statusbar">
+      <div className="stat">
+        <span>FPS</span>
+        <b>{render.fps}</b>
+      </div>
+      <div className="stat">
+        <span>드로우콜</span>
+        <b>{render.drawCalls}</b>
+      </div>
+      <div className="sep" />
+      {simText ? (
+        <span className="sim-note" data-sim-status={simStatus}>
+          {simText}
+        </span>
+      ) : (
+        <>
+          <div className="stat">
+            <span>차량</span>
+            <b>{stats?.vehicles ?? 0}</b>
+          </div>
+          <div className="stat">
+            <span>평균 속도</span>
+            <b>{((stats?.avgSpeed ?? 0) * 3.6).toFixed(0)} km/h</b>
+          </div>
+          <div className="stat">
+            <span>제거</span>
+            <b>{stats?.removed ?? 0}</b>
+          </div>
+        </>
+      )}
+      <div className="sep" />
+      <div className="row speed" role="group" aria-label="시뮬레이션 속도">
+        {SPEEDS.map((s) => (
+          <button key={s.v} className={speed === s.v ? 'active' : ''} onClick={() => store.set({ simSpeed: s.v })} title={`시뮬레이션 ${s.label}`}>
+            {s.v === 0 ? <IconPause /> : s.label}
+          </button>
+        ))}
+      </div>
+      <label className="row" title="교통 밀도 (모든 참여자에게 적용)">
+        <span className="muted">교통 밀도</span>
+        <input
+          className="density"
+          type="range"
+          min={0}
+          max={3}
+          step={0.1}
+          value={densityDraft ?? density}
+          onChange={(e) => setDensityDraft(Number(e.target.value))}
+          onPointerUp={() => {
+            if (densityDraft !== null && densityDraft !== density) dispatcher.dispatch({ type: 'meta.update', trafficDensity: densityDraft });
+            setDensityDraft(null);
+          }}
+          onKeyUp={() => {
+            if (densityDraft !== null && densityDraft !== density) dispatcher.dispatch({ type: 'meta.update', trafficDensity: densityDraft });
+            setDensityDraft(null);
+          }}
+        />
+        <b style={{ width: 28 }}>{(densityDraft ?? density).toFixed(1)}</b>
+      </label>
+      <div className="sep" />
+      <label className="toggle">
+        <input type="checkbox" checked={overlays.flow} onChange={(e) => store.set({ overlays: { ...overlays, flow: e.target.checked } })} />
+        교통 흐름
+      </label>
+      <label className="toggle">
+        <input type="checkbox" checked={overlays.shadows} onChange={(e) => store.set({ overlays: { ...overlays, shadows: e.target.checked } })} />
+        그림자
+      </label>
+      <div className="spacer" />
+      <span className="muted" title="Phase 1: 차량은 각자의 브라우저에서 계산되어 참여자마다 다를 수 있습니다">
+        교통은 참여자별 미리보기
+      </span>
+    </footer>
+  );
+}
+
+const TABS: { id: PanelId; label: string }[] = [
+  { id: 'inspector', label: '속성' },
+  { id: 'roadTypes', label: '도로' },
+  { id: 'buildings', label: '건물' },
+  { id: 'vehicles', label: '차량' },
+  { id: 'busLines', label: '노선' },
+];
+
+function SidePanel() {
+  const { store } = useServices();
+  const panel = useStore((s) => s.panel);
+  return (
+    <aside className="panel side" aria-label="편집 패널">
+      <div className="tabs" role="tablist">
+        {TABS.map((t) => (
+          <button key={t.id} role="tab" aria-selected={panel === t.id} className={panel === t.id ? 'active' : ''} onClick={() => store.set({ panel: panel === t.id ? null : t.id })}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {panel && (
+        <div className="side-body">
+          {panel === 'inspector' && <Inspector />}
+          {panel === 'roadTypes' && <RoadTypeEditor />}
+          {panel === 'buildings' && <BuildingEditor />}
+          {panel === 'vehicles' && <VehicleEditor />}
+          {panel === 'busLines' && <BusLinePanel />}
+        </div>
+      )}
+    </aside>
+  );
+}
+
+function ToolHint() {
+  const hint = useStore((s) => s.toolHint);
+  if (!hint) return null;
+  return <div className="panel hint">{hint}</div>;
+}
+
+export function App() {
+  return (
+    <>
+      <TopBar />
+      <Toolbar />
+      <ToolOptions />
+      <SidePanel />
+      <ToolHint />
+      <Toasts />
+      <StatusBar />
+    </>
+  );
+}
