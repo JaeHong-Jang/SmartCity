@@ -27,6 +27,6 @@ describe('alignToRoad', () => {
 
   it('returns null far from roads, and a building on the road is invalid', () => {
     expect(alignToRoad(doc, idx, house, { x: 0, z: 200 })).toBeNull();
-    expect(placementValid(doc, house, { pos: { x: 0, z: 0 }, rotation: 0, segmentId: null })).toBe(false);
+    expect(placementValid(doc, house, { pos: { x: 0, z: 0 }, rotation: 0 })).toBe(false);
   });
 });

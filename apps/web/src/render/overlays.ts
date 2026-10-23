@@ -1,5 +1,6 @@
-// Overlays: local tool preview, collaborator ghosts and cursors, pending pulses, rejected flashes,
-// selection, bus lines, closures, signal phase arrows and the traffic flow overlay.
+// Overlays: local tool preview, collaborator ghosts, cursors and selections, pending pulses, rejected
+// flashes, selection (with front arrow + rotation ring), parcels, bus lines, closures, signal phase
+// arrows and the traffic flow overlay.
 
 import * as THREE from 'three';
 import {
@@ -7,21 +8,25 @@ import {
   buildingFootprints,
   cumulativeLengths,
   normalize,
+  partOutline,
   pointAtLength,
   rightNormal,
   scale,
   slicePolyline,
   sub,
+  type BuildingPart,
+  type BuildingType,
   type CityDoc,
   type Vec2,
 } from '@smartcity/shared';
 import type { ClientState, ClientStore } from '../app/store';
 import type { SimulationStream } from '../sim/simStream';
+import { buildingGizmo } from '../tools/highlight';
 import type { ToolPreview } from '../tools/types';
 import { MeshBuilder } from './meshBuilder';
+import { centroid, ParcelLayer } from './parcels';
 import type { RoadNetworkGeom } from './roadNetwork';
 import { routeBetween, stopPosition } from './busRoute';
-import { roofHeight, wallHeight } from './buildings';
 
 const Y_OVER = 0.32;
 const _c = new THREE.Color();
@@ -89,6 +94,27 @@ function arrow(b: MeshBuilder, pts: readonly Vec2[], w: number, color: string, y
   b.tri(l.x, y, l.z, r.x, y, r.z, tip.x, y, tip.z, _c.set(color));
 }
 
+/** Height of a part's ghost box: walls plus a simple allowance for pitched roofs. */
+const ghostHeight = (p: BuildingPart): number => p.floors * p.floorHeight + (p.roof === 'flat' ? 0 : Math.min(p.width, p.depth) * 0.35);
+
+/** Translucent extruded outlines of a building type in its local frame (footprint parts included). */
+function ghostGeometries(type: BuildingType): THREE.BufferGeometry[] {
+  return type.parts.map((part) => {
+    const shape = new THREE.Shape(partOutline(part).map((v) => new THREE.Vector2(v.x, -v.z)));
+    const g = new THREE.ExtrudeGeometry(shape, { depth: ghostHeight(part), bevelEnabled: false });
+    g.rotateX(-Math.PI / 2);
+    g.translate(0, part.baseHeight, 0);
+    return g;
+  });
+}
+
+interface PeerTag {
+  el: HTMLDivElement;
+  x: number;
+  y: number;
+  z: number;
+}
+
 export class OverlayLayer {
   readonly group = new THREE.Group();
   private preview: DynLayer;
@@ -102,8 +128,10 @@ export class OverlayLayer {
   private flow: DynLayer;
   private cursorMesh: THREE.InstancedMesh;
   private ghostBuilding = new THREE.Group();
-  private ghostWallMat = new THREE.MeshBasicMaterial({ color: '#4ade80', transparent: true, opacity: 0.45, depthWrite: false });
-  private ghostBox = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+  private ghostWallMat = new THREE.MeshBasicMaterial({ color: '#4ade80', transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
+  private ghostKey = '';
+  private parcels: ParcelLayer;
+  private peerTags: PeerTag[] = [];
   private labels = new Map<string, HTMLDivElement>();
   private prev: Partial<ClientState> = {};
   private flowGraph: unknown = null;
@@ -134,6 +162,8 @@ export class OverlayLayer {
     this.cursorMesh.frustumCulled = false;
     this.group.add(this.cursorMesh);
     this.group.add(this.ghostBuilding);
+    this.parcels = new ParcelLayer(labelRoot);
+    this.group.add(this.parcels.group);
   }
 
   setPreview(p: ToolPreview): void {
@@ -142,22 +172,30 @@ export class OverlayLayer {
     for (const pt of p.points) disc(b, pt.pos, pt.radius, pt.color, Y_OVER + 0.04);
     this.preview.set(b);
 
-    // Translucent 3D ghost for building placement.
-    for (const c of [...this.ghostBuilding.children]) this.ghostBuilding.remove(c);
+    // Translucent 3D ghost for building placement and moves (geometry cached per design revision).
     const pb = p.building;
     const doc = this.store.getState().doc;
     const type = pb ? doc.buildingTypes[pb.typeId] : undefined;
-    if (pb && type) {
-      this.ghostWallMat.color.set(pb.ok ? '#4ade80' : '#f87171');
-      for (const part of type.parts) {
-        const m = new THREE.Mesh(this.ghostBox, this.ghostWallMat);
-        const o = { x: part.offset.x * Math.cos(pb.rotation) + part.offset.z * Math.sin(pb.rotation), z: -part.offset.x * Math.sin(pb.rotation) + part.offset.z * Math.cos(pb.rotation) };
-        m.position.set(pb.pos.x + o.x, part.baseHeight, pb.pos.z + o.z);
-        m.rotation.y = pb.rotation;
-        m.scale.set(part.width, wallHeight(part) + roofHeight(part), part.depth);
-        m.renderOrder = 14;
-        this.ghostBuilding.add(m);
+    const key = type ? `${type.id}:${type.rev ?? 0}:${JSON.stringify(type.parts).length}` : '';
+    if (key !== this.ghostKey) {
+      this.ghostKey = key;
+      for (const c of [...this.ghostBuilding.children]) {
+        (c as THREE.Mesh).geometry.dispose();
+        this.ghostBuilding.remove(c);
       }
+      if (type) {
+        for (const g of ghostGeometries(type)) {
+          const m = new THREE.Mesh(g, this.ghostWallMat);
+          m.renderOrder = 14;
+          this.ghostBuilding.add(m);
+        }
+      }
+    }
+    this.ghostBuilding.visible = !!(pb && type);
+    if (pb && type) {
+      this.ghostWallMat.color.set(pb.color);
+      this.ghostBuilding.position.set(pb.pos.x, 0, pb.pos.z);
+      this.ghostBuilding.rotation.y = pb.rotation;
     }
   }
 
@@ -166,7 +204,8 @@ export class OverlayLayer {
     const s = this.store.getState();
     const p = this.prev;
     const docChanged = p.docVersion !== s.docVersion;
-    if (p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
+    if (docChanged || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
+    if (docChanged || p.overlays?.violations !== s.overlays.violations) this.parcels.update(s.doc, s.overlays.violations);
     if (p.pending !== s.pending) this.buildPending(s);
     if (p.flashes !== s.flashes) this.buildFlash(s);
     if (docChanged || p.selection !== s.selection) this.buildSelection(s);
@@ -180,11 +219,58 @@ export class OverlayLayer {
 
   private buildPeers(s: ClientState): void {
     const b = new MeshBuilder();
-    const colorOf = new Map(s.peers.map((p) => [p.clientId, p.color]));
+    for (const t of this.peerTags) t.el.remove();
+    this.peerTags = [];
     for (const [id, pr] of Object.entries(s.presence)) {
-      if (pr.ghost.length >= 2) line(b, pr.ghost, 3, colorOf.get(id) ?? '#ffffff', Y_OVER + 0.01);
+      const peer = s.peers.find((p) => p.clientId === id);
+      const color = peer?.color ?? '#ffffff';
+      if (pr.ghost.length >= 2) line(b, pr.ghost, 3, color, Y_OVER + 0.01);
+      // What the collaborator has selected: outline in their color plus a name badge.
+      const anchor = pr.selection ? this.outlineEntity(b, s.doc, pr.selection, color) : null;
+      if (anchor && peer) {
+        const el = document.createElement('div');
+        el.className = 'peer-sel-label';
+        el.textContent = `${peer.name} 편집 중`;
+        el.style.setProperty('--peer', color);
+        this.labelRoot.appendChild(el);
+        this.peerTags.push({ el, x: anchor.x, y: 3, z: anchor.z });
+      }
     }
     this.peers.set(b);
+  }
+
+  /** Draw an outline around the entity with this id (any kind); returns where its badge goes. */
+  private outlineEntity(b: MeshBuilder, doc: CityDoc, id: string, color: string): Vec2 | null {
+    const bd = doc.buildings[id];
+    const t = bd ? doc.buildingTypes[bd.typeId] : undefined;
+    if (bd && t) {
+      for (const poly of buildingFootprints(bd, t)) outline(b, poly, 1, color, Y_OVER + 0.01);
+      return bd.pos;
+    }
+    const g = this.network().segments.get(id);
+    if (g) {
+      b.band(g.centerline, g.halfWidth - 0.35, g.halfWidth + 0.35, Y_OVER + 0.01, _c.set(color));
+      b.band(g.centerline, -g.halfWidth - 0.35, -g.halfWidth + 0.35, Y_OVER + 0.01, _c);
+      const cum = cumulativeLengths(g.centerline);
+      return pointAtLength(g.centerline, cum, cum[cum.length - 1]! / 2);
+    }
+    const n = doc.nodes[id];
+    if (n) {
+      ring(b, n.pos, 10, 0.7, color, Y_OVER + 0.01);
+      return n.pos;
+    }
+    const st = doc.busStops[id];
+    const sp = st ? stopPosition(doc, st) : null;
+    if (sp) {
+      ring(b, sp, 5, 0.6, color, Y_OVER + 0.01);
+      return sp;
+    }
+    const pc = doc.parcels[id];
+    if (pc) {
+      outline(b, pc.polygon, 1, color, Y_OVER + 0.01);
+      return centroid(pc.polygon);
+    }
+    return null;
   }
 
   private buildPending(s: ClientState): void {
@@ -217,7 +303,15 @@ export class OverlayLayer {
     } else if (sel?.kind === 'building') {
       const bd = doc.buildings[sel.id];
       const t = bd ? doc.buildingTypes[bd.typeId] : undefined;
-      if (bd && t) for (const poly of buildingFootprints(bd, t)) outline(b, poly, 0.8, '#38bdf8');
+      if (bd && t) {
+        for (const poly of buildingFootprints(bd, t)) outline(b, poly, 0.8, '#38bdf8');
+        const g = buildingGizmo(bd, t);
+        line(b, g.ring, 0.45, '#7dd3fc');
+        arrow(b, g.arrow, 0.9, '#38bdf8');
+      }
+    } else if (sel?.kind === 'parcel') {
+      const pc = doc.parcels[sel.id];
+      if (pc) outline(b, pc.polygon, 0.9, '#38bdf8', Y_OVER + 0.01);
     } else if (sel?.kind === 'busStop') {
       const st = doc.busStops[sel.id];
       const p = st ? stopPosition(doc, st) : null;
@@ -347,7 +441,7 @@ export class OverlayLayer {
   }
 
   /** Per-frame work: pulse, flow colors, cursor markers and name labels. No allocation in steady state. */
-  update(now: number, camera: THREE.Camera, width: number, height: number): void {
+  update(now: number, camera: THREE.Camera, cameraDistance: number, width: number, height: number): void {
     const s = this.store.getState();
     this.pending.mat.opacity = 0.3 + 0.25 * (0.5 + 0.5 * Math.sin(now / 160));
     const flash = s.flashes[0];
@@ -394,6 +488,13 @@ export class OverlayLayer {
       const visible = _v.z < 1 && _v.x > -1.1 && _v.x < 1.1 && _v.y > -1.1 && _v.y < 1.1;
       label.style.display = visible ? '' : 'none';
       if (visible) label.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
+    }
+    this.parcels.frame(camera, cameraDistance, width, height);
+    for (const t of this.peerTags) {
+      _v.set(t.x, t.y, t.z).project(camera);
+      const visible = _v.z < 1 && _v.x > -1.05 && _v.x < 1.05 && _v.y > -1.05 && _v.y < 1.05;
+      t.el.style.display = visible ? '' : 'none';
+      if (visible) t.el.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
     }
     this.cursorMesh.count = n;
     if (n > 0) {

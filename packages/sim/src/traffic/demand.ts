@@ -1,7 +1,7 @@
 // Trip generation. With buildings: residential ↔ non-residential trips weighted by floor area, each
 // building attached to its nearest open segment (≤ 80 m). Without buildings: random lane-to-lane trips.
 
-import { closestPointOnPolyline, cross, cumulativeLengths, floorArea, sub, tangentAtLength, type CityDoc, type TravelDir } from '@smartcity/shared';
+import { buildingMetrics, closestPointOnPolyline, cross, cumulativeLengths, sub, tangentAtLength, type CityDoc, type TravelDir } from '@smartcity/shared';
 import { groupKey, type Net } from '../network/net.js';
 import { canPlace, type Goal, type World } from './world.js';
 
@@ -56,12 +56,17 @@ export function buildDemand(doc: CityDoc, net: Net): DemandModel {
     const cs = g.segments.get(best.segId)!;
     const dir: TravelDir = best.side < 0 && cs.roadType.lanesBackward > 0 ? 'backward' : 'forward';
     const acc: Access = { segId: best.segId, dir, t: best.len > 0 ? best.s / best.len : 0.5 };
-    if (type.zone === 'residential') {
+    // Mixed-use buildings are both an origin (homes) and a destination (workplaces, shops).
+    const byUse = buildingMetrics(type).areaByUse;
+    const home = byUse.residential;
+    const work = byUse.commercial + byUse.office + byUse.industrial + byUse.public;
+    if (home > 0) {
       m.homes.push(acc);
-      m.homeW.push(floorArea(type));
-    } else {
+      m.homeW.push(home);
+    }
+    if (work > 0) {
       m.works.push(acc);
-      m.workW.push(floorArea(type));
+      m.workW.push(work);
     }
   }
   return m;

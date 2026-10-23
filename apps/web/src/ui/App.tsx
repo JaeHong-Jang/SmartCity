@@ -1,10 +1,12 @@
 import { useRef, useState, type ChangeEvent } from 'react';
 import type { PanelId, SimSpeed } from '../app/store';
+import { SNAP_STEPS, snapLabel } from '../tools/snap';
 import { downloadText, exportDoc, startImport } from '../app/importExport';
 import { BuildingEditor } from './BuildingEditor';
 import { BusLinePanel } from './BusLinePanel';
 import { useServices, useStore } from './context';
-import { IconCity, IconDownload, IconPause, IconUpload } from './Icons';
+import { Dashboard } from './Dashboard';
+import { IconChart, IconCity, IconDownload, IconPause, IconUpload } from './Icons';
 import { Inspector } from './Inspector';
 import { RoadTypeEditor } from './RoadTypeEditor';
 import { Toasts } from './Toasts';
@@ -29,6 +31,7 @@ function TopBar() {
   const clientId = useStore((s) => s.clientId);
   const fileRef = useRef<HTMLInputElement>(null);
   const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const [dashboard, setDashboard] = useState(false);
   const c = CONNECTION_KO[connection];
 
   const onImport = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -66,6 +69,12 @@ function TopBar() {
         <span className="dot" style={{ background: c.color }} />
         {c.text}
       </span>
+      <button className={dashboard ? 'active' : ''} data-dashboard aria-expanded={dashboard} title="도시 현황 (설계 기준)" onClick={() => setDashboard(!dashboard)}>
+        <span className="row" style={{ gap: 5 }}>
+          <IconChart /> 도시 현황
+        </span>
+      </button>
+      {dashboard && <Dashboard onClose={() => setDashboard(false)} />}
       <div className="spacer" />
       <div className="peers" aria-label="접속자">
         {peers.map((p) => (
@@ -131,6 +140,7 @@ function StatusBar() {
   const speed = useStore((s) => s.simSpeed);
   const overlays = useStore((s) => s.overlays);
   const density = useStore((s) => s.doc.meta.trafficDensity);
+  const snapStep = useStore((s) => s.toolOptions.snapStep);
   useStore((s) => s.docVersion);
   const [densityDraft, setDensityDraft] = useState<number | null>(null);
   const simText = simStatus === 'ready' ? null : simStatus === 'starting' ? '시뮬레이션 준비 중' : '시뮬레이션 준비 중 (교통 엔진 대기)';
@@ -196,6 +206,17 @@ function StatusBar() {
         <b style={{ width: 28 }}>{(densityDraft ?? density).toFixed(1)}</b>
       </label>
       <div className="sep" />
+      <div className="row speed" role="group" aria-label="격자 스냅 (G)">
+        <span className="muted" title="G 키로 순환">
+          격자
+        </span>
+        {SNAP_STEPS.map((v) => (
+          <button key={v} data-snap={v} className={snapStep === v ? 'active' : ''} onClick={() => store.setToolOptions({ snapStep: v })} title={`격자 스냅 ${snapLabel(v)}`}>
+            {snapLabel(v)}
+          </button>
+        ))}
+      </div>
+      <div className="sep" />
       <label className="toggle">
         <input type="checkbox" checked={overlays.flow} onChange={(e) => store.set({ overlays: { ...overlays, flow: e.target.checked } })} />
         교통 흐름
@@ -203,6 +224,10 @@ function StatusBar() {
       <label className="toggle">
         <input type="checkbox" checked={overlays.shadows} onChange={(e) => store.set({ overlays: { ...overlays, shadows: e.target.checked } })} />
         그림자
+      </label>
+      <label className="toggle">
+        <input type="checkbox" checked={overlays.violations} onChange={(e) => store.set({ overlays: { ...overlays, violations: e.target.checked } })} />
+        규제 위반
       </label>
       <div className="spacer" />
       <span className="muted" title="Phase 1: 차량은 각자의 브라우저에서 계산되어 참여자마다 다를 수 있습니다">
@@ -224,7 +249,7 @@ function SidePanel() {
   const { store } = useServices();
   const panel = useStore((s) => s.panel);
   return (
-    <aside className="panel side" aria-label="편집 패널">
+    <aside className={`panel side${panel === 'buildings' ? ' side-wide' : ''}`} aria-label="편집 패널">
       <div className="tabs" role="tablist">
         {TABS.map((t) => (
           <button key={t.id} role="tab" aria-selected={panel === t.id} className={panel === t.id ? 'active' : ''} onClick={() => store.set({ panel: panel === t.id ? null : t.id })}>

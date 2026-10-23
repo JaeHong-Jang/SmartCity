@@ -11,5 +11,5 @@ describe('Client tag', () => {
     const first = await tagAfterBoot();
     const second = await tagAfterBoot();
     expect(first).not.toBe(second);
-  });
+  }, 30_000); // re-imports the module graph twice; slow under a parallel full run
 });

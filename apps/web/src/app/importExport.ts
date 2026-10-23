@@ -1,8 +1,19 @@
 // JSON export, and import into a fresh room as command batches (≤ LIMITS.batchSize each).
+// Items today's rules reject (e.g. a building on a road) are skipped instead of failing the import.
 
-import { applyCommand, createEmptyDoc, docToCommands, LIMITS, MAX_MESSAGE_BYTES, type CityDoc, type Command } from '@smartcity/shared';
+import {
+  applyCommand,
+  createEmptyDoc,
+  docToCommands,
+  DOC_VERSION,
+  LIMITS,
+  MAX_MESSAGE_BYTES,
+  normalizeDoc,
+  type CityDoc,
+  type Command,
+} from '@smartcity/shared';
 import type { Dispatcher } from './dispatch';
-import type { ClientStore } from './store';
+import { translateError, type ClientStore } from './store';
 
 const IMPORT_KEY = (room: string): string => `smartcity:import:${room}`;
 /** Leave headroom under the server's frame limit for the envelope. */
@@ -31,27 +42,58 @@ export function chunkCommands(cmds: Command[], maxCount: number = LIMITS.batchSi
   return out;
 }
 
-/** Parse and validate an exported city by replaying it into an empty doc. */
-export function parseImport(text: string): { ok: true; commands: Command[] } | { ok: false; error: string } {
+export interface ParsedImport {
+  ok: true;
+  commands: Command[];
+  /** Items left out because the current rules reject them. */
+  skipped: number;
+  /** Most common reasons for the skipped items (Korean). */
+  reasons: string[];
+}
+
+/**
+ * Parse an exported city (any doc version up to DOC_VERSION, migrated by normalizeDoc) and replay
+ * it into an empty doc with the server's rules; commands that fail are skipped and counted.
+ */
+export function parseImport(text: string): ParsedImport | { ok: false; error: string } {
   let doc: CityDoc;
   try {
     doc = JSON.parse(text) as CityDoc;
   } catch {
     return { ok: false, error: 'JSON 형식이 아닙니다' };
   }
-  if (!doc || doc.version !== 1 || typeof doc.meta !== 'object') return { ok: false, error: '도시 파일(version 1)이 아닙니다' };
-  let commands: Command[];
+  if (!doc || typeof doc !== 'object' || typeof doc.version !== 'number' || doc.version < 1 || typeof doc.meta !== 'object' || doc.meta === null) {
+    return { ok: false, error: '도시 파일이 아닙니다' };
+  }
+  if (doc.version > DOC_VERSION) return { ok: false, error: `더 새로운 버전(v${doc.version})의 도시 파일입니다. 앱을 업데이트하세요` };
+  let cmds: Command[];
   try {
-    commands = chunkCommands(docToCommands(doc));
+    cmds = docToCommands(normalizeDoc(doc));
   } catch {
     return { ok: false, error: '도시 파일 구조가 올바르지 않습니다' };
   }
   const check = createEmptyDoc();
-  for (const c of commands) {
+  const kept: Command[] = [];
+  const reasons = new Map<string, number>();
+  let skipped = 0;
+  for (const c of cmds) {
     const r = applyCommand(check, c);
-    if (!r.ok) return { ok: false, error: `검증 실패: ${r.error}` };
+    if (r.ok) {
+      kept.push(c);
+    } else {
+      skipped++;
+      const why = translateError(r.error);
+      reasons.set(why, (reasons.get(why) ?? 0) + 1);
+    }
   }
-  return { ok: true, commands };
+  const top = [...reasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k]) => k);
+  return { ok: true, commands: chunkCommands(kept), skipped, reasons: top };
+}
+
+interface StoredImport {
+  commands: Command[];
+  skipped: number;
+  reasons: string[];
 }
 
 export function newRoomId(): string {
@@ -66,7 +108,7 @@ export function startImport(text: string, storage: Storage, navigate: (room: str
   if (!parsed.ok) return parsed.error;
   const room = newRoomId();
   try {
-    storage.setItem(IMPORT_KEY(room), JSON.stringify(parsed.commands));
+    storage.setItem(IMPORT_KEY(room), JSON.stringify({ commands: parsed.commands, skipped: parsed.skipped, reasons: parsed.reasons } satisfies StoredImport));
   } catch {
     return '파일이 너무 커서 가져올 수 없습니다';
   }
@@ -84,7 +126,8 @@ export function resumeImport(store: ClientStore, dispatcher: Dispatcher, storage
     store.toast('이 방은 비어 있지 않아 가져오기를 건너뜁니다', 'error');
     return;
   }
-  const batches = JSON.parse(raw) as Command[];
+  const stored = JSON.parse(raw) as StoredImport;
+  const batches = stored.commands;
   let i = 0;
   let waiting: number | null = null;
   let seqAtSend = 0;
@@ -92,6 +135,9 @@ export function resumeImport(store: ClientStore, dispatcher: Dispatcher, storage
     if (i >= batches.length) {
       unsub();
       store.toast(`가져오기 완료 (${batches.length}개 묶음)`, 'success');
+      if (stored.skipped > 0) {
+        store.toast(`현재 규칙(도로 침범 등) 때문에 ${stored.skipped}개 항목을 가져오지 못했습니다: ${stored.reasons.join(' / ')}`, 'error');
+      }
       return;
     }
     seqAtSend = store.getState().seq;

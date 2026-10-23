@@ -23,8 +23,9 @@ function chromiumPath(): string | undefined {
 // E2E_SERVER=1 also starts apps/server (port 8790, throwaway data dir) for the collaboration test.
 // Ports differ from the dev defaults (5280/8780) so a running dev setup is never reused by accident.
 const withServer = process.env.E2E_SERVER === '1';
-const WEB_PORT = 5180;
-const SERVER_PORT = 8790;
+// E2E_WEB_PORT / E2E_SERVER_PORT override them when something else already listens there.
+const WEB_PORT = Number(process.env.E2E_WEB_PORT ?? 5180);
+const SERVER_PORT = Number(process.env.E2E_SERVER_PORT ?? 8790);
 
 export default defineConfig({
   testDir: 'e2e',

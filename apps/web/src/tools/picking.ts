@@ -1,4 +1,4 @@
-// Document-space picking: nearest node / segment / building / bus stop around a ground point,
+// Document-space picking: nearest node / segment / building / bus stop / parcel around a ground point,
 // accelerated by a uniform spatial hash. Rebuild the index when the doc changes.
 
 import {
@@ -26,7 +26,7 @@ export interface SegmentHit {
   curve: Vec2[];
 }
 
-type Kind = 'n' | 's' | 'b' | 'p';
+type Kind = 'n' | 's' | 'b' | 'p' | 'q';
 
 export class PickIndex {
   private cells = new Map<string, Set<string>>();
@@ -62,6 +62,10 @@ export class PickIndex {
       const p = pointAtLength(c, cum, st.t * cum[cum.length - 1]!);
       this.stopPos.set(st.id, p);
       this.insert('p', st.id, p, p);
+    }
+    for (const pc of Object.values(doc.parcels)) {
+      const { min, max } = bounds(pc.polygon, 0);
+      this.insert('q', pc.id, min, max);
     }
   }
 
@@ -134,6 +138,24 @@ export class PickIndex {
     return best;
   }
 
+  /** Parcel containing p (parcels never overlap). */
+  parcelAt(p: Vec2): string | null {
+    for (const id of this.near('q', p, 0).sort()) if (pointInPolygon(p, this.doc.parcels[id]!.polygon)) return id;
+    return null;
+  }
+
+  /** Nearest corner of any parcel within r meters. */
+  nearestParcelVertex(p: Vec2, r: number): { id: string; index: number; distance: number } | null {
+    let best: { id: string; index: number; distance: number } | null = null;
+    for (const id of this.near('q', p, r)) {
+      this.doc.parcels[id]!.polygon.forEach((v, index) => {
+        const d = dist(v, p);
+        if (d <= r && (!best || d < best.distance)) best = { id, index, distance: d };
+      });
+    }
+    return best;
+  }
+
   stopPosition(stopId: string): Vec2 | undefined {
     return this.stopPos.get(stopId);
   }
@@ -172,11 +194,16 @@ export type PickResult =
   | { kind: 'node'; id: string }
   | { kind: 'segment'; id: string }
   | { kind: 'building'; id: string }
-  | { kind: 'busStop'; id: string };
+  | { kind: 'busStop'; id: string }
+  | { kind: 'parcel'; id: string };
 
-/** Priority: bus stop > node > building > segment. */
-export function pickAt(idx: PickIndex, p: Vec2, opts: { nodes?: boolean; stops?: boolean; buildings?: boolean; segments?: boolean } = {}): PickResult | null {
-  const { nodes = true, stops = true, buildings = true, segments = true } = opts;
+/** Priority: bus stop > node > building > segment > parcel (parcels only when asked for). */
+export function pickAt(
+  idx: PickIndex,
+  p: Vec2,
+  opts: { nodes?: boolean; stops?: boolean; buildings?: boolean; segments?: boolean; parcels?: boolean } = {},
+): PickResult | null {
+  const { nodes = true, stops = true, buildings = true, segments = true, parcels = false } = opts;
   if (stops) {
     const st = idx.nearestStop(p, 4);
     if (st) return { kind: 'busStop', id: st.id };
@@ -192,6 +219,10 @@ export function pickAt(idx: PickIndex, p: Vec2, opts: { nodes?: boolean; stops?:
   if (segments) {
     const s = idx.nearestSegment(p);
     if (s) return { kind: 'segment', id: s.id };
+  }
+  if (parcels) {
+    const q = idx.parcelAt(p);
+    if (q) return { kind: 'parcel', id: q };
   }
   return null;
 }

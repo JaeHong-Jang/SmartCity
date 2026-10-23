@@ -5,6 +5,22 @@ import { highlightPreview } from './highlight';
 import { pickAt, type PickIndex, type PickResult } from './picking';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
+/** Removal command for a picked entity (junction nodes go away with their last road, so none). */
+export function removeCommandFor(hit: PickResult): Command | null {
+  switch (hit.kind) {
+    case 'segment':
+      return { type: 'segment.remove', id: hit.id };
+    case 'building':
+      return { type: 'building.remove', id: hit.id };
+    case 'busStop':
+      return { type: 'busStop.remove', id: hit.id };
+    case 'parcel':
+      return { type: 'parcel.remove', id: hit.id };
+    case 'node':
+      return null;
+  }
+}
+
 export class BulldozeTool implements Tool {
   readonly id = 'bulldoze' as const;
   private hover: PickResult | null = null;
@@ -23,10 +39,7 @@ export class BulldozeTool implements Tool {
     const hit = this.pick(e.pos);
     if (!hit) return;
     const prev = highlightPreview(this.ctx.store.getState().doc, this.index(), hit, '#ef4444');
-    let cmd: Command | null = null;
-    if (hit.kind === 'segment') cmd = { type: 'segment.remove', id: hit.id };
-    else if (hit.kind === 'building') cmd = { type: 'building.remove', id: hit.id };
-    else if (hit.kind === 'busStop') cmd = { type: 'busStop.remove', id: hit.id };
+    const cmd = removeCommandFor(hit);
     if (cmd) this.ctx.dispatch(cmd, prev.lines.map((l) => l.pts));
     this.hover = null;
     this.ctx.changed();
@@ -38,7 +51,7 @@ export class BulldozeTool implements Tool {
       this.hover = hit;
       this.ctx.changed();
     }
-    const label = hit ? { segment: '도로', building: '건물', busStop: '정류장', node: '교차점' }[hit.kind] : null;
+    const label = hit ? { segment: '도로', building: '건물', busStop: '정류장', node: '교차점', parcel: '필지' }[hit.kind] : null;
     const hint = label ? `클릭하면 ${label}을(를) 철거합니다` : '철거할 도로·건물·정류장 위에 올려 두세요';
     if (this.ctx.store.getState().toolHint !== hint) this.ctx.store.set({ toolHint: hint });
   }

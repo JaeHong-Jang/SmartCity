@@ -1,4 +1,5 @@
-// Routes pointer/keyboard input on the viewport to the active tool and publishes presence (≤15 Hz).
+// Routes pointer/keyboard/wheel input on the viewport to the active tool and publishes presence (≤15 Hz).
+// Left presses capture the pointer so drags keep working outside the canvas; G cycles the snap step.
 
 import type { Presence, Vec2 } from '@smartcity/shared';
 import type { Dispatcher } from '../app/dispatch';
@@ -7,14 +8,26 @@ import { BuildingTool } from './buildingTool';
 import { BulldozeTool } from './bulldozeTool';
 import { BusLineTool } from './busLineTool';
 import { ClosureTool } from './closureTool';
+import { ParcelTool } from './parcelTool';
 import { Picker } from './picking';
 import { RoadTool } from './roadTool';
 import { SelectTool } from './selectTool';
-import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
+import { CLICK_SLOP_PX } from './gesture';
+import { nextSnapStep, snapLabel } from './snap';
+import type { GroundPan, Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
-export const TOOL_KEYS: Record<string, ToolId> = { '1': 'select', '2': 'road', '3': 'building', '4': 'bulldoze', '5': 'busLine', '6': 'closure' };
+export const TOOL_KEYS: Record<string, ToolId> = { '1': 'select', '2': 'road', '3': 'building', '4': 'bulldoze', '5': 'busLine', '6': 'closure', '7': 'parcel' };
 const PRESENCE_MS = 1000 / 15;
-const CLICK_SLOP_PX = 5;
+/** Keys whose keyup the tools need (modifier state, rotation batching). */
+const KEYUP_CODES = new Set(['ShiftLeft', 'ShiftRight', 'BracketLeft', 'BracketRight']);
+
+/** Camera and cursor hooks the controller needs from the renderer. */
+export interface ViewHooks {
+  pan: GroundPan;
+  focus(p: Vec2): void;
+  /** Ground point under the cursor (null = left the viewport), for the fine grid. */
+  cursor(p: Vec2 | null): void;
+}
 
 function isTyping(): boolean {
   const el = document.activeElement as HTMLElement | null;
@@ -32,6 +45,7 @@ export class ToolController {
   private presenceTimer: ReturnType<typeof setInterval>;
   private unsub: () => void;
   private lastDocVersion: number;
+  private lastSnap: number;
 
   constructor(
     private readonly store: ClientStore,
@@ -40,6 +54,7 @@ export class ToolController {
     private readonly pickGround: (clientX: number, clientY: number) => Vec2 | null,
     private readonly onPreview: (p: ToolPreview) => void,
     private readonly sendPresence: (p: Presence) => void,
+    private readonly view: ViewHooks,
   ) {
     const index = () => {
       const s = this.store.getState();
@@ -50,6 +65,8 @@ export class ToolController {
       dispatch: dispatcher.dispatch,
       ids: () => dispatcher.ids(),
       changed: () => this.onPreview(this.active.preview()),
+      pan: view.pan,
+      focus: (p) => view.focus(p),
     };
     this.tools = {
       select: new SelectTool(ctx, index),
@@ -58,14 +75,19 @@ export class ToolController {
       bulldoze: new BulldozeTool(ctx, index),
       busLine: new BusLineTool(ctx, index),
       closure: new ClosureTool(ctx, index),
+      parcel: new ParcelTool(ctx),
     };
     this.active = this.tools[store.getState().tool];
     this.lastDocVersion = store.getState().docVersion;
+    this.lastSnap = store.getState().toolOptions.snapStep;
 
     dom.addEventListener('pointerdown', this.down);
     dom.addEventListener('pointermove', this.move);
     dom.addEventListener('pointerup', this.up);
+    dom.addEventListener('pointercancel', this.cancel);
     dom.addEventListener('pointerleave', this.leave);
+    // Capture phase: runs before camera-controls' wheel zoom on the same element.
+    dom.addEventListener('wheel', this.wheel, { capture: true, passive: false });
     window.addEventListener('keydown', this.key);
     window.addEventListener('keyup', this.key);
     this.unsub = store.subscribe(this.onStore);
@@ -81,9 +103,10 @@ export class ToolController {
       if (this.lastPointer) this.active.onPointerMove(this.lastPointer);
       this.onPreview(this.active.preview());
     }
-    if (s.docVersion !== this.lastDocVersion) {
+    if (s.docVersion !== this.lastDocVersion || s.toolOptions.snapStep !== this.lastSnap) {
       this.lastDocVersion = s.docVersion;
-      // The doc changed under the cursor: refresh snapping and validity.
+      this.lastSnap = s.toolOptions.snapStep;
+      // The doc or the snap step changed under the cursor: refresh snapping and validity.
       if (this.lastPointer) this.active.onPointerMove(this.lastPointer);
     }
   };
@@ -91,7 +114,7 @@ export class ToolController {
   private pointer(e: PointerEvent): ToolPointer | null {
     const pos = this.pickGround(e.clientX, e.clientY);
     if (!pos) return null;
-    return { pos, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey };
+    return { pos, client: { x: e.clientX, y: e.clientY }, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey };
   }
 
   private down = (e: PointerEvent): void => {
@@ -102,6 +125,9 @@ export class ToolController {
     if (e.button !== 0) return;
     const p = this.pointer(e);
     if (!p) return;
+    // Alt+drag must not trigger the browser's own Alt handling.
+    if (e.altKey) e.preventDefault();
+    this.dom.setPointerCapture?.(e.pointerId);
     this.lastPointer = p;
     this.active.onPointerDown(p);
   };
@@ -110,7 +136,20 @@ export class ToolController {
     const p = this.pointer(e);
     if (!p) return;
     this.lastPointer = { ...p, button: -1 };
+    this.view.cursor(p.pos);
     this.active.onPointerMove(p);
+  };
+
+  private cancel = (e: PointerEvent): void => {
+    if (this.dom.hasPointerCapture?.(e.pointerId)) this.dom.releasePointerCapture(e.pointerId);
+    this.active.cancel();
+  };
+
+  private wheel = (e: WheelEvent): void => {
+    if (this.active.onWheel?.(e)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
   };
 
   private up = (e: PointerEvent): void => {
@@ -121,12 +160,14 @@ export class ToolController {
       if (moved < CLICK_SLOP_PX) this.active.cancel();
       return;
     }
+    if (this.dom.hasPointerCapture?.(e.pointerId)) this.dom.releasePointerCapture(e.pointerId);
     const p = this.pointer(e);
     if (p) this.active.onPointerUp(p);
   };
 
   private leave = (): void => {
     this.lastPointer = null;
+    this.view.cursor(null);
     this.active.onLeave?.();
   };
 
@@ -139,8 +180,15 @@ export class ToolController {
         e.preventDefault();
         return;
       }
+      if (e.key === 'g' || e.key === 'G') {
+        const step = nextSnapStep(this.store.getState().toolOptions.snapStep);
+        this.store.setToolOptions({ snapStep: step });
+        this.store.toast(`격자 스냅: ${snapLabel(step)}`, 'info', 'snap');
+        e.preventDefault();
+        return;
+      }
     }
-    if (e.type === 'keyup' && e.key !== 'Shift') return;
+    if (e.type === 'keyup' && !KEYUP_CODES.has(e.code)) return;
     if (this.active.onKey?.(e)) e.preventDefault();
   };
 
@@ -161,7 +209,9 @@ export class ToolController {
     this.dom.removeEventListener('pointerdown', this.down);
     this.dom.removeEventListener('pointermove', this.move);
     this.dom.removeEventListener('pointerup', this.up);
+    this.dom.removeEventListener('pointercancel', this.cancel);
     this.dom.removeEventListener('pointerleave', this.leave);
+    this.dom.removeEventListener('wheel', this.wheel, { capture: true });
     window.removeEventListener('keydown', this.key);
     window.removeEventListener('keyup', this.key);
   }

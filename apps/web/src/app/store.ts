@@ -5,8 +5,10 @@ import {
   applyCommand,
   cloneJson,
   createEmptyDoc,
+  normalizeDoc,
   type CityDoc,
   type Command,
+  type ParcelZone,
   type Peer,
   type Presence,
   type ServerMessage,
@@ -14,7 +16,9 @@ import {
 } from '@smartcity/shared';
 import type { SimStats } from '@smartcity/sim';
 
-export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure';
+export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel';
+/** Snap resolution in meters; 0 = off. Personal UI state, never stored in the doc. */
+export type SnapStep = 0 | 1 | 2 | 4 | 8;
 export type SimSpeed = 0 | 1 | 2 | 4;
 export type Connection = 'connecting' | 'online' | 'reconnecting' | 'offline';
 export type PanelId = 'inspector' | 'roadTypes' | 'buildings' | 'vehicles' | 'busLines';
@@ -23,15 +27,20 @@ export type Selection =
   | { kind: 'node'; id: string }
   | { kind: 'segment'; id: string }
   | { kind: 'building'; id: string }
-  | { kind: 'busStop'; id: string };
+  | { kind: 'busStop'; id: string }
+  | { kind: 'parcel'; id: string };
 
 export interface ToolOptions {
   roadTypeId: string;
   curve: boolean;
-  gridSnap: boolean;
+  /** Shared by every placing tool and by moves (G cycles it). */
+  snapStep: SnapStep;
   buildingTypeId: string;
   /** Extra rotation for free building placement, radians. */
   buildingRotation: number;
+  parcelZone: ParcelZone;
+  /** Parcel tool: click a polygon instead of dragging a rectangle (P toggles). */
+  parcelPolygon: boolean;
 }
 
 export interface PendingEntry {
@@ -53,11 +62,14 @@ export interface Toast {
   kind: 'info' | 'error' | 'success';
   text: string;
   until: number;
+  key?: string;
 }
 
 export interface Overlays {
   flow: boolean;
   shadows: boolean;
+  /** Regulation violation badges on buildings and parcels. */
+  violations: boolean;
 }
 
 export interface RenderStats {
@@ -89,6 +101,8 @@ export interface ClientState {
   peers: Peer[];
   presence: Record<string, Presence>;
   pending: PendingEntry[];
+  /** Outcome of our recent commands by ref: 'ok' or the server's error (bounded to the last 100). */
+  results: Record<number, string>;
   flashes: Flash[];
   toasts: Toast[];
   simSpeed: SimSpeed;
@@ -119,10 +133,26 @@ const ERROR_KO: [RegExp, string][] = [
   [/out of range/, '허용 범위를 벗어난 값입니다'],
   [/no lanes in that direction/, '그 방향에는 차선이 없습니다'],
   [/a line needs/, '노선에는 정류장이 2개 이상 필요합니다'],
+  [/building overlaps a road/, '건물이 도로와 겹칩니다'],
+  [/building extends beyond the map/, '건물이 지도 경계를 벗어납니다'],
+  [/the moved road would cross another road/, '옮긴 도로가 다른 도로와 교차합니다'],
+  [/parcels overlap/, '다른 필지와 겹칩니다'],
+  [/parcel smaller than/, '필지가 너무 작습니다 (16㎡ 미만)'],
+  [/parcel\.polygon must be a simple polygon/, '필지 경계가 스스로 교차합니다'],
+  [/unknown building/, '건물이 이미 바뀌었습니다. 다시 시도하세요'],
+  [/unknown parcel/, '필지가 이미 바뀌었습니다. 다시 시도하세요'],
+  [/conflict: the design was changed/, '다른 사용자가 이 설계를 먼저 바꿨습니다'],
 ];
 
+function withResult(results: Record<number, string>, ref: number, outcome: string): Record<number, string> {
+  const next: Record<number, string> = { ...results, [ref]: outcome };
+  const refs = Object.keys(next).map(Number);
+  if (refs.length > 100) for (const r of refs.sort((a, b) => a - b).slice(0, refs.length - 100)) delete next[r];
+  return next;
+}
+
 export function translateError(error: string): string {
-  for (const [re, ko] of ERROR_KO) if (re.test(error)) return `${ko} (${error})`;
+  for (const [re, ko] of ERROR_KO) if (re.test(error)) return ko;
   return error;
 }
 
@@ -140,20 +170,21 @@ export function initialState(room: string, name: string): ClientState {
     connection: 'connecting',
     ready: false,
     tool: 'select',
-    toolOptions: { roadTypeId: 'road-2', curve: false, gridSnap: true, buildingTypeId: 'house', buildingRotation: 0 },
+    toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false },
     toolHint: '',
     selection: null,
     phaseHighlight: null,
     peers: [],
     presence: {},
     pending: [],
+    results: {},
     flashes: [],
     toasts: [],
     simSpeed: 1,
     simStatus: 'starting',
     simError: null,
     simStats: null,
-    overlays: { flow: false, shadows: true },
+    overlays: { flow: false, shadows: true, violations: true },
     panel: 'inspector',
     render: { fps: 0, drawCalls: 0, triangles: 0 },
   };
@@ -198,9 +229,11 @@ export class ClientStore {
     this.set({ toolOptions: { ...this.state.toolOptions, ...patch } });
   }
 
-  toast(text: string, kind: Toast['kind'] = 'info'): void {
-    const t: Toast = { id: this.nextId++, kind, text, until: this.now() + TOAST_MS };
-    this.set({ toasts: [...this.state.toasts.slice(-4), t] });
+  /** `key`: a later toast with the same key replaces the earlier one instead of stacking. */
+  toast(text: string, kind: Toast['kind'] = 'info', key?: string): void {
+    const t: Toast = { id: this.nextId++, kind, text, until: this.now() + TOAST_MS, key };
+    const rest = key ? this.state.toasts.filter((x) => x.key !== key) : this.state.toasts;
+    this.set({ toasts: [...rest.slice(-4), t] });
   }
 
   addPending(entry: PendingEntry): void {
@@ -227,7 +260,7 @@ export class ClientStore {
     const s = this.state;
     switch (msg.t) {
       case 'welcome': {
-        const doc = cloneJson(msg.doc);
+        const doc = normalizeDoc(cloneJson(msg.doc));
         const resync = s.ready;
         this.set({
           doc,
@@ -254,22 +287,25 @@ export class ClientStore {
           this.onResyncNeeded?.();
           return;
         }
-        const res = applyCommand(s.doc, msg.cmd);
+        // Already accepted by the sequencer: skip policy checks that may have changed since (ADR 0007).
+        const res = applyCommand(s.doc, msg.cmd, { trusted: true });
         if (!res.ok) {
           // The server applied it, so our doc diverged: resync.
           this.onResyncNeeded?.();
           return;
         }
-        const pending = msg.ref !== undefined && msg.by === s.clientId ? s.pending.filter((p) => p.ref !== msg.ref) : s.pending;
+        const mine = msg.ref !== undefined && msg.by === s.clientId;
+        const pending = mine ? s.pending.filter((p) => p.ref !== msg.ref) : s.pending;
+        const results = mine ? withResult(s.results, msg.ref!, 'ok') : s.results;
         const selection = s.selection && !selectionExists(s.doc, s.selection) ? null : s.selection;
-        this.set({ seq: msg.seq, docVersion: s.docVersion + 1, pending, selection });
+        this.set({ seq: msg.seq, docVersion: s.docVersion + 1, pending, results, selection });
         for (const l of this.appliedListeners) l(msg.cmd, msg.seq);
         return;
       }
       case 'rejected': {
         const p = s.pending.find((x) => x.ref === msg.ref);
         const flashes = p && p.ghost.length ? [...s.flashes, { id: this.nextId++, ghost: p.ghost, until: this.now() + FLASH_MS }] : s.flashes;
-        this.set({ pending: s.pending.filter((x) => x.ref !== msg.ref), flashes });
+        this.set({ pending: s.pending.filter((x) => x.ref !== msg.ref), results: withResult(s.results, msg.ref, msg.error), flashes });
         this.toast(`거부됨: ${translateError(msg.error)}`, 'error');
         return;
       }
@@ -303,5 +339,7 @@ export function selectionExists(doc: CityDoc, sel: Selection): boolean {
       return sel.id in doc.buildings;
     case 'busStop':
       return sel.id in doc.busStops;
+    case 'parcel':
+      return sel.id in doc.parcels;
   }
 }

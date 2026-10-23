@@ -2,13 +2,29 @@
 // runs it on untrusted input), and leaves the doc untouched when a command fails.
 
 import type { Command } from './commands.js';
-import { sampleSegmentCurve, polylineLength, splitQuadBezier, type Vec2 } from './geometry.js';
+import {
+  bounds,
+  boundsOverlap,
+  collinearOverlap,
+  dist,
+  isOrthogonal,
+  isSimplePolygon,
+  polygonArea,
+  polygonsOverlap,
+  polylineIntersections,
+  polylineLength,
+  sampleSegmentCurve,
+  splitQuadBezier,
+  type Vec2,
+} from './geometry.js';
+import { buildingBlocksRoad, buildingFootprints, partOutline } from './editing/buildings.js';
 import type {
   BuildingType,
   BusLine,
   BusStop,
   CityDoc,
   IntersectionControl,
+  Parcel,
   RoadSegment,
   RoadType,
   SegmentId,
@@ -32,6 +48,10 @@ export const LIMITS = {
   stopsPerLine: 100,
   busesPerLine: 50,
   minSegmentLength: 8,
+  parcels: 50_000,
+  polygonVertices: 128,
+  footprintVertices: 32,
+  evChargers: 500,
 } as const;
 
 export type ApplyResult = { ok: true } | { ok: false; error: string };
@@ -73,9 +93,22 @@ class Tx {
 
 export type TryApplyResult = { ok: true; rollback: () => void } | { ok: false; error: string };
 
+export interface ApplyOptions {
+  /**
+   * The command was already accepted by the authoritative server (live `applied` messages, log
+   * replay). Skips design-policy checks (road clearance, overlaps, crossings, footprint map bounds,
+   * revisions), which may have been different when it was accepted. Structural validation still runs.
+   */
+  trusted?: boolean;
+}
+
+// Policy checks consult this flag; applyCommand is synchronous, so a module-level flag is safe.
+let enforcePolicy = true;
+
 /** Like applyCommand, but the caller can still undo a successful command (e.g. when persisting it fails). */
-export function tryApplyCommand(doc: CityDoc, cmd: Command): TryApplyResult {
+export function tryApplyCommand(doc: CityDoc, cmd: Command, opts: ApplyOptions = {}): TryApplyResult {
   const tx = new Tx();
+  enforcePolicy = !opts.trusted;
   try {
     if (!cmd || typeof cmd !== 'object') fail('command must be an object');
     if (cmd.type === 'batch') {
@@ -93,11 +126,13 @@ export function tryApplyCommand(doc: CityDoc, cmd: Command): TryApplyResult {
     tx.rollback();
     if (e instanceof ApplyError) return { ok: false, error: e.message };
     return { ok: false, error: `invalid command: ${(e as Error).message}` };
+  } finally {
+    enforcePolicy = true;
   }
 }
 
-export function applyCommand(doc: CityDoc, cmd: Command): ApplyResult {
-  const r = tryApplyCommand(doc, cmd);
+export function applyCommand(doc: CityDoc, cmd: Command, opts: ApplyOptions = {}): ApplyResult {
+  const r = tryApplyCommand(doc, cmd, opts);
   return r.ok ? { ok: true } : r;
 }
 
@@ -182,10 +217,21 @@ function validateRoadType(rt: RoadType): void {
   if (typeof rt.sidewalk !== 'boolean' || typeof rt.busOnlyRightLane !== 'boolean') fail('invalid road type flags');
 }
 
+const ZONES = ['residential', 'commercial', 'office', 'industrial', 'public'];
+
+function checkPolygon(poly: unknown, extent: number, what: string): asserts poly is Vec2[] {
+  if (!Array.isArray(poly) || poly.length < 3 || poly.length > LIMITS.polygonVertices) fail(`invalid ${what}`);
+  for (const v of poly) {
+    checkNum((v as Vec2)?.x, -extent, extent, `${what}.x`);
+    checkNum((v as Vec2)?.z, -extent, extent, `${what}.z`);
+  }
+  if (!isSimplePolygon(poly as Vec2[])) fail(`${what} must be a simple polygon`);
+}
+
 function validateBuildingType(bt: BuildingType): void {
   checkId(bt.id, 'building type');
   checkName(bt.name, 'building type');
-  if (!['residential', 'commercial', 'office', 'industrial', 'public'].includes(bt.zone)) fail('invalid zone');
+  if (!ZONES.includes(bt.zone)) fail('invalid zone');
   if (!Array.isArray(bt.parts) || bt.parts.length < 1 || bt.parts.length > LIMITS.buildingParts) fail('invalid building parts');
   for (const p of bt.parts) {
     checkNum(p.offset?.x, -200, 200, 'part.offset.x');
@@ -198,7 +244,94 @@ function validateBuildingType(bt: BuildingType): void {
     if (!['flat', 'gable', 'pyramid'].includes(p.roof)) fail('invalid roof');
     checkColor(p.color, 'part');
     checkColor(p.roofColor, 'roof');
+    if (p.footprint !== undefined) {
+      checkPolygon(p.footprint, 200, 'part.footprint');
+      if (p.footprint.length > LIMITS.footprintVertices) fail('part footprint has too many corners');
+      if (!isOrthogonal(p.footprint)) fail('part footprint must be orthogonal');
+      if (polygonArea(p.footprint) < 1) fail('part footprint too small');
+      if (p.roof !== 'flat') fail('drawn footprints need a flat roof');
+    }
+    if (p.use !== undefined && !ZONES.includes(p.use)) fail('invalid part use');
+    if (p.facade !== undefined) {
+      if (!['grid', 'ribbon', 'curtain', 'none'].includes(p.facade?.style)) fail('invalid facade style');
+      checkNum(p.facade.windowRatio, 0.1, 0.95, 'windowRatio');
+      if (!['none', 'shop', 'lobby', 'pilotis'].includes(p.facade.ground)) fail('invalid ground floor');
+    }
   }
+  // Volumes may touch but not overlap in space (overlaps would double-count floor area).
+  for (let i = 0; i < bt.parts.length; i++) {
+    for (let j = i + 1; j < bt.parts.length; j++) {
+      const a = bt.parts[i]!;
+      const b = bt.parts[j]!;
+      const aTop = a.baseHeight + a.floors * a.floorHeight;
+      const bTop = b.baseHeight + b.floors * b.floorHeight;
+      if (enforcePolicy && a.baseHeight < bTop - 1e-6 && b.baseHeight < aTop - 1e-6 && polygonsOverlap(partOutline(a), partOutline(b))) {
+        fail('building volumes overlap');
+      }
+    }
+  }
+  if (bt.smart !== undefined) {
+    const m = bt.smart;
+    checkNum(m?.solarRoof, 0, 1, 'solarRoof');
+    checkNum(m.greenRoof, 0, 1, 'greenRoof');
+    // Solar, planting and a drone pad (≈10 % of the roof) share the same roof.
+    if (m.solarRoof + m.greenRoof + (m.dronePort ? 0.1 : 0) > 1 + 1e-9) fail('roof equipment exceeds the roof area');
+    checkInt(m.evChargers, 0, LIMITS.evChargers, 'evChargers');
+    if (typeof m.sensors !== 'boolean' || typeof m.dronePort !== 'boolean') fail('invalid smart flags');
+  }
+}
+
+function validateParcel(doc: CityDoc, pc: Parcel): void {
+  checkId(pc.id, 'parcel');
+  checkPolygon(pc.polygon, doc.meta.halfSize, 'parcel.polygon');
+  if (polygonArea(pc.polygon) < 16) fail('parcel smaller than 16 m²');
+  if (![...ZONES, 'green'].includes(pc.zone)) fail('invalid parcel zone');
+  const r = pc.regulation;
+  checkNum(r?.coverage, 0, 1, 'coverage');
+  checkNum(r.far, 0, 20, 'far');
+  checkNum(r.maxHeight, 0, 1000, 'maxHeight');
+  checkNum(r.setback, 0, 50, 'setback');
+  for (const other of Object.values(doc.parcels)) {
+    if (enforcePolicy && other.id !== pc.id && polygonsOverlap(other.polygon, pc.polygon)) fail('parcels overlap');
+  }
+}
+
+/** Segments at a moved node must not cross any other road (only meet at shared nodes). */
+/** Segments at a moved node must not cross or run along any other road (only meet at shared nodes). */
+function checkNoNewCrossings(doc: CityDoc, nodeId: string): void {
+  if (!enforcePolicy) return;
+  for (const s of segmentsAtNode(doc, nodeId)) {
+    const curve = sampleSegmentCurve(doc.nodes[s.a]!.pos, doc.nodes[s.b]!.pos, s.control);
+    const box = bounds(curve);
+    for (const o of Object.values(doc.segments)) {
+      if (o.id === s.id) continue;
+      const other = sampleSegmentCurve(doc.nodes[o.a]!.pos, doc.nodes[o.b]!.pos, o.control);
+      if (!boundsOverlap(box, bounds(other), 1)) continue;
+      const shared = [o.a, o.b].filter((n) => n === s.a || n === s.b).map((n) => doc.nodes[n]!.pos);
+      const nearShared = (p: Vec2): boolean => shared.some((q) => dist(q, p) < 1);
+      for (const hit of polylineIntersections(curve, other)) {
+        if (!nearShared(hit.point)) fail('the moved road would cross another road');
+      }
+      // Collinear overlap is not a crossing: any shared stretch of positive length is refused.
+      for (let i = 1; i < curve.length; i++) {
+        for (let j = 1; j < other.length; j++) {
+          if (collinearOverlap(curve[i - 1]!, curve[i]!, other[j - 1]!, other[j]!, 1e-3) > 1e-3) {
+            fail('the moved road would run along another road');
+          }
+        }
+      }
+    }
+  }
+}
+
+function checkBuildingClear(doc: CityDoc, typeId: string, pos: Vec2, rotation: number): void {
+  if (!enforcePolicy) return;
+  const type = doc.buildingTypes[typeId]!;
+  const h = doc.meta.halfSize;
+  for (const poly of buildingFootprints({ pos, rotation }, type)) {
+    if (poly.some((c) => Math.abs(c.x) > h || Math.abs(c.z) > h)) fail('building extends beyond the map');
+  }
+  if (buildingBlocksRoad(doc, { pos, rotation }, type)) fail('building overlaps a road');
 }
 
 function validateVehicleType(vt: VehicleType): void {
@@ -311,6 +444,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       checkPos(doc, cmd.pos, 'pos');
       tx.set(doc.nodes, n.id, { id: n.id, pos: { x: cmd.pos.x, z: cmd.pos.z } });
       for (const s of segmentsAtNode(doc, n.id)) checkSegmentShape(doc, s);
+      checkNoNewCrossings(doc, n.id);
       return;
     }
     case 'segment.add': {
@@ -375,6 +509,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!has(doc.buildingTypes, b.typeId)) fail('unknown building type');
       checkPos(doc, b.pos, 'building.pos');
       checkNum(b.rotation, -Math.PI * 4, Math.PI * 4, 'rotation');
+      checkBuildingClear(doc, b.typeId, b.pos, b.rotation);
       tx.set(doc.buildings, b.id, { id: b.id, typeId: b.typeId, pos: { x: b.pos.x, z: b.pos.z }, rotation: b.rotation });
       return;
     }
@@ -382,12 +517,45 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!has(doc.buildings, cmd.id)) fail('unknown building');
       tx.set(doc.buildings, cmd.id, undefined);
       return;
+    case 'building.move': {
+      const b = get(doc.buildings, cmd.id);
+      if (!b) fail('unknown building');
+      checkPos(doc, cmd.pos, 'pos');
+      checkNum(cmd.rotation, -Math.PI * 4, Math.PI * 4, 'rotation');
+      checkBuildingClear(doc, b.typeId, cmd.pos, cmd.rotation);
+      tx.set(doc.buildings, b.id, { id: b.id, typeId: b.typeId, pos: { x: cmd.pos.x, z: cmd.pos.z }, rotation: cmd.rotation });
+      return;
+    }
+    case 'parcel.upsert': {
+      validateParcel(doc, cmd.parcel);
+      checkCapacity(doc.parcels, cmd.parcel.id, LIMITS.parcels, 'parcels');
+      const pc = cmd.parcel;
+      tx.set(doc.parcels, pc.id, {
+        id: pc.id,
+        polygon: pc.polygon.map((v) => ({ x: v.x, z: v.z })),
+        zone: pc.zone,
+        regulation: { coverage: pc.regulation.coverage, far: pc.regulation.far, maxHeight: pc.regulation.maxHeight, setback: pc.regulation.setback },
+      });
+      return;
+    }
+    case 'parcel.remove':
+      if (!has(doc.parcels, cmd.id)) fail('unknown parcel');
+      tx.set(doc.parcels, cmd.id, undefined);
+      return;
     case 'buildingType.upsert': {
       validateBuildingType(cmd.buildingType);
       checkCapacity(doc.buildingTypes, cmd.buildingType.id, LIMITS.buildingTypes, 'building types');
       const bt = cmd.buildingType;
+      const existing = get(doc.buildingTypes, bt.id);
+      // Stored designs always have rev ≥ 1 (normalizeDoc migrates); 0 means "must not exist yet".
+      const prevRev = existing ? (existing.rev ?? 1) : 0;
+      if (cmd.expectedRev !== undefined && enforcePolicy) {
+        checkInt(cmd.expectedRev, 0, Number.MAX_SAFE_INTEGER, 'expectedRev');
+        if (cmd.expectedRev !== prevRev) fail('conflict: the design was changed by someone else');
+      }
       tx.set(doc.buildingTypes, bt.id, {
         id: bt.id,
+        rev: prevRev + 1,
         name: bt.name,
         zone: bt.zone,
         parts: bt.parts.map((p) => ({
@@ -400,7 +568,21 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
           roof: p.roof,
           color: p.color,
           roofColor: p.roofColor,
+          ...(p.footprint ? { footprint: p.footprint.map((v) => ({ x: v.x, z: v.z })) } : {}),
+          ...(p.use ? { use: p.use } : {}),
+          ...(p.facade ? { facade: { style: p.facade.style, windowRatio: p.facade.windowRatio, ground: p.facade.ground } } : {}),
         })),
+        ...(bt.smart
+          ? {
+              smart: {
+                solarRoof: bt.smart.solarRoof,
+                greenRoof: bt.smart.greenRoof,
+                evChargers: bt.smart.evChargers,
+                sensors: bt.smart.sensors,
+                dronePort: bt.smart.dronePort,
+              },
+            }
+          : {}),
       });
       return;
     }

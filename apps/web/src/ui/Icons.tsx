@@ -39,6 +39,17 @@ export const IconClosure = () => (
     <path d="M3 9h18v5H3zM6 9l4 5M12 9l4 5M18 9l3 4M6 14v6M18 14v6" />
   </Svg>
 );
+export const IconParcel = () => (
+  <Svg>
+    <path d="M4 5l8-2 8 3-1 13-9 2-6-4z" />
+    <path d="M12 3l-1 18M5 12h14" strokeDasharray="2 2" />
+  </Svg>
+);
+export const IconChart = () => (
+  <Svg size={16}>
+    <path d="M4 20V10M10 20V4M16 20v-7M3 20h18" />
+  </Svg>
+);
 export const IconCity = ({ size = 20 }: { size?: number }) => (
   <Svg size={size}>
     <path d="M3 21h18M5 21V10l4-2v13M9 21V5l6-2v18M15 21V9l4 2v10" />

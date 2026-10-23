@@ -1,6 +1,6 @@
 // Built-in presets every new city starts with. Users can edit or add their own through commands.
 
-import { cloneJson, type BuildingPart, type BuildingType, type CityDoc, type RoadType, type VehiclePart, type VehicleType } from './model.js';
+import { cloneJson, DOC_VERSION, type BuildingPart, type BuildingType, type CityDoc, type Facade, type RoadType, type SmartFeatures, type VehiclePart, type VehicleType } from './model.js';
 
 const kmh = (v: number): number => Math.round((v / 3.6) * 100) / 100;
 
@@ -42,7 +42,7 @@ export const DEFAULT_BUILDING_TYPES: BuildingType[] = [
     zone: 'public',
     parts: [
       part({ width: 40, depth: 16, floors: 5, floorHeight: 3.8, color: '#f0ece2', roofColor: '#6f7d6a' }),
-      part({ offset: { x: -12, z: 14 }, width: 16, depth: 14, floors: 5, floorHeight: 3.8, color: '#f0ece2', roofColor: '#6f7d6a' }),
+      part({ offset: { x: -12, z: 15 }, width: 16, depth: 14, floors: 5, floorHeight: 3.8, color: '#f0ece2', roofColor: '#6f7d6a' }),
       part({ offset: { x: 0, z: 0 }, width: 10, depth: 10, floors: 2, floorHeight: 3.8, baseHeight: 19, roof: 'pyramid', color: '#e5dfd0', roofColor: '#4d6b57' }),
     ],
   },
@@ -102,6 +102,98 @@ function ambulanceParts(l: number, w: number, h: number, color: string): Vehicle
   ];
 }
 
+const facade = (style: Facade['style'], windowRatio: number, ground: Facade['ground'] = 'none'): Facade => ({ style, windowRatio, ground });
+const smart = (s: Partial<SmartFeatures>): SmartFeatures => ({ solarRoof: 0, greenRoof: 0, evChargers: 0, sensors: false, dronePort: false, ...s });
+
+/** Future smart-city designs: starting points for the building editor. */
+export const SMART_CITY_PRESETS: BuildingType[] = [
+  {
+    id: 'eco-tower',
+    name: '친환경 테라스 타워',
+    zone: 'residential',
+    parts: [
+      part({ width: 32, depth: 28, floors: 8, floorHeight: 3.1, color: '#e7efe4', roofColor: '#5f8f4e', facade: facade('ribbon', 0.45, 'lobby') }),
+      part({ width: 26, depth: 22, floors: 8, floorHeight: 3.1, baseHeight: 24.8, color: '#e7efe4', roofColor: '#5f8f4e', facade: facade('ribbon', 0.45) }),
+      part({ width: 20, depth: 16, floors: 8, floorHeight: 3.1, baseHeight: 49.6, color: '#e7efe4', roofColor: '#5f8f4e', facade: facade('ribbon', 0.45) }),
+    ],
+    smart: smart({ solarRoof: 0.5, greenRoof: 0.4, evChargers: 24, sensors: true }),
+  },
+  {
+    id: 'mixed-use',
+    name: '주상복합 (상가+주거)',
+    zone: 'residential',
+    parts: [
+      part({ width: 36, depth: 30, floors: 3, floorHeight: 4.5, color: '#d6cfc2', roofColor: '#4b5563', use: 'commercial', facade: facade('curtain', 0.8, 'shop') }),
+      part({ width: 24, depth: 18, floors: 22, floorHeight: 2.9, baseHeight: 13.5, color: '#eeeae2', roofColor: '#6b7280', use: 'residential', facade: facade('grid', 0.4) }),
+    ],
+    smart: smart({ solarRoof: 0.3, greenRoof: 0.3, evChargers: 30, sensors: true }),
+  },
+  {
+    id: 'smart-office',
+    name: '스마트 오피스',
+    zone: 'office',
+    parts: [part({ width: 30, depth: 30, floors: 24, floorHeight: 3.8, color: '#8fb3d1', roofColor: '#334155', facade: facade('curtain', 0.85, 'lobby') })],
+    smart: smart({ solarRoof: 0.6, evChargers: 40, sensors: true }),
+  },
+  {
+    id: 'data-center',
+    name: '데이터센터',
+    zone: 'industrial',
+    parts: [part({ width: 48, depth: 32, floors: 3, floorHeight: 6, color: '#cbd5e1', roofColor: '#64748b', facade: facade('none', 0.1) })],
+    smart: smart({ solarRoof: 0.8, sensors: true }),
+  },
+  {
+    id: 'vertical-farm',
+    name: '수직농장',
+    zone: 'industrial',
+    parts: [part({ width: 24, depth: 24, floors: 12, floorHeight: 4, color: '#bbf7d0', roofColor: '#15803d', facade: facade('curtain', 0.9) })],
+    smart: smart({ solarRoof: 0.4, greenRoof: 0.5, sensors: true }),
+  },
+  {
+    id: 'mobility-hub',
+    name: '모빌리티 허브',
+    zone: 'public',
+    parts: [part({ width: 40, depth: 28, floors: 5, floorHeight: 3.6, color: '#e2e8f0', roofColor: '#1e293b', use: 'public', facade: facade('ribbon', 0.35, 'pilotis') })],
+    smart: smart({ solarRoof: 0.6, evChargers: 120, sensors: true, dronePort: true }),
+  },
+  {
+    id: 'school',
+    name: '스마트 학교',
+    zone: 'public',
+    parts: [
+      part({
+        width: 44,
+        depth: 36,
+        offset: { x: 0, z: 0 },
+        floors: 4,
+        floorHeight: 3.6,
+        color: '#fde68a',
+        roofColor: '#78716c',
+        footprint: [
+          { x: -22, z: -18 },
+          { x: 22, z: -18 },
+          { x: 22, z: -6 },
+          { x: -10, z: -6 },
+          { x: -10, z: 18 },
+          { x: -22, z: 18 },
+        ],
+        facade: facade('grid', 0.5, 'lobby'),
+      }),
+    ],
+    smart: smart({ solarRoof: 0.5, greenRoof: 0.3, evChargers: 6, sensors: true }),
+  },
+  {
+    id: 'hospital',
+    name: '스마트 병원',
+    zone: 'public',
+    parts: [
+      part({ width: 50, depth: 36, floors: 4, floorHeight: 4.2, color: '#f8fafc', roofColor: '#94a3b8', facade: facade('ribbon', 0.5, 'lobby') }),
+      part({ width: 30, depth: 20, floors: 10, floorHeight: 3.8, baseHeight: 16.8, color: '#f1f5f9', roofColor: '#94a3b8', facade: facade('ribbon', 0.5) }),
+    ],
+    smart: smart({ solarRoof: 0.4, evChargers: 20, sensors: true, dronePort: true }),
+  },
+];
+
 export const DEFAULT_VEHICLE_TYPES: VehicleType[] = [
   { id: 'sedan', name: '승용차', kind: 'car', length: 4.6, width: 1.85, height: 1.45, maxSpeed: kmh(110), maxAccel: 1.6, comfortDecel: 2.5, color: '#3d6fb6', spawnWeight: 60, parts: carParts(4.6, 1.85, 1.45, '#3d6fb6') },
   { id: 'suv', name: 'SUV', kind: 'car', length: 4.9, width: 1.95, height: 1.75, maxSpeed: kmh(110), maxAccel: 1.4, comfortDecel: 2.5, color: '#e8e8e8', spawnWeight: 25, parts: carParts(4.9, 1.95, 1.75, '#e8e8e8') },
@@ -113,19 +205,22 @@ export const DEFAULT_VEHICLE_TYPES: VehicleType[] = [
 const byId = <T extends { id: string }>(items: T[]): Record<string, T> =>
   Object.fromEntries(items.map((i) => [i.id, cloneJson(i)]));
 
+const withRev = (types: BuildingType[]): BuildingType[] => types.map((t) => ({ ...t, rev: 1 }));
+
 export function createEmptyDoc(name = '새 도시', seed = 1): CityDoc {
   return {
-    version: 1,
+    version: DOC_VERSION,
     meta: { name, seed, halfSize: 2000, trafficDensity: 1 },
     nodes: {},
     segments: {},
     roadTypes: byId(DEFAULT_ROAD_TYPES),
-    buildingTypes: byId(DEFAULT_BUILDING_TYPES),
+    buildingTypes: byId(withRev([...DEFAULT_BUILDING_TYPES, ...SMART_CITY_PRESETS])),
     buildings: {},
     vehicleTypes: byId(DEFAULT_VEHICLE_TYPES),
     intersections: {},
     busStops: {},
     busLines: {},
     closures: {},
+    parcels: {},
   };
 }

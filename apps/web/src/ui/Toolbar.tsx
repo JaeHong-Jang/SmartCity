@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react';
+import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
 import type { ToolId } from '../app/store';
+import { PARCEL_ZONES, ZONE_COLORS } from '../tools/parcelTool';
 import { useServices, useStore } from './context';
-import { IconBuilding, IconBulldoze, IconBus, IconClosure, IconRoad, IconSelect } from './Icons';
+import { IconBuilding, IconBulldoze, IconBus, IconClosure, IconParcel, IconRoad, IconSelect } from './Icons';
 
 export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[] = [
   { id: 'select', label: '선택', key: '1', icon: <IconSelect /> },
@@ -10,6 +12,7 @@ export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[
   { id: 'bulldoze', label: '철거', key: '4', icon: <IconBulldoze /> },
   { id: 'busLine', label: '버스', key: '5', icon: <IconBus /> },
   { id: 'closure', label: '폐쇄', key: '6', icon: <IconClosure /> },
+  { id: 'parcel', label: '필지', key: '7', icon: <IconParcel /> },
 ];
 
 export function Toolbar() {
@@ -57,11 +60,8 @@ export function ToolOptions() {
           <button className={opts.curve ? 'active' : ''} onClick={() => store.setToolOptions({ curve: !opts.curve })}>
             곡선 (C)
           </button>
-          <button className={opts.gridSnap ? 'active' : ''} onClick={() => store.setToolOptions({ gridSnap: !opts.gridSnap })}>
-            격자 스냅 (G)
-          </button>
         </div>
-        <span className="muted">클릭으로 이어 그리기 · 우클릭/Esc 취소</span>
+        <span className="muted">클릭으로 이어 그리기 · 격자 스냅은 하단 바/G · 우클릭/Esc 취소</span>
       </section>
     );
   }
@@ -79,6 +79,36 @@ export function ToolOptions() {
           ))}
         </div>
         <span className="muted">도로 40m 이내에서 자동 정렬 · Shift 자유 배치 · , . 회전</span>
+      </section>
+    );
+  }
+  if (tool === 'parcel') {
+    return (
+      <section className="panel tool-options" aria-label="필지 도구 옵션">
+        <h3>용도지역</h3>
+        <div className="list">
+          {PARCEL_ZONES.map((z) => {
+            const r = DEFAULT_REGULATIONS[z];
+            return (
+              <button key={z} data-zone={z} className={opts.parcelZone === z ? 'active' : ''} onClick={() => store.setToolOptions({ parcelZone: z })}>
+                <span className="swatch" style={{ background: ZONE_COLORS[z] }} />
+                <span style={{ flex: 1, whiteSpace: 'nowrap' }}>{ZONE_LABELS[z]}</span>
+                <span className="muted">
+                  건폐 {Math.round(r.coverage * 100)}% · 용적 {Math.round(r.far * 100)}%
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="row wrap">
+          <button className={!opts.parcelPolygon ? 'active' : ''} onClick={() => store.setToolOptions({ parcelPolygon: false })}>
+            사각형
+          </button>
+          <button className={opts.parcelPolygon ? 'active' : ''} onClick={() => store.setToolOptions({ parcelPolygon: true })}>
+            다각형 (P)
+          </button>
+        </div>
+        <span className="muted">{opts.parcelPolygon ? '꼭짓점 클릭 · Enter/첫 점 클릭으로 닫기' : '드래그로 사각형'} · 규제값은 인스펙터에서 수정</span>
       </section>
     );
   }

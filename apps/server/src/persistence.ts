@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, truncateSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { applyCommand, createEmptyDoc } from '@smartcity/shared';
+import { applyCommand, createEmptyDoc, normalizeDoc } from '@smartcity/shared';
 import type { CityDoc, Command } from '@smartcity/shared';
 
 export interface LoadedRoom {
@@ -26,7 +26,7 @@ export function loadRoom(dir: string, room: string): LoadedRoom {
     try {
       const parsed = JSON.parse(readFileSync(cp, 'utf8')) as Checkpoint;
       if (parsed.schema === 1 && Number.isInteger(parsed.seq) && parsed.doc) {
-        doc = parsed.doc;
+        doc = normalizeDoc(parsed.doc);
         seq = parsed.seq;
       }
     } catch (e) {
@@ -67,7 +67,8 @@ function replayLog(lp: string, room: string, doc: CityDoc, seq: number): number 
       return seq;
     }
     if (entry && Number.isInteger(entry.seq) && entry.seq > seq) {
-      const res = applyCommand(doc, entry.cmd);
+      // Already accepted by this server: replay under the rules it was accepted with.
+      const res = applyCommand(doc, entry.cmd, { trusted: true });
       if (res.ok) seq = entry.seq;
       else console.error(`[persist] ${room}: replay of seq ${entry.seq} failed: ${res.error}`);
     }

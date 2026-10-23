@@ -5,6 +5,8 @@ import {
   applyCommand,
   cloneJson,
   createEmptyDoc,
+  DOC_VERSION,
+  normalizeDoc,
   type CityDoc,
   type ClientMessage,
   type ServerMessage,
@@ -48,8 +50,9 @@ export class LocalTransport implements Transport {
     if (raw) {
       try {
         const saved = JSON.parse(raw) as Saved;
-        if (saved?.doc?.version === 1) {
-          this.doc = saved.doc;
+        const v = saved?.doc?.version;
+        if (typeof v === 'number' && v >= 1 && v <= DOC_VERSION) {
+          this.doc = normalizeDoc(saved.doc);
           this.seq = saved.seq | 0;
         }
       } catch {

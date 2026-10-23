@@ -1,9 +1,35 @@
 import { expect, test, type Page } from '@playwright/test';
 
+interface HookBuilding {
+  id: string;
+  typeId: string;
+  pos: { x: number; z: number };
+  rotation: number;
+}
+
 interface CityHook {
-  store: { getState(): { doc: { segments: object; buildings: object; busLines: object; closures: object }; connection: string; simStatus: string; simStats: { vehicles: number } | null; peers: unknown[]; presence: Record<string, unknown> } };
+  store: {
+    getState(): {
+      doc: {
+        segments: object;
+        buildings: Record<string, HookBuilding>;
+        busLines: object;
+        closures: object;
+        parcels: Record<string, { zone: string }>;
+        nodes: Record<string, { id: string; pos: { x: number; z: number } }>;
+      };
+      connection: string;
+      simStatus: string;
+      simStats: { vehicles: number } | null;
+      peers: unknown[];
+      presence: Record<string, unknown>;
+      selection: { kind: string; id: string } | null;
+      toolOptions: { snapStep: number };
+    };
+  };
   worldToScreen(x: number, z: number): { x: number; y: number };
   lookAt(px: number, py: number, pz: number, tx: number, tz: number): void;
+  cameraTarget(): { x: number; z: number };
 }
 
 /** Console errors, minus the expected failed WebSocket attempt when no server is reachable. */
@@ -154,6 +180,117 @@ test('offline solo: draw roads, place buildings, transit and closures', async ({
   expect(errors).toEqual([]);
 });
 
+/** Press at world a, drag in small steps to world b, release (screen positions taken at press time). */
+async function dragWorld(page: Page, a: [number, number], b: [number, number], opts: { before?: () => Promise<void>; screenshot?: string } = {}) {
+  const p = await screen(page, a[0], a[1]);
+  const q = await screen(page, b[0], b[1]);
+  await page.mouse.move(p.x, p.y, { steps: 3 });
+  await page.mouse.down();
+  await page.mouse.move(q.x, q.y, { steps: 12 });
+  await page.waitForTimeout(150);
+  if (opts.screenshot) await page.screenshot({ path: opts.screenshot });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+}
+
+test('phase 2a: parcels, moving and rotating buildings, ground pan, junction drag, grid, dashboard', async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto(`/?offline=1&room=e2e-2a-${Date.now().toString(36)}`);
+  await page.waitForFunction(() => !!(window as unknown as { __smartcity?: CityHook }).__smartcity);
+  await lookAt(page, -120, 220, 220, 20, 20);
+
+  // Roads: a cross.
+  await page.locator('[data-tool="road"]').click();
+  await clickWorld(page, -144, 0);
+  await clickWorld(page, 144, 0);
+  await page.keyboard.press('Escape');
+  await clickWorld(page, 0, -120);
+  await clickWorld(page, 0, 120);
+  await page.keyboard.press('Escape');
+  await expect.poll(async () => (await counts(page)).segments, { timeout: 5000 }).toBeGreaterThanOrEqual(4);
+
+  // Parcel tool (7): commercial zone, drag a rectangle on the 8 m grid.
+  await page.keyboard.press('7');
+  await page.locator('.tool-options button[data-zone="commercial"]').click();
+  await dragWorld(page, [16, 16], [96, 80], { screenshot: 'test-results/phase2a-parcel-ghost.png' });
+  await expect.poll(() => page.evaluate(() => Object.values((window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.parcels).map((p) => p.zone))).toEqual(['commercial']);
+
+  // Buildings placed freely (Shift) inside the parcel: a shop, and a factory that breaks the zone's uses.
+  await page.keyboard.press('3');
+  await page.locator('.tool-options button', { hasText: '근린상가' }).click();
+  await page.keyboard.down('Shift');
+  await clickWorld(page, 48, 48);
+  await page.locator('.tool-options button', { hasText: '공장' }).click();
+  await clickWorld(page, 64, 32);
+  await page.keyboard.up('Shift');
+  await expect.poll(async () => (await counts(page)).buildings, { timeout: 5000 }).toBe(2);
+  const shop = await page.evaluate(() => Object.values((window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.buildings).find((b) => b.typeId === 'shop')!);
+  await expect(page.locator('.violation-badge')).toHaveCount(1);
+
+  // Select tool: drag the shop to a new spot (one building.move on release, snapped to 8 m).
+  await page.keyboard.press('1');
+  await dragWorld(page, [shop.pos.x, shop.pos.z], [shop.pos.x + 14, shop.pos.z + 18], { screenshot: 'test-results/phase2a-move-ghost.png' });
+  await expect.poll(() => page.evaluate((id) => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.buildings[id]!.pos, shop.id)).not.toEqual(shop.pos);
+  const moved = await page.evaluate((id) => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.buildings[id]!, shop.id);
+  expect(moved.pos.x % 8).toBe(0);
+  expect(moved.pos.z % 8).toBe(0);
+  expect(await page.evaluate(() => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().selection)).toEqual({ kind: 'building', id: shop.id });
+
+  // ] rotates the selected building by 15°.
+  await page.keyboard.press(']');
+  await expect
+    .poll(() => page.evaluate((id) => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.buildings[id]!.rotation, shop.id))
+    .toBeCloseTo(moved.rotation + Math.PI / 12, 5);
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: 'test-results/phase2a-rotated.png' });
+
+  // Alt+drag places a copy.
+  await page.keyboard.down('Alt');
+  const at = await page.evaluate((id) => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.buildings[id]!.pos, shop.id);
+  await dragWorld(page, [at.x, at.z], [at.x - 16, at.z + 8]);
+  await page.keyboard.up('Alt');
+  await expect.poll(async () => (await counts(page)).buildings, { timeout: 5000 }).toBe(3);
+
+  // Left-drag on empty ground pans the camera.
+  const camBefore = await page.evaluate(() => (window as unknown as { __smartcity: CityHook }).__smartcity.cameraTarget());
+  await dragWorld(page, [-100, -80], [-60, -40]);
+  const camAfter = await page.evaluate(() => (window as unknown as { __smartcity: CityHook }).__smartcity.cameraTarget());
+  expect(Math.hypot(camAfter.x - camBefore.x, camAfter.z - camBefore.z)).toBeGreaterThan(20);
+
+  // Drag the junction at the origin: node.move, connected roads follow.
+  await lookAt(page, -120, 220, 220, 20, 20);
+  const center = await page.evaluate(() => Object.values((window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.nodes).find((n) => n.pos.x === 0 && n.pos.z === 0)!.id);
+  await dragWorld(page, [0, 0], [-16, -12], { screenshot: 'test-results/phase2a-node-drag.png' });
+  await expect.poll(() => page.evaluate((id) => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc.nodes[id]!.pos, center)).toEqual({ x: -16, z: -16 });
+
+  // G cycles the snap step (8 → 4 → 2) and the bottom bar follows.
+  await page.keyboard.press('g');
+  await page.keyboard.press('g');
+  expect(await page.evaluate(() => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().toolOptions.snapStep)).toBe(2);
+  await expect(page.locator('.statusbar button[data-snap="2"]')).toHaveClass(/active/);
+  await lookAt(page, 10, 70, 110, 40, 40);
+  const hover = await screen(page, 30, 60);
+  await page.mouse.move(hover.x, hover.y, { steps: 4 });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: 'test-results/phase2a-fine-grid.png' });
+
+  // Parcel inspector: click an empty spot inside the parcel.
+  await lookAt(page, -40, 160, 190, 50, 50);
+  await clickWorld(page, 88, 74);
+  await expect(page.locator('.side-body')).toContainText('필지');
+  await expect(page.locator('.side-body')).toContainText('규제 위반');
+  await page.screenshot({ path: 'test-results/phase2a-parcel-inspector.png' });
+
+  // Dashboard.
+  await page.locator('[data-dashboard]').click();
+  await expect(page.locator('.dashboard')).toContainText('도시 현황 (설계 기준)');
+  await expect(page.locator('.dashboard')).toContainText('교통(내 화면 미리보기)');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: 'test-results/phase2a-dashboard.png' });
+
+  expect(errors).toEqual([]);
+});
+
 test('collaboration: two users share edits, cursors and ghosts', async ({ browser }) => {
   test.skip(process.env.E2E_SERVER !== '1', 'needs E2E_SERVER=1 (starts apps/server)');
   const room = `e2e-collab-${Date.now().toString(36)}`;
@@ -186,6 +323,15 @@ test('collaboration: two users share edits, cursors and ghosts', async ({ browse
   await expect(b.locator('.peer-label')).toBeVisible({ timeout: 5000 });
   await b.waitForTimeout(800);
   await b.screenshot({ path: 'test-results/smoke-collab-b.png' });
+  await a.keyboard.press('Escape');
+
+  // B selects a road: A sees it outlined in B's color with B's name badge.
+  await b.keyboard.press('1');
+  await clickWorld(b, 60, 2);
+  await expect(a.locator('.peer-sel-label')).toBeVisible({ timeout: 5000 });
+  await expect(a.locator('.peer-sel-label')).toContainText('편집 중');
+  await a.waitForTimeout(500);
+  await a.screenshot({ path: 'test-results/phase2a-peer-selection.png' });
   await a.screenshot({ path: 'test-results/smoke-collab-a.png' });
   expect(errA).toEqual([]);
   expect(errB).toEqual([]);

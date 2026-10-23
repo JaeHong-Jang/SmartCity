@@ -12,6 +12,7 @@ import {
 } from '@smartcity/shared';
 import { bearing } from '../tools/roadTool';
 import { useServices, useStore } from './context';
+import { BuildingPlanning, ParcelInspector } from './PlanningInspector';
 import { clampNum } from './RoadTypeEditor';
 
 const DIRS = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
@@ -228,7 +229,7 @@ function BuildingInspector({ id }: { id: string }) {
   const deg = Math.round((b.rotation * 180) / Math.PI);
   const rotateTo = (d: number) => {
     const r = (((d % 360) + 540) % 360) - 180;
-    replace({ ...b, rotation: (r * Math.PI) / 180 });
+    dispatcher.dispatch({ type: 'building.move', id, pos: b.pos, rotation: (r * Math.PI) / 180 });
   };
   return (
     <>
@@ -261,6 +262,7 @@ function BuildingInspector({ id }: { id: string }) {
       <button className="danger" onClick={() => dispatcher.dispatch({ type: 'building.remove', id })}>
         건물 철거
       </button>
+      <BuildingPlanning id={id} />
     </>
   );
 }
@@ -298,7 +300,7 @@ export function Inspector() {
     return (
       <>
         <h3>속성</h3>
-        <span className="muted">선택 도구(1)로 도로·교차점·건물·정류장을 클릭하면 여기에서 편집할 수 있습니다.</span>
+        <span className="muted">선택 도구(1)로 도로·교차점·건물·정류장·필지를 클릭하면 여기에서 편집할 수 있습니다.</span>
         <dl className="kv">
           <dt>교차점</dt>
           <dd>{Object.keys(doc.nodes).length}</dd>
@@ -310,6 +312,8 @@ export function Inspector() {
           <dd>{Object.keys(doc.busLines).length}</dd>
           <dt>폐쇄 도로</dt>
           <dd>{Object.keys(doc.closures).length}</dd>
+          <dt>필지</dt>
+          <dd>{Object.keys(doc.parcels).length}</dd>
         </dl>
       </>
     );
@@ -323,5 +327,7 @@ export function Inspector() {
       return doc.buildings[sel.id] ? <BuildingInspector key={sel.id} id={sel.id} /> : null;
     case 'busStop':
       return doc.busStops[sel.id] ? <StopInspector key={sel.id} id={sel.id} /> : null;
+    case 'parcel':
+      return doc.parcels[sel.id] ? <ParcelInspector key={sel.id} id={sel.id} /> : null;
   }
 }

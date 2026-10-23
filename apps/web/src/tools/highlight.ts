@@ -1,6 +1,6 @@
 // Hover highlight shapes shared by the select, bulldoze and closure tools.
 
-import { buildingFootprints, roadHalfWidth, type CityDoc } from '@smartcity/shared';
+import { add, buildingFootprints, dist, rotateY, roadHalfWidth, scale, type Building, type BuildingType, type CityDoc, type Vec2 } from '@smartcity/shared';
 import type { PickIndex, PickResult } from './picking';
 import type { ToolPreview } from './types';
 
@@ -30,6 +30,25 @@ export function highlightPreview(doc: CityDoc, idx: PickIndex, hit: PickResult, 
       if (p) out.points.push({ pos: p, radius: 3, color });
       break;
     }
+    case 'parcel': {
+      const pc = doc.parcels[hit.id];
+      if (pc) out.lines.push({ pts: [...pc.polygon, pc.polygon[0]!], width: 0.8, color });
+      break;
+    }
   }
   return out;
+}
+
+/** Front-direction arrow (center → beyond the front, local +z) and rotation ring around a building. */
+export function buildingGizmo(b: Pick<Building, 'pos' | 'rotation'>, type: BuildingType): { arrow: Vec2[]; ring: Vec2[]; radius: number } {
+  const corners = buildingFootprints(b, type).flat();
+  const radius = Math.max(4, ...corners.map((c) => dist(c, b.pos))) + 2.5;
+  const front = rotateY({ x: 0, z: 1 }, b.rotation);
+  const arrow = [b.pos, add(b.pos, scale(front, radius + 3))];
+  const ring: Vec2[] = [];
+  for (let i = 0; i <= 48; i++) {
+    const a = (i / 48) * Math.PI * 2;
+    ring.push({ x: b.pos.x + Math.cos(a) * radius, z: b.pos.z + Math.sin(a) * radius });
+  }
+  return { arrow, ring, radius };
 }

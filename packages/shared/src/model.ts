@@ -42,8 +42,20 @@ export interface RoadType {
 
 export type Zone = 'residential' | 'commercial' | 'office' | 'industrial' | 'public';
 export type RoofShape = 'flat' | 'gable' | 'pyramid';
+export type FacadeStyle = 'grid' | 'ribbon' | 'curtain' | 'none';
+export type GroundFloor = 'none' | 'shop' | 'lobby' | 'pilotis';
 
-/** One mass block of a building, in the building's local frame (x = width axis, z = depth axis). */
+export interface Facade {
+  style: FacadeStyle;
+  /** Share of the wall that is glazing, 0.1..0.95. */
+  windowRatio: number;
+  ground: GroundFloor;
+}
+
+/**
+ * One mass block (volume) of a building, in the building's local frame (x = width axis, z = depth axis).
+ * Designed on a grid in the building studio; stored as geometry, never as cells.
+ */
 export interface BuildingPart {
   offset: Vec2;
   width: number;
@@ -55,6 +67,26 @@ export interface BuildingPart {
   roof: RoofShape;
   color: string;
   roofColor: string;
+  /**
+   * Orthogonal outline in the building frame (counter-clockwise, no holes). When present it replaces
+   * the offset/width/depth rectangle, which then only describes the bounding box.
+   */
+  footprint?: Vec2[];
+  /** Use of this volume; defaults to the building type's zone (mixed-use buildings set it per volume). */
+  use?: Zone;
+  facade?: Facade;
+}
+
+/** Smart-city equipment of a building. Roof-mounted items share one roof-area budget. */
+export interface SmartFeatures {
+  /** Share of the roof covered by solar panels, 0..1. */
+  solarRoof: number;
+  /** Share of the roof that is planted, 0..1. */
+  greenRoof: number;
+  evChargers: number;
+  sensors: boolean;
+  /** Rooftop delivery-drone pad (takes a fixed roof area). */
+  dronePort: boolean;
 }
 
 export interface BuildingType {
@@ -62,6 +94,9 @@ export interface BuildingType {
   name: string;
   zone: Zone;
   parts: BuildingPart[];
+  smart?: SmartFeatures;
+  /** Revision, incremented by applyCommand on every upsert (clients send `expectedRev` to avoid lost updates). */
+  rev?: number;
 }
 
 export interface Building {
@@ -143,6 +178,30 @@ export interface BusLine {
   buses: number;
 }
 
+export type ParcelZone = Zone | 'green';
+export type ParcelId = string;
+
+/** Simplified Korean land-use rules (국토계획법 용도지역 기준을 게임용으로 단순화). */
+export interface Regulation {
+  /** 건폐율: max building footprint / parcel area, 0..1. */
+  coverage: number;
+  /** 용적률: max gross floor area / parcel area (e.g. 2.5 = 250 %). */
+  far: number;
+  /** meters */
+  maxHeight: number;
+  /** Required clearance between buildings and the parcel edge, meters. */
+  setback: number;
+}
+
+/** A land lot drawn by users: the unit of urban design and of regulation checks. */
+export interface Parcel {
+  id: ParcelId;
+  /** Counter-clockwise or clockwise simple polygon, world coordinates. */
+  polygon: Vec2[];
+  zone: ParcelZone;
+  regulation: Regulation;
+}
+
 /** A closed road. First hook for incident simulation. */
 export interface Closure {
   segmentId: SegmentId;
@@ -158,8 +217,11 @@ export interface CityMeta {
   trafficDensity: number;
 }
 
+/** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
+export const DOC_VERSION = 2;
+
 export interface CityDoc {
-  version: 1;
+  version: number;
   meta: CityMeta;
   nodes: Record<NodeId, RoadNode>;
   segments: Record<SegmentId, RoadSegment>;
@@ -171,6 +233,26 @@ export interface CityDoc {
   busStops: Record<BusStopId, BusStop>;
   busLines: Record<BusLineId, BusLine>;
   closures: Record<SegmentId, Closure>;
+  parcels: Record<ParcelId, Parcel>;
+}
+
+/**
+ * Migrate a doc saved by an older version (in place). v1 → v2: parcels collection, design
+ * revisions, and the v1 city-hall preset whose wings overlapped by 1 m (v2 forbids overlapping volumes).
+ */
+export function normalizeDoc(doc: CityDoc): CityDoc {
+  // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
+  doc.parcels ??= {};
+  if (doc.version < 2) {
+    for (const t of Object.values(doc.buildingTypes)) {
+      t.rev ??= 1;
+      // Only the v1 preset is rewritten; a v2 design that happens to look like it is user data.
+      const wing = t.id === 'city-hall' ? t.parts[1] : undefined;
+      if (wing && wing.offset.x === -12 && wing.offset.z === 14 && wing.width === 16 && wing.depth === 14) wing.offset.z = 15;
+    }
+    doc.version = 2;
+  }
+  return doc;
 }
 
 /** Deep copy of plain JSON data (docs and commands are always plain JSON). */

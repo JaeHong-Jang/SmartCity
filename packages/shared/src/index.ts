@@ -10,3 +10,6 @@ export * from './protocol.js';
 export * from './editing/roadPlanner.js';
 export * from './editing/buildings.js';
 export * from './editing/docToCommands.js';
+export * from './editing/footprint.js';
+export * from './planning.js';
+export * from './stats.js';

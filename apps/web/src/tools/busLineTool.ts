@@ -16,6 +16,7 @@ import {
   type Vec2,
 } from '@smartcity/shared';
 import type { PickIndex, SegmentHit } from './picking';
+import { snapAlong } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
 export const LINE_COLORS = ['#2563eb', '#16a34a', '#db2777', '#ea580c', '#7c3aed', '#0891b2', '#ca8a04', '#dc2626'];
@@ -79,8 +80,10 @@ export class BusLineTool implements Tool {
         this.ctx.store.toast('정류장은 도로 위에만 만들 수 있습니다', 'error');
         return;
       }
-      const doc = this.ctx.store.getState().doc;
-      const st = stopFromClick(doc, hit, e.pos);
+      const { doc, toolOptions } = this.ctx.store.getState();
+      // Stops move along the road in snap-step increments.
+      const s = snapAlong(hit.s, hit.length, toolOptions.snapStep);
+      const st = stopFromClick(doc, { ...hit, s, point: pointAtLength(hit.curve, cumulativeLengths(hit.curve), s) }, e.pos);
       const id = this.ctx.ids().next('p');
       this.stops.push({ id, pos: st.pos, stop: { id, segmentId: st.segmentId, t: st.t, dir: st.dir } });
     }

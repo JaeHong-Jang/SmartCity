@@ -128,6 +128,7 @@ new ToolController(
   renderer.pickGround,
   (p) => renderer.setPreview(p),
   (presence) => transport?.send({ t: 'presence', presence }),
+  { pan: renderer.groundPan, focus: (p) => renderer.focus(p), cursor: (p) => renderer.setCursor(p) },
 );
 
 const services: AppServices = {
@@ -158,6 +159,10 @@ if (import.meta.env.DEV) {
     },
     lookAt(px: number, py: number, pz: number, tx: number, tz: number) {
       void renderer.cam.controls.setLookAt(px, py, pz, tx, 0, tz, false);
+    },
+    cameraTarget() {
+      const t = renderer.cam.controls.getTarget(new THREE.Vector3());
+      return { x: t.x, z: t.z };
     },
   };
 }

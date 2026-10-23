@@ -5,6 +5,7 @@
 import {
   applyCommand,
   cloneJson,
+  normalizeDoc,
   pointAtLength,
   Rng,
   tangentAtLength,
@@ -62,7 +63,7 @@ export class Simulation {
   private flowCnt = new Int32Array(0);
 
   constructor(doc: CityDoc, opts: SimOptions = {}) {
-    const d = cloneJson(doc);
+    const d = normalizeDoc(cloneJson(doc));
     const tickRate = opts.tickRate ?? 20;
     const graph = compileNetwork(d);
     const net = buildNet(graph);
@@ -101,7 +102,8 @@ export class Simulation {
   }
 
   applyCommand(cmd: Command): ApplyResult {
-    const res = applyCommand(this.w.doc, cmd);
+    // Commands reaching the sim were accepted by the authoritative sequencer already.
+    const res = applyCommand(this.w.doc, cmd, { trusted: true });
     if (!res.ok) return res;
     const types = cmd.type === 'batch' ? cmd.commands.map((c) => c.type) : [cmd.type];
     if (types.some((t) => NETWORK_COMMANDS.has(t))) this.netDirty = true;

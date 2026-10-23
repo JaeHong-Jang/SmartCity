@@ -21,5 +21,6 @@ export function docToCommands(doc: CityDoc): Command[] {
   for (const stop of sortedValues(doc.busStops)) out.push({ type: 'busStop.add', stop });
   for (const line of sortedValues(doc.busLines)) out.push({ type: 'busLine.upsert', line });
   for (const closure of sortedValues(doc.closures)) out.push({ type: 'closure.set', closure });
+  for (const parcel of sortedValues(doc.parcels ?? {})) out.push({ type: 'parcel.upsert', parcel });
   return out;
 }

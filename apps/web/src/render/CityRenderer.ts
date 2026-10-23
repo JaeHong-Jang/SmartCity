@@ -5,10 +5,10 @@ import * as THREE from 'three';
 import type { Command, Vec2 } from '@smartcity/shared';
 import type { ClientStore } from '../app/store';
 import type { SimulationStream } from '../sim/simStream';
-import type { ToolPreview } from '../tools/types';
+import type { GroundPan, ToolPreview } from '../tools/types';
 import { BuildingLayer } from './buildings';
 import { createCityCamera, type CityCamera } from './camera';
-import { createGround } from './ground';
+import { createGround, type Ground } from './ground';
 import { OverlayLayer } from './overlays';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer } from './roads';
@@ -16,7 +16,7 @@ import { SignalLayer } from './signals';
 import { VehicleLayer } from './vehicles';
 
 const ROAD_COMMANDS = new Set<Command['type']>(['node.add', 'node.move', 'segment.add', 'segment.remove', 'segment.split', 'segment.setType', 'roadType.upsert', 'closure.set', 'closure.remove', 'intersection.set', 'intersection.reset']);
-const BUILDING_COMMANDS = new Set<Command['type']>(['building.place', 'building.remove', 'buildingType.upsert', 'buildingType.remove']);
+const BUILDING_COMMANDS = new Set<Command['type']>(['building.place', 'building.remove', 'building.move', 'buildingType.upsert', 'buildingType.remove']);
 const VEHICLE_COMMANDS = new Set<Command['type']>(['vehicleType.upsert', 'vehicleType.remove']);
 
 const _ray = new THREE.Raycaster();
@@ -25,6 +25,7 @@ const _hit = new THREE.Vector3();
 const _plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const _sunOffset = new THREE.Vector3(-260, 420, 180);
 const _target = new THREE.Vector3();
+const _panHit = new THREE.Vector3();
 
 function touches(cmd: Command, set: Set<Command['type']>): boolean {
   return cmd.type === 'batch' ? cmd.commands.some((c) => set.has(c.type)) : set.has(cmd.type);
@@ -51,6 +52,9 @@ export class CityRenderer {
   private width = 1;
   private height = 1;
   private resizeObserver: ResizeObserver;
+  private ground: Ground;
+  /** World point grabbed by a left-drag pan. */
+  private panAnchor: THREE.Vector3 | null = null;
 
   constructor(
     private readonly container: HTMLElement,
@@ -84,7 +88,8 @@ export class CityRenderer {
     this.scene.add(this.sun, this.sun.target);
 
     const halfSize = store.getState().doc.meta.halfSize;
-    this.scene.add(createGround(halfSize));
+    this.ground = createGround(halfSize);
+    this.scene.add(this.ground.group);
     this.cam = createCityCamera(renderer.domElement, halfSize);
 
     this.vehicles = new VehicleLayer(stream);
@@ -121,16 +126,52 @@ export class CityRenderer {
     this.cam.camera.updateProjectionMatrix();
   }
 
-  /** Ground point (y = 0) under a client-space pixel. */
-  pickGround = (clientX: number, clientY: number): Vec2 | null => {
+  /** Unclamped ground-plane hit under a client-space pixel (null = above the horizon). */
+  private rayGround(clientX: number, clientY: number, out: THREE.Vector3): THREE.Vector3 | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     _ndc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     _ray.setFromCamera(_ndc, this.cam.camera);
-    const p = _ray.ray.intersectPlane(_plane, _hit);
+    return _ray.ray.intersectPlane(_plane, out);
+  }
+
+  /** Ground point (y = 0) under a client-space pixel. */
+  pickGround = (clientX: number, clientY: number): Vec2 | null => {
+    const p = this.rayGround(clientX, clientY, _hit);
     if (!p) return null;
     const h = this.store.getState().doc.meta.halfSize;
     return { x: Math.max(-h, Math.min(h, p.x)), z: Math.max(-h, Math.min(h, p.z)) };
   };
+
+  /**
+   * Left-drag pan: the grabbed ground point stays under the cursor. Each move shifts the target by
+   * the anchor's offset and syncs the camera immediately, so several pointer events per frame never
+   * overshoot.
+   */
+  readonly groundPan: GroundPan = {
+    start: (x, y) => {
+      const p = this.rayGround(x, y, _panHit);
+      if (!p) return false;
+      this.panAnchor = p.clone();
+      return true;
+    },
+    move: (x, y) => {
+      const a = this.panAnchor;
+      const p = a && this.rayGround(x, y, _panHit);
+      if (!a || !p) return;
+      this.cam.controls.getTarget(_target);
+      void this.cam.controls.moveTo(_target.x + a.x - p.x, 0, _target.z + a.z - p.z, false);
+      this.cam.controls.update(0);
+      this.cam.camera.updateMatrixWorld();
+    },
+    end: () => {
+      this.panAnchor = null;
+    },
+  };
+
+  /** Cursor for the fine snap grid around the pointer. */
+  setCursor(p: Vec2 | null): void {
+    this.ground.setCursor(p);
+  }
 
   setPreview(p: ToolPreview): void {
     this.overlays.setPreview(p);
@@ -187,12 +228,13 @@ export class CityRenderer {
     const dt = Math.min(0.1, (now - this.last) / 1000);
     this.last = now;
     this.syncScene();
+    this.ground.setStep(this.store.getState().toolOptions.snapStep);
     this.cam.update(dt);
     this.updateSun();
     const s = this.store.getState();
     this.vehicles.update(now, s.doc);
     this.signals.update();
-    this.overlays.update(Date.now(), this.cam.camera, this.width, this.height);
+    this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.renderer.render(this.scene, this.cam.camera);
     this.frames++;

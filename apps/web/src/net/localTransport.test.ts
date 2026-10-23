@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ServerMessage } from '@smartcity/shared';
+import { createEmptyDoc, DOC_VERSION, type ServerMessage } from '@smartcity/shared';
 import { LocalTransport, localStorageKey } from './localTransport';
 
 class MemStorage {
@@ -38,5 +38,34 @@ describe('LocalTransport', () => {
     again.connect();
     await flush();
     expect(msgs[0]).toMatchObject({ t: 'welcome', seq: 1 });
+  });
+
+  it('loads a saved doc of any supported version and migrates it', async () => {
+    const storage = new MemStorage();
+    const doc = createEmptyDoc() as unknown as Record<string, unknown>;
+    doc.version = 1;
+    delete doc.parcels;
+    (doc.nodes as Record<string, unknown>).n1 = { id: 'n1', pos: { x: 0, z: 0 } };
+    storage.setItem(localStorageKey('old'), JSON.stringify({ seq: 3, doc }));
+    const t = new LocalTransport('old', storage, () => '나');
+    const msgs: ServerMessage[] = [];
+    t.onMessage((m) => msgs.push(m));
+    t.connect();
+    await flush();
+    const w = msgs[0];
+    expect(w?.t).toBe('welcome');
+    if (w?.t !== 'welcome') return;
+    expect(w.seq).toBe(3);
+    expect(w.doc.version).toBe(DOC_VERSION);
+    expect(w.doc.parcels).toEqual({});
+    expect(w.doc.nodes.n1).toBeDefined();
+
+    storage.setItem(localStorageKey('future'), JSON.stringify({ seq: 9, doc: { ...doc, version: DOC_VERSION + 1 } }));
+    const f = new LocalTransport('future', storage, () => '나');
+    const fm: ServerMessage[] = [];
+    f.onMessage((m) => fm.push(m));
+    f.connect();
+    await flush();
+    expect(fm[0]).toMatchObject({ t: 'welcome', seq: 0 });
   });
 });

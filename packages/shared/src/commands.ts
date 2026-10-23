@@ -9,6 +9,7 @@ import type {
   BusStop,
   Closure,
   IntersectionControl,
+  Parcel,
   NodeId,
   RoadNode,
   RoadSegment,
@@ -29,7 +30,9 @@ export type Command =
   | { type: 'roadType.upsert'; roadType: RoadType }
   | { type: 'building.place'; building: Building }
   | { type: 'building.remove'; id: string }
-  | { type: 'buildingType.upsert'; buildingType: BuildingType }
+  | { type: 'building.move'; id: string; pos: Vec2; rotation: number }
+  /** With `expectedRev`, rejected unless the stored design still has that revision (0 = must be new). */
+  | { type: 'buildingType.upsert'; buildingType: BuildingType; expectedRev?: number }
   /** Rejected while buildings of this type exist. */
   | { type: 'buildingType.remove'; id: string }
   | { type: 'vehicleType.upsert'; vehicleType: VehicleType }
@@ -44,6 +47,8 @@ export type Command =
   | { type: 'busLine.remove'; id: string }
   | { type: 'closure.set'; closure: Closure }
   | { type: 'closure.remove'; segmentId: SegmentId }
+  | { type: 'parcel.upsert'; parcel: Parcel }
+  | { type: 'parcel.remove'; id: string }
   | { type: 'meta.update'; name?: string; trafficDensity?: number }
   /** Applied atomically: if any command fails, none take effect. Not nestable. */
   | { type: 'batch'; commands: Command[] };

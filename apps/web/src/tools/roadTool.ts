@@ -1,5 +1,5 @@
 // Road tool: straight or curved (C: start → control → end), continuous drawing, live planRoad
-// preview (length, bearing, junctions), G toggles grid snap, right click / Esc cancels.
+// preview (length, bearing, junctions), free points use the shared snap step (G), right click / Esc cancels.
 
 import {
   IdGen,
@@ -8,12 +8,12 @@ import {
   resolvePoint,
   roadHalfWidth,
   sampleSegmentCurve,
-  snapToGrid,
   MAX_GHOST_POINTS,
   type ResolvedPoint,
   type RoadPlan,
   type Vec2,
 } from '@smartcity/shared';
+import { snapLabel, snapPoint } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
 const previewIds = new IdGen('preview');
@@ -44,7 +44,8 @@ export class RoadTool implements Tool {
   }
 
   private resolve(p: Vec2): ResolvedPoint {
-    return resolvePoint(this.ctx.store.getState().doc, p, this.opts.gridSnap);
+    const r = resolvePoint(this.ctx.store.getState().doc, p, false);
+    return r.kind === 'free' ? { kind: 'free', pos: snapPoint(r.pos, this.opts.snapStep) } : r;
   }
 
   private endPoints(): { start: ResolvedPoint; end: ResolvedPoint; control?: Vec2 } | null {
@@ -80,7 +81,7 @@ export class RoadTool implements Tool {
       if (crossings > 0) hint += ` · 교차 ${crossings}곳`;
       if (this.plan?.error) hint += ` · ${this.plan.error}`;
     }
-    hint += `   [C 곡선 ${this.opts.curve ? '켬' : '끔'} · G 격자 ${this.opts.gridSnap ? '켬' : '끔'} · Esc 취소]`;
+    hint += `   [C 곡선 ${this.opts.curve ? '켬' : '끔'} · G 격자 ${snapLabel(this.opts.snapStep)} · Esc 취소]`;
     if (this.ctx.store.getState().toolHint !== hint) this.ctx.store.set({ toolHint: hint });
   }
 
@@ -94,7 +95,7 @@ export class RoadTool implements Tool {
       return;
     }
     if (this.opts.curve && !this.control) {
-      this.control = this.opts.gridSnap ? snapToGrid(e.pos) : e.pos;
+      this.control = snapPoint(e.pos, this.opts.snapStep);
       this.replan();
       return;
     }
@@ -124,11 +125,6 @@ export class RoadTool implements Tool {
     if (k === 'c') {
       this.ctx.store.setToolOptions({ curve: !this.opts.curve });
       this.control = null;
-      this.replan();
-      return true;
-    }
-    if (k === 'g') {
-      this.ctx.store.setToolOptions({ gridSnap: !this.opts.gridSnap });
       this.replan();
       return true;
     }
