@@ -1,12 +1,11 @@
 import type { BusLine } from '@smartcity/shared';
 import { stopPosition } from '../render/busRoute';
-import { useServices, useStore } from './context';
+import { useDoc, useServices } from './context';
 import { clampInt } from './RoadTypeEditor';
 
 export function BusLinePanel() {
   const { store, dispatcher, focus } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const lines = Object.values(doc.busLines);
   const busTypes = Object.values(doc.vehicleTypes);
   const upsert = (l: BusLine, p: Partial<BusLine>) => dispatcher.dispatch({ type: 'busLine.upsert', line: { ...l, ...p } });

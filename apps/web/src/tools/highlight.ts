@@ -1,6 +1,7 @@
 // Hover highlight shapes shared by the select, bulldoze and closure tools.
 
 import { add, buildingFootprints, dist, rotateY, roadHalfWidth, scale, type Building, type BuildingType, type CityDoc, type Vec2 } from '@smartcity/shared';
+import { closedRing } from '../app/ring';
 import type { PickIndex, PickResult } from './picking';
 import type { ToolPreview } from './types';
 
@@ -17,7 +18,7 @@ export function highlightPreview(doc: CityDoc, idx: PickIndex, hit: PickResult, 
     case 'building': {
       const b = doc.buildings[hit.id];
       const t = b ? doc.buildingTypes[b.typeId] : undefined;
-      if (b && t) for (const poly of buildingFootprints(b, t)) out.lines.push({ pts: [...poly, poly[0]!], width: 1, color });
+      if (b && t) for (const poly of buildingFootprints(b, t)) out.lines.push({ pts: closedRing(poly), width: 1, color });
       break;
     }
     case 'node': {
@@ -32,7 +33,7 @@ export function highlightPreview(doc: CityDoc, idx: PickIndex, hit: PickResult, 
     }
     case 'parcel': {
       const pc = doc.parcels[hit.id];
-      if (pc) out.lines.push({ pts: [...pc.polygon, pc.polygon[0]!], width: 0.8, color });
+      if (pc) out.lines.push({ pts: closedRing(pc.polygon), width: 0.8, color });
       break;
     }
   }

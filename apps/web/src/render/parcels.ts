@@ -1,10 +1,12 @@
 // Parcel overlay: translucent zone-colored fill, outline and a label (zone, area) per parcel, plus
 // orange regulation-violation badges over buildings (and violating parcels) when the overlay is on.
-// Rebuilt only when the doc or the toggle changes; labels are repositioned every frame.
+// Rebuilt only when parcels, buildings or the toggle change; label elements are reused by key and
+// repositioned every frame.
 
 import * as THREE from 'three';
 import { buildingMetrics, parcelCompliance, polygonArea, ZONE_LABELS, type CityDoc, type Vec2 } from '@smartcity/shared';
-import { ZONE_COLORS } from '../tools/parcelTool';
+import { closedRing } from '../app/ring';
+import { ZONE_COLORS } from '../app/zoneColors';
 import { MeshBuilder } from './meshBuilder';
 
 const Y_FILL = 0.2;
@@ -16,6 +18,8 @@ const LABEL_MAX_DISTANCE = 1400;
 
 interface Label {
   el: HTMLDivElement;
+  isParcel: boolean;
+  html: string;
   x: number;
   y: number;
   z: number;
@@ -43,7 +47,8 @@ export class ParcelLayer {
   readonly group = new THREE.Group();
   private fill: THREE.Mesh;
   private lines: THREE.Mesh;
-  private labels: Label[] = [];
+  private labels = new Map<string, Label>();
+  private seen = new Set<string>();
 
   constructor(private readonly labelRoot: HTMLElement) {
     this.group.name = 'parcels';
@@ -59,17 +64,28 @@ export class ParcelLayer {
     }
   }
 
-  private label(cls: string, html: string, x: number, y: number, z: number): void {
-    const el = document.createElement('div');
-    el.className = cls;
-    el.innerHTML = html;
-    this.labelRoot.appendChild(el);
-    this.labels.push({ el, x, y, z });
+  /** Create or update the label element for `key`; unchanged text is not touched. */
+  private label(key: string, cls: string, html: string, x: number, y: number, z: number, building?: string): void {
+    this.seen.add(key);
+    let l = this.labels.get(key);
+    if (!l) {
+      const el = document.createElement('div');
+      el.className = cls;
+      if (building) el.dataset.building = building;
+      this.labelRoot.appendChild(el);
+      this.labels.set(key, (l = { el, isParcel: cls === 'parcel-label', html: '', x, y, z }));
+    }
+    if (l.html !== html) {
+      l.html = html;
+      l.el.innerHTML = html;
+    }
+    l.x = x;
+    l.y = y;
+    l.z = z;
   }
 
   update(doc: CityDoc, violations: boolean): void {
-    for (const l of this.labels) l.el.remove();
-    this.labels = [];
+    this.seen.clear();
     const fill = new MeshBuilder();
     const lines = new MeshBuilder();
     const badges = new Map<string, number>();
@@ -81,18 +97,21 @@ export class ParcelLayer {
       const comp = violations ? parcelCompliance(doc, pc) : null;
       const parcelWide = comp ? comp.violations.filter((v) => !v.buildingId).length : 0;
       for (const v of comp?.violations ?? []) if (v.buildingId) badges.set(v.buildingId, (badges.get(v.buildingId) ?? 0) + 1);
-      lines.band([...poly, poly[0]!], -0.35, 0.35, Y_FILL + 0.02, parcelWide ? _c.set('#fb923c') : _c);
+      lines.band(closedRing(poly), -0.35, 0.35, Y_FILL + 0.02, parcelWide ? _c.set('#fb923c') : _c);
       const c = centroid(poly);
       const warn = parcelWide ? ` <b class="warn">규제 위반 ${parcelWide}</b>` : '';
-      this.label('parcel-label', `${ZONE_LABELS[pc.zone]} · ${formatArea(polygonArea(poly))}${warn}`, c.x, 1, c.z);
+      this.label(`p:${id}`, 'parcel-label', `${ZONE_LABELS[pc.zone]} · ${formatArea(polygonArea(poly))}${warn}`, c.x, 1, c.z);
     }
     for (const [id, n] of badges) {
       const b = doc.buildings[id];
       const type = b ? doc.buildingTypes[b.typeId] : undefined;
       if (!b || !type) continue;
-      const el = `!<span>${n}</span>`;
-      this.label('violation-badge', el, b.pos.x, buildingMetrics(type).height + 4, b.pos.z);
-      this.labels[this.labels.length - 1]!.el.dataset.building = id;
+      this.label(`v:${id}`, 'violation-badge', `!<span>${n}</span>`, b.pos.x, buildingMetrics(type).height + 4, b.pos.z, id);
+    }
+    for (const [key, l] of this.labels) {
+      if (this.seen.has(key)) continue;
+      l.el.remove();
+      this.labels.delete(key);
     }
     this.setGeometry(this.fill, fill);
     this.setGeometry(this.lines, lines);
@@ -107,12 +126,20 @@ export class ParcelLayer {
   /** Per frame: place labels over their anchors (no allocation besides the transform strings). */
   frame(camera: THREE.Camera, cameraDistance: number, width: number, height: number): void {
     const far = cameraDistance > LABEL_MAX_DISTANCE;
-    for (const l of this.labels) {
-      const isParcel = l.el.className === 'parcel-label';
+    for (const l of this.labels.values()) {
       _v.set(l.x, l.y, l.z).project(camera);
-      const visible = !(isParcel && far) && _v.z < 1 && _v.x > -1.05 && _v.x < 1.05 && _v.y > -1.05 && _v.y < 1.05;
+      const visible = !(l.isParcel && far) && _v.z < 1 && _v.x > -1.05 && _v.x < 1.05 && _v.y > -1.05 && _v.y < 1.05;
       l.el.style.display = visible ? '' : 'none';
       if (visible) l.el.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
+    }
+  }
+
+  dispose(): void {
+    for (const l of this.labels.values()) l.el.remove();
+    this.labels.clear();
+    for (const m of [this.fill, this.lines]) {
+      m.geometry.dispose();
+      (m.material as THREE.Material).dispose();
     }
   }
 }

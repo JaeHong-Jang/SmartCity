@@ -61,6 +61,12 @@ class Simulation {
 - **편집**: 건물 레이아웃이 바뀌면(서명 비교) 보행 그래프 재구성 + 재투영 + 시민 재조정(집 철거 = 시민 제거·집계, 사라진 건물 안 = 귀가·집계, 사라진 직장 = 해제 후 다음 귀가 때 재배정, 목적지 소멸 = 귀가로 변경).
 - **스냅샷**: `crossingSig` = `crossingSignature(graph.crossings ids)`(순서 포함 32비트 FNV-1a, index.ts에서 export) — 렌더러는 같은 서명일 때만 `crossings`를 인덱스로 읽는다. `pedestrians`(PED_STRIDE 8, 슬롯 순, 위치는 할당 없이 `writePose`로 기록), `pedestrianIds`(시민 id, 테스트 보행자는 0x80000000+), `crossings`(pedSignal, 점유 보행자 수(허가 포함), 차량 예약 수), `occupancy`/`buildingIds`(정렬 id, 실내 에이전트 수). `stats.citizens.atWork`는 AtShop 포함, `walking`은 Leaving+Walking+Entering. 시계 `dayTime = (06:30 + 물리초 × 10) mod 86400`.
 
+## 모듈 분할 (Phase 3a, 순수 이동)
+- `src/simulation.ts` 틱 드라이버 / `src/snapshot.ts` 스냅샷 버퍼 작성(`writeSnapshot`, laneFlow scratch)
+- `network/pedGraph.ts` 보행 그래프 빌더 / `network/pedQuery.ts` 공간 질의(`nearestNode`·`nearestEdge`)·`PedRouter`
+- `citizens/peds.ts` 풀·띠·이동 / `citizens/reproject.ts` 재구성 후 재투영(`reprojectPeds`·`routeCrossers`·`walkerGoal`·`retargetWalkers`)
+- `citizens/citizens.ts` 인구·일상·통행 / `citizens/schedule.ts` 게임 시계 변환·`hash01`·이벤트 heap·`schedule`
+
 ## 테스트 (vitest, `src/**/*.test.ts`)
 그래프(차선 수·커넥터·일방통행·U턴), 경로(폐쇄 우회, 일방통행 준수), IDM 정지, 적색 정지·녹색 출발, 충돌 불변식(교차로 격자 3분 실행 동안 같은 엣지 차량 간 순간격 ≥ 0, 같은 노드 충돌 커넥터 동시 점유 없음), 결정성(같은 doc·seed → 같은 snapshot 바이트, 보행자 포함), 버스 정차, 재컴파일 후 차량 유지, 좌회전 양보, 후미 기준 예약 해제(버스), 출구 예약 중복 없음, 폐쇄 시 우회.
 Phase 2b: 횡단보도 컴파일(`network/crossings.test.ts`), 방지턱·보호구역·allStop·구간 횡단보도·보행 신호(`traffic/streets.test.ts`), 보행 그래프·횡단 예약·간격·게이트(`citizens/peds.test.ts`), 시민 인구·하루 사이클·자가용·철거(`citizens/citizens.test.ts`), 격자 + 시민 매 틱 구역 불변식(`invariants.test.ts`), 차량 3000 + 보행자 5000 벤치(`bench.test.ts`, 수치만 출력).

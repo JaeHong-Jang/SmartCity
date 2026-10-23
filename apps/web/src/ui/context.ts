@@ -1,5 +1,5 @@
 import { createContext, useContext, useSyncExternalStore } from 'react';
-import type { Vec2 } from '@smartcity/shared';
+import type { CityDoc, Vec2 } from '@smartcity/shared';
 import type { Dispatcher } from '../app/dispatch';
 import type { ClientState, ClientStore } from '../app/store';
 
@@ -22,4 +22,15 @@ export function useServices(): AppServices {
 export function useStore<T>(selector: (s: ClientState) => T): T {
   const { store } = useServices();
   return useSyncExternalStore(store.subscribe, () => selector(store.getState()));
+}
+
+/**
+ * The city doc plus its change counter. The doc is updated in place, so `docVersion` (bumped on
+ * every applied command and on resync) is what re-renders the component and what memo/effect
+ * dependencies must use; `doc` alone never changes between commands.
+ */
+export function useDoc(): { doc: CityDoc; version: number } {
+  const doc = useStore((s) => s.doc);
+  const version = useStore((s) => s.docVersion);
+  return { doc, version };
 }

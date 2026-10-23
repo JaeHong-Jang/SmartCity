@@ -18,6 +18,7 @@ import {
   type Command,
   type Vec2,
 } from '@smartcity/shared';
+import { closedRing } from '../app/ring';
 import { translateError, type Selection } from '../app/store';
 import { removeCommandFor } from './bulldozeTool';
 import { GHOST_ID, placeAt, placementGuide, placementStatus, STATUS_COLORS, type Placement, type PlacementStatus } from './buildingTool';
@@ -49,8 +50,6 @@ export function ghostPolyline(polys: readonly Vec2[][]): Vec2[] {
   for (const p of polys) pts.push(...p);
   return pts.slice(0, MAX_GHOST_POINTS);
 }
-
-const closed = (poly: readonly Vec2[]): Vec2[] => [...poly, poly[0]!];
 
 export class SelectTool implements Tool {
   readonly id = 'select' as const;
@@ -250,7 +249,7 @@ export class SelectTool implements Tool {
           return;
         }
         if (!d.copy && p.pos.x === doc.buildings[d.id]?.pos.x && p.pos.z === doc.buildings[d.id]?.pos.z && p.rotation === doc.buildings[d.id]?.rotation) return;
-        const ghost = buildingFootprints(p, d.type).map(closed);
+        const ghost = buildingFootprints(p, d.type).map(closedRing);
         const cmd: Command = d.copy
           ? { type: 'building.place', building: { id: this.ctx.ids().next('b'), typeId: d.type.id, pos: p.pos, rotation: p.rotation } }
           : { type: 'building.move', id: d.id, pos: p.pos, rotation: p.rotation };
@@ -265,7 +264,7 @@ export class SelectTool implements Tool {
         const pc = doc.parcels[d.id];
         if (!pc) return;
         if (d.error) this.ctx.store.toast(`필지를 바꿀 수 없습니다: ${translateError(d.error)}`, 'error');
-        else this.ctx.dispatch({ type: 'parcel.upsert', parcel: { ...pc, polygon: d.polygon } }, [closed(d.polygon)]);
+        else this.ctx.dispatch({ type: 'parcel.upsert', parcel: { ...pc, polygon: d.polygon } }, [closedRing(d.polygon)]);
         return;
       }
     }
@@ -304,7 +303,7 @@ export class SelectTool implements Tool {
     if (placementStatus(this.doc, type, { pos: b.pos, rotation: r.rotation }, b.id) === 'block') {
       this.ctx.store.toast('그 방향으로 돌리면 도로와 겹칩니다', 'error');
     } else {
-      this.ctx.dispatch({ type: 'building.move', id: b.id, pos: b.pos, rotation: r.rotation }, buildingFootprints({ pos: b.pos, rotation: r.rotation }, type).map(closed));
+      this.ctx.dispatch({ type: 'building.move', id: b.id, pos: b.pos, rotation: r.rotation }, buildingFootprints({ pos: b.pos, rotation: r.rotation }, type).map(closedRing));
     }
     this.ctx.changed();
   }
@@ -380,20 +379,20 @@ export class SelectTool implements Tool {
 
   ghost(): Vec2[] {
     const d = this.drag;
-    if (d?.kind === 'building') return ghostPolyline(buildingFootprints(d.placement, d.type).map(closed));
+    if (d?.kind === 'building') return ghostPolyline(buildingFootprints(d.placement, d.type).map(closedRing));
     if (d?.kind === 'node') return ghostPolyline(d.curves);
-    if (d?.kind === 'vertex') return ghostPolyline([closed(d.polygon)]);
+    if (d?.kind === 'vertex') return ghostPolyline([closedRing(d.polygon)]);
     const r = this.rot;
     const b = r ? this.doc.buildings[r.id] : undefined;
     const type = b ? this.doc.buildingTypes[b.typeId] : undefined;
-    if (r && b && type) return ghostPolyline(buildingFootprints({ pos: b.pos, rotation: r.rotation }, type).map(closed));
+    if (r && b && type) return ghostPolyline(buildingFootprints({ pos: b.pos, rotation: r.rotation }, type).map(closedRing));
     return [];
   }
 
   private buildingGhost(out: ToolPreview, type: BuildingType, p: Placement, status: PlacementStatus): void {
     const color = STATUS_COLORS[status];
     for (const pts of placementGuide(p, this.step)) out.lines.push({ pts, width: 0.12, color: '#e2e8f0' });
-    for (const poly of buildingFootprints(p, type)) out.lines.push({ pts: closed(poly), width: 0.6, color });
+    for (const poly of buildingFootprints(p, type)) out.lines.push({ pts: closedRing(poly), width: 0.6, color });
     const g = buildingGizmo(p, type);
     out.lines.push({ pts: g.arrow, width: 0.8, color });
     out.building = { typeId: type.id, pos: p.pos, rotation: p.rotation, color };
@@ -419,7 +418,7 @@ export class SelectTool implements Tool {
     }
     if (d?.kind === 'vertex') {
       const color = d.error ? '#f87171' : '#60a5fa';
-      out.lines.push({ pts: closed(d.polygon), width: 0.7, color });
+      out.lines.push({ pts: closedRing(d.polygon), width: 0.7, color });
       out.points.push({ pos: d.polygon[d.index]!, radius: 1.4, color });
       return out;
     }

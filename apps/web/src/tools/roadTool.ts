@@ -3,7 +3,7 @@
 
 import {
   IdGen,
-  dist,
+  polylineLength,
   planRoad,
   resolvePoint,
   roadHalfWidth,
@@ -22,12 +22,6 @@ const previewIds = new IdGen('preview');
 export function bearing(a: Vec2, b: Vec2): number {
   const deg = (Math.atan2(b.x - a.x, -(b.z - a.z)) * 180) / Math.PI;
   return (deg + 360) % 360;
-}
-
-export function curveLength(pts: readonly Vec2[]): number {
-  let l = 0;
-  for (let i = 1; i < pts.length; i++) l += dist(pts[i - 1]!, pts[i]!);
-  return l;
 }
 
 export class RoadTool implements Tool {
@@ -75,7 +69,7 @@ export class RoadTool implements Tool {
     else if (this.opts.curve && !this.control) hint = '곡선의 휘는 지점(제어점)을 클릭하세요';
     else if (ep) {
       const pts = sampleSegmentCurve(ep.start.pos, ep.end.pos, ep.control);
-      const len = curveLength(pts);
+      const len = polylineLength(pts);
       const crossings = this.plan ? Math.max(0, this.plan.junctions.length - 2) : 0;
       hint = `길이 ${len.toFixed(1)}m · 방위 ${bearing(ep.start.pos, ep.end.pos).toFixed(0)}°`;
       if (crossings > 0) hint += ` · 교차 ${crossings}곳`;

@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
 import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
 import type { StreetMode, ToolId } from '../app/store';
-import { PARCEL_ZONES, ZONE_COLORS } from '../tools/parcelTool';
-import { useServices, useStore } from './context';
+import { ZONE_COLORS } from '../app/zoneColors';
+import { PARCEL_ZONES } from '../tools/parcelTool';
+import { TOOL_META } from '../tools/toolMeta';
+import { useDoc, useServices, useStore } from './context';
 import { IconBuilding, IconBulldoze, IconBus, IconClosure, IconParcel, IconRoad, IconSelect } from './Icons';
 
 const IconStreet = () => (
@@ -20,16 +22,18 @@ const STREET_MODES: { id: StreetMode; label: string }[] = [
   { id: 'remove', label: '제거' },
 ];
 
-export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[] = [
-  { id: 'select', label: '선택', key: '1', icon: <IconSelect /> },
-  { id: 'road', label: '도로', key: '2', icon: <IconRoad /> },
-  { id: 'building', label: '건물', key: '3', icon: <IconBuilding /> },
-  { id: 'bulldoze', label: '철거', key: '4', icon: <IconBulldoze /> },
-  { id: 'busLine', label: '버스', key: '5', icon: <IconBus /> },
-  { id: 'closure', label: '폐쇄', key: '6', icon: <IconClosure /> },
-  { id: 'parcel', label: '필지', key: '7', icon: <IconParcel /> },
-  { id: 'street', label: '교통 시설', key: '8', icon: <IconStreet /> },
-];
+const TOOL_ICONS: Record<ToolId, ReactNode> = {
+  select: <IconSelect />,
+  road: <IconRoad />,
+  building: <IconBuilding />,
+  bulldoze: <IconBulldoze />,
+  busLine: <IconBus />,
+  closure: <IconClosure />,
+  parcel: <IconParcel />,
+  street: <IconStreet />,
+};
+
+export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[] = TOOL_META.map((t) => ({ ...t, icon: TOOL_ICONS[t.id] }));
 
 export function Toolbar() {
   const { store } = useServices();
@@ -57,8 +61,7 @@ export function ToolOptions() {
   const { store } = useServices();
   const tool = useStore((s) => s.tool);
   const opts = useStore((s) => s.toolOptions);
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   if (tool === 'road') {
     return (
       <section className="panel tool-options" aria-label="도로 도구 옵션">

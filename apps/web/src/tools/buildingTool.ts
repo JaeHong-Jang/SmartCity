@@ -21,6 +21,7 @@ import {
   type CityDoc,
   type Vec2,
 } from '@smartcity/shared';
+import { closedRing } from '../app/ring';
 import type { SnapStep } from '../app/store';
 import { guideGridLines, type RoadFrame } from './guideGrid';
 import type { PickIndex } from './picking';
@@ -154,7 +155,7 @@ export class BuildingTool implements Tool {
       return;
     }
     const b = { id: this.ctx.ids().next('b'), typeId: type.id, pos: this.placement.pos, rotation: this.placement.rotation };
-    const ghost = buildingFootprints(b, type).map((poly) => [...poly, poly[0]!]);
+    const ghost = buildingFootprints(b, type).map(closedRing);
     this.ctx.dispatch({ type: 'building.place', building: b }, ghost);
   }
 
@@ -200,7 +201,7 @@ export class BuildingTool implements Tool {
     if (!type || !this.placement) return [];
     const polys = buildingFootprints(this.placement, type);
     const first = polys[0]!;
-    return [...first, first[0]!];
+    return closedRing(first);
   }
 
   preview(): ToolPreview {
@@ -211,7 +212,7 @@ export class BuildingTool implements Tool {
     return {
       lines: [
         ...placementGuide(this.placement, step).map((pts) => ({ pts, width: 0.12, color: '#e2e8f0' })),
-        ...buildingFootprints(this.placement, type).map((poly) => ({ pts: [...poly, poly[0]!], width: 0.6, color })),
+        ...buildingFootprints(this.placement, type).map((poly) => ({ pts: closedRing(poly), width: 0.6, color })),
       ],
       points: [],
       building: { typeId: type.id, pos: this.placement.pos, rotation: this.placement.rotation, color },

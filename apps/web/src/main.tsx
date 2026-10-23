@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { ROOM_ID_RE } from '@smartcity/shared';
 import { createDispatcher } from './app/dispatch';
 import { resumeImport } from './app/importExport';
+import { sameDisplayedStats } from './app/simStats';
 import { ClientStore } from './app/store';
 import { LocalTransport } from './net/localTransport';
 import type { Transport } from './net/transport';
@@ -61,7 +62,7 @@ sim.subscribe((snap) => {
   const now = performance.now();
   if (now - lastStatsAt < 250) return;
   lastStatsAt = now;
-  store.set({ simStats: { ...snap.stats } });
+  if (!sameDisplayedStats(store.getState().simStats, snap.stats)) store.set({ simStats: { ...snap.stats } });
 });
 
 function attach(t: Transport): void {

@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { type Zone } from '@smartcity/shared';
-import { useServices, useStore } from '../context';
+import { useDoc, useServices, useStore } from '../context';
 import { MetricsPanel } from '../building/MetricsPanel';
 import { CONFLICT_KO } from '../building/designDraft';
 import '../building/building.css';
@@ -40,8 +40,7 @@ function Gauge({ label, n, max }: { label: string; n: number; max: number }) {
 
 export function StudioOverlay({ req }: { req: StudioRequest }) {
   const { store, dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  const docVersion = useStore((s) => s.docVersion);
+  const { doc, version } = useDoc();
   const pending = useStore((s) => s.pending);
   const results = useStore((s) => s.results);
 
@@ -99,7 +98,7 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
       sceneRef.current?.setProblems(c.ok ? [] : c.cells, c.ok ? [] : c.props);
     }, 150);
     return () => clearTimeout(t);
-  }, [editor, editor.draftVersion, meta, baseRev, doc, docVersion]);
+  }, [editor, editor.draftVersion, meta, baseRev, version]);
 
   // Outcome of our save from the server's answer to this ref (BuildingEditor pattern).
   useEffect(() => {

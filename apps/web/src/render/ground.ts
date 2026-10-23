@@ -12,6 +12,7 @@ export interface Ground {
   setCursor(p: Vec2 | null): void;
   /** Snap step in meters (0 = off). Steps ≥ 8 m are already covered by the major grid. */
   setStep(step: number): void;
+  dispose(): void;
 }
 
 export function createGround(halfSize: number): Ground {
@@ -90,6 +91,12 @@ export function createGround(halfSize: number): Ground {
       if (s === step) return;
       step = s;
       syncFine();
+    },
+    dispose() {
+      geo.dispose();
+      mat.dispose();
+      border.geometry.dispose();
+      border.material.dispose();
     },
   };
 }

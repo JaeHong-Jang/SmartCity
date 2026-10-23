@@ -23,6 +23,7 @@ src/
   render/vehicles.ts       차량 타입별 parts → 정점색 병합 지오메트리 베이크 → 타입별 InstancedMesh, 용량 2배 확장, 스냅샷 2개를 vehicleId 기준 보간(graphRevision 다르면 보간 생략)
   render/signals.ts        신호등 헤드 인스턴스(색 = 스냅샷 color)
   render/overlays.ts       로컬/동료 고스트, pending 펄스, 선택 하이라이트, 버스 노선, 폐쇄 표시, 교통 흐름 오버레이(laneFlow 색), 신호 위상 화살표, 동료 커서+이름
+  render/dirty.ts          명령 종류 → 영향 도메인(도로/건물/차량/정류장/노선/필지) 표 + 선택 영향 판정. CityRenderer·OverlayLayer가 무효화에 사용 (새 명령은 여기에 분류해야 컴파일됨)
   tools/types.ts           interface Tool { id; onPointerDown/Move/Up(e: ToolPointer); onKey?(e); cancel(); ghost(): Vec2[] }
   tools/selectTool.ts      클릭 선택(노드/세그먼트/건물/정류장) → Inspector
   tools/roadTool.ts        직선/곡선(C 토글: 시작→제어점→끝), 연속 그리기, planRoad 미리보기(길이 m·각도°·교차 지점 하이라이트), G 그리드 스냅 토글, 우클릭/Esc 취소

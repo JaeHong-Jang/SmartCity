@@ -2,24 +2,22 @@
 // vehicles, signals and overlays. Reads the store and sim stream; never mutates city state.
 
 import * as THREE from 'three';
-import type { Command, Vec2 } from '@smartcity/shared';
+import type { Vec2 } from '@smartcity/shared';
 import type { ClientStore } from '../app/store';
 import type { SimulationStream } from '../sim/simStream';
 import type { GroundPan, ToolPreview } from '../tools/types';
 import { BuildingLayer } from './buildings';
 import { createCityCamera, type CityCamera } from './camera';
+import { commandDomains, D_BUILDINGS, D_ROADS, D_VEHICLE_TYPES } from './dirty';
 import { computeDayNight, createDayNightState, NOON } from './dayNight';
 import { createGround, type Ground } from './ground';
 import { OverlayLayer } from './overlays';
 import { PedestrianLayer } from './pedestrians';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer, Y_WALK } from './roads';
+import { configureRenderer, createSun } from './sceneKit';
 import { PedSignalLayer, SignalLayer } from './signals';
 import { VehicleLayer } from './vehicles';
-
-const ROAD_COMMANDS = new Set<Command['type']>(['node.add', 'node.move', 'segment.add', 'segment.remove', 'segment.split', 'segment.setType', 'roadType.upsert', 'closure.set', 'closure.remove', 'intersection.set', 'intersection.reset', 'feature.upsert', 'feature.remove', 'segment.setSchoolZone']);
-const BUILDING_COMMANDS = new Set<Command['type']>(['building.place', 'building.remove', 'building.move', 'buildingType.upsert', 'buildingType.remove']);
-const VEHICLE_COMMANDS = new Set<Command['type']>(['vehicleType.upsert', 'vehicleType.remove']);
 
 const _ray = new THREE.Raycaster();
 const _ndc = new THREE.Vector2();
@@ -29,10 +27,6 @@ const SUN_DISTANCE = 520;
 const _sunOffset = new THREE.Vector3();
 const _target = new THREE.Vector3();
 const _panHit = new THREE.Vector3();
-
-function touches(cmd: Command, set: Set<Command['type']>): boolean {
-  return cmd.type === 'batch' ? cmd.commands.some((c) => set.has(c.type)) : set.has(cmd.type);
-}
 
 export class CityRenderer {
   readonly renderer: THREE.WebGLRenderer;
@@ -70,12 +64,7 @@ export class CityRenderer {
     private readonly stream: SimulationStream,
   ) {
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    configureRenderer(renderer);
     renderer.info.autoReset = false;
     renderer.domElement.className = 'city-canvas';
     container.appendChild(renderer.domElement);
@@ -87,11 +76,7 @@ export class CityRenderer {
 
     this.hemi = new THREE.HemisphereLight('#dbeafe', '#56603f', 1.25);
     this.scene.add(this.hemi);
-    this.sun = new THREE.DirectionalLight('#fff3dd', 2.2);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = 0.6;
+    this.sun = createSun(2.2, 2048, 0.6);
     this.scene.add(this.sun, this.sun.target);
 
     const halfSize = store.getState().doc.meta.halfSize;
@@ -108,14 +93,17 @@ export class CityRenderer {
 
     this.unsubs.push(
       store.onApplied((cmd) => {
-        if (touches(cmd, ROAD_COMMANDS)) this.dirty.roads = true;
-        if (touches(cmd, BUILDING_COMMANDS)) this.dirty.buildings = true;
-        if (touches(cmd, VEHICLE_COMMANDS)) this.dirty.vehicleTypes = true;
+        const d = commandDomains(cmd);
+        if (d & D_ROADS) this.dirty.roads = true;
+        if (d & D_BUILDINGS) this.dirty.buildings = true;
+        if (d & D_VEHICLE_TYPES) this.dirty.vehicleTypes = true;
+        this.overlays.invalidate(cmd);
       }),
       store.onReset(() => {
         this.dirty.roads = true;
         this.dirty.buildings = true;
         this.dirty.vehicleTypes = true;
+        this.overlays.invalidateAll();
       }),
     );
 
@@ -286,7 +274,13 @@ export class CityRenderer {
     this.resizeObserver.disconnect();
     this.cam.dispose();
     this.roads.dispose();
+    this.buildings.dispose();
+    this.vehicles.dispose();
     this.pedestrians.dispose();
+    this.signals.dispose();
+    this.pedSignals.dispose();
+    this.overlays.dispose();
+    this.ground.dispose();
     this.renderer.dispose();
   }
 }

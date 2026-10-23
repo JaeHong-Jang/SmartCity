@@ -3,7 +3,9 @@
 // Red ghost = the server would reject it (overlap, too small, self-intersecting, off the map).
 
 import { DEFAULT_REGULATIONS, dist, type CityDoc, type Parcel, type ParcelZone, type Vec2 } from '@smartcity/shared';
+import { closedRing } from '../app/ring';
 import { translateError } from '../app/store';
+import { ZONE_COLORS } from '../app/zoneColors';
 import { GHOST_ID } from './buildingTool';
 import { snapPoint } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
@@ -12,14 +14,6 @@ import { commandError } from './validate';
 const CLOSE_RADIUS = 3;
 
 export const PARCEL_ZONES: ParcelZone[] = ['residential', 'commercial', 'office', 'industrial', 'public', 'green'];
-export const ZONE_COLORS: Record<ParcelZone, string> = {
-  residential: '#facc15',
-  commercial: '#f472b6',
-  office: '#60a5fa',
-  industrial: '#a78bfa',
-  public: '#f97316',
-  green: '#4ade80',
-};
 
 /** Axis-aligned rectangle with corners a and b, counter-clockwise. */
 export function rectPolygon(a: Vec2, b: Vec2): Vec2[] {
@@ -86,7 +80,7 @@ export class ParcelTool implements Tool {
       this.ctx.store.toast(`필지를 만들 수 없습니다: ${err}`, 'error');
       return;
     }
-    this.ctx.dispatch({ type: 'parcel.upsert', parcel }, [[...poly, poly[0]!]]);
+    this.ctx.dispatch({ type: 'parcel.upsert', parcel }, [closedRing(poly)]);
   }
 
   onPointerDown(e: ToolPointer): void {
@@ -166,14 +160,14 @@ export class ParcelTool implements Tool {
 
   ghost(): Vec2[] {
     const poly = this.draft();
-    return poly.length >= 2 ? [...poly, poly[0]!].slice(0, 64) : [];
+    return poly.length >= 2 ? closedRing(poly).slice(0, 64) : [];
   }
 
   preview(): ToolPreview {
     const out: ToolPreview = { lines: [], points: [] };
     const poly = this.draft();
     const color = this.error ? '#f87171' : ZONE_COLORS[this.opts.parcelZone];
-    if (poly.length >= 2) out.lines.push({ pts: this.opts.parcelPolygon && poly.length < 3 ? poly : [...poly, poly[0]!], width: 0.7, color });
+    if (poly.length >= 2) out.lines.push({ pts: this.opts.parcelPolygon && poly.length < 3 ? poly : closedRing(poly), width: 0.7, color });
     for (const [i, v] of this.vertices.entries()) out.points.push({ pos: v, radius: i === 0 ? 1.4 : 1, color: i === 0 ? '#f8fafc' : color });
     if (this.hover) out.points.push({ pos: this.hover, radius: 0.8, color: '#f8fafc' });
     return out;

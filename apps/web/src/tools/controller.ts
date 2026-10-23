@@ -15,9 +15,10 @@ import { SelectTool } from './selectTool';
 import { StreetTool } from './streetTool';
 import { CLICK_SLOP_PX } from './gesture';
 import { nextSnapStep, snapLabel } from './snap';
+import { TOOL_META } from './toolMeta';
 import type { GroundPan, Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
-export const TOOL_KEYS: Record<string, ToolId> = { '1': 'select', '2': 'road', '3': 'building', '4': 'bulldoze', '5': 'busLine', '6': 'closure', '7': 'parcel', '8': 'street' };
+export const TOOL_KEYS: Record<string, ToolId> = Object.fromEntries(TOOL_META.map((t) => [t.key, t.id]));
 const PRESENCE_MS = 1000 / 15;
 /** Keys whose keyup the tools need (modifier state, rotation batching). */
 const KEYUP_CODES = new Set(['ShiftLeft', 'ShiftRight', 'BracketLeft', 'BracketRight']);

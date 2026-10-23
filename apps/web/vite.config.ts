@@ -13,5 +13,17 @@ export default defineConfig({
     },
   },
   worker: { format: 'es' },
-  build: { chunkSizeWarningLimit: 1600 },
+  build: {
+    chunkSizeWarningLimit: 1600,
+    rollupOptions: {
+      output: {
+        // Vendor chunks stay cached across app changes.
+        manualChunks(id: string) {
+          if (id.includes('/node_modules/three/')) return 'three';
+          if (/\/node_modules\/(react|react-dom|scheduler)\//.test(id)) return 'react';
+          return undefined;
+        },
+      },
+    },
+  },
 });

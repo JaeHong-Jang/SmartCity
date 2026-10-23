@@ -15,9 +15,11 @@ import {
   type Violation,
   type Zone,
 } from '@smartcity/shared';
-import { PARCEL_ZONES, ZONE_COLORS } from '../tools/parcelTool';
+import { closedRing } from '../app/ring';
+import { ZONE_COLORS } from '../app/zoneColors';
+import { PARCEL_ZONES } from '../tools/parcelTool';
 import { formatArea } from '../render/parcels';
-import { useServices, useStore } from './context';
+import { useDoc, useServices } from './context';
 import { clampNum } from './RoadTypeEditor';
 import { ZONE_KO } from './Toolbar';
 
@@ -107,8 +109,7 @@ function Gauge({ label, value, limit, unit }: { label: string; value: number; li
 
 export function ParcelInspector({ id }: { id: string }) {
   const { dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const pc = doc.parcels[id]!;
   const [zone, setZone] = useState<ParcelZone>(pc.zone);
   const [reg, setReg] = useState<Regulation>(pc.regulation);
@@ -187,7 +188,7 @@ export function ParcelInspector({ id }: { id: string }) {
         <button onClick={() => setReg({ ...DEFAULT_REGULATIONS[zone] })}>기본값</button>
       </div>
       <span className="muted">꼭짓점을 드래그해 경계를 바꿀 수 있습니다 · Delete 철거</span>
-      <button className="danger" onClick={() => dispatcher.dispatch({ type: 'parcel.remove', id }, [[...pc.polygon, pc.polygon[0]!]])}>
+      <button className="danger" onClick={() => dispatcher.dispatch({ type: 'parcel.remove', id }, [closedRing(pc.polygon)])}>
         필지 철거
       </button>
     </>
@@ -199,8 +200,7 @@ const USE_ORDER: Zone[] = ['residential', 'commercial', 'office', 'industrial', 
 /** Parcel, metrics and smart features of a building (part of the building inspector). */
 export function BuildingPlanning({ id }: { id: string }) {
   const { store } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const b = doc.buildings[id]!;
   const type = doc.buildingTypes[b.typeId];
   if (!type) return null;

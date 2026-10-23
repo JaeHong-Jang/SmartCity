@@ -5,7 +5,7 @@ import { downloadText, exportDoc, startImport } from '../app/importExport';
 import { formatClock } from '../render/dayNight';
 import { BuildingEditor } from './BuildingEditor';
 import { BusLinePanel } from './BusLinePanel';
-import { useServices, useStore } from './context';
+import { useDoc, useServices, useStore } from './context';
 import { Dashboard } from './Dashboard';
 import { IconChart, IconCity, IconDownload, IconPause, IconUpload } from './Icons';
 import { Inspector } from './Inspector';
@@ -25,19 +25,20 @@ const CONNECTION_KO = {
 
 /** Game clock of the simulation, e.g. "07:32 · 1일차". */
 function GameClock() {
-  const clock = useStore((s) => s.simStats?.clock);
-  if (!clock) return null;
+  // Minute resolution: the clock text only changes once per game minute.
+  const minute = useStore((s) => (s.simStats?.clock ? Math.floor(s.simStats.clock.dayTime / 60) : -1));
+  const day = useStore((s) => s.simStats?.clock?.day ?? 0);
+  if (minute < 0) return null;
   return (
     <span className="game-clock" data-clock title="게임 시계 (물리 1초 = 게임 10초)">
-      {formatClock(clock.dayTime)} · {clock.day}일차
+      {formatClock(minute * 60)} · {day}일차
     </span>
   );
 }
 
 function TopBar() {
   const { store, dispatcher, setName } = useServices();
-  const docVersion = useStore((s) => s.docVersion);
-  const doc = useStore((s) => s.doc);
+  const { doc, version } = useDoc();
   const connection = useStore((s) => s.connection);
   const peers = useStore((s) => s.peers);
   const room = useStore((s) => s.room);
@@ -66,7 +67,7 @@ function TopBar() {
         <span>스마트시티</span>
       </div>
       <input
-        key={docVersion}
+        key={version}
         className="city-name"
         aria-label="도시 이름"
         defaultValue={doc.meta.name}
@@ -156,7 +157,6 @@ function StatusBar() {
   const overlays = useStore((s) => s.overlays);
   const density = useStore((s) => s.doc.meta.trafficDensity);
   const snapStep = useStore((s) => s.toolOptions.snapStep);
-  useStore((s) => s.docVersion);
   const [densityDraft, setDensityDraft] = useState<number | null>(null);
   const simText = simStatus === 'ready' ? null : simStatus === 'starting' ? '시뮬레이션 준비 중' : '시뮬레이션 준비 중 (교통 엔진 대기)';
 

@@ -12,7 +12,7 @@ import {
 } from '@smartcity/shared';
 import { bearing } from '../tools/roadTool';
 import { segmentFeatures } from '../tools/streetTool';
-import { useServices, useStore } from './context';
+import { useDoc, useServices, useStore } from './context';
 import { BuildingPlanning, ParcelInspector } from './PlanningInspector';
 import { clampNum } from './RoadTypeEditor';
 
@@ -64,8 +64,7 @@ export function suggestPhases(doc: CityDoc, nodeId: string): SignalPhase[] {
 
 function NodeInspector({ id }: { id: string }) {
   const { store, dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const node = doc.nodes[id]!;
   const segs = segmentsAtNode(doc, id);
   const custom = doc.intersections[id];
@@ -215,8 +214,7 @@ function NodeInspector({ id }: { id: string }) {
 
 function SegmentInspector({ id }: { id: string }) {
   const { dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const seg = doc.segments[id]!;
   const closure = doc.closures[id];
   const [reason, setReason] = useState('공사');
@@ -287,8 +285,7 @@ function SegmentInspector({ id }: { id: string }) {
 
 function BuildingInspector({ id }: { id: string }) {
   const { dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const b = doc.buildings[id]!;
   const type = doc.buildingTypes[b.typeId];
   const replace = (next: Building) => dispatcher.dispatch({ type: 'batch', commands: [{ type: 'building.remove', id }, { type: 'building.place', building: next }] });
@@ -335,8 +332,7 @@ function BuildingInspector({ id }: { id: string }) {
 
 function StopInspector({ id }: { id: string }) {
   const { dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const st = doc.busStops[id]!;
   const lines = Object.values(doc.busLines).filter((l) => l.stopIds.includes(id));
   return (
@@ -360,8 +356,7 @@ function StopInspector({ id }: { id: string }) {
 
 export function Inspector() {
   const sel = useStore((s) => s.selection);
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   if (!sel) {
     return (
       <>

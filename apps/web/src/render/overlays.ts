@@ -8,25 +8,26 @@ import {
   buildingFootprints,
   cumulativeLengths,
   normalize,
-  partOutline,
   pointAtLength,
   rightNormal,
   scale,
   slicePolyline,
   sub,
-  type BuildingPart,
-  type BuildingType,
   type CityDoc,
+  type Command,
   type Vec2,
 } from '@smartcity/shared';
+import { closedRing } from '../app/ring';
 import type { ClientState, ClientStore } from '../app/store';
 import type { SimulationStream } from '../sim/simStream';
 import { buildingGizmo } from '../tools/highlight';
 import type { ToolPreview } from '../tools/types';
+import { commandDomains, D_ALL, D_BUILDINGS, D_BUS_LINES, D_BUS_STOPS, D_PARCELS, D_ROADS, touchesSelection } from './dirty';
+import { GhostBuilding } from './ghostBuilding';
 import { MeshBuilder } from './meshBuilder';
 import { centroid, ParcelLayer } from './parcels';
 import type { RoadNetworkGeom } from './roadNetwork';
-import { routeBetween, stopPosition } from './busRoute';
+import { BusRouter, stopPosition } from './busRoute';
 
 const Y_OVER = 0.32;
 const _c = new THREE.Color();
@@ -51,6 +52,11 @@ class DynLayer {
     this.mesh.geometry.dispose();
     this.mesh.geometry = b.empty ? new THREE.BufferGeometry() : b.build();
     this.mesh.visible = !b.empty;
+  }
+
+  dispose(): void {
+    this.mesh.geometry.dispose();
+    this.mat.dispose();
   }
 }
 
@@ -77,7 +83,7 @@ function ring(b: MeshBuilder, p: Vec2, r: number, w: number, color: string, y = 
 }
 
 function outline(b: MeshBuilder, poly: readonly Vec2[], w: number, color: string, y = Y_OVER): void {
-  line(b, [...poly, poly[0]!], w, color, y);
+  line(b, closedRing(poly), w, color, y);
 }
 
 function arrow(b: MeshBuilder, pts: readonly Vec2[], w: number, color: string, y = Y_OVER): void {
@@ -92,20 +98,6 @@ function arrow(b: MeshBuilder, pts: readonly Vec2[], w: number, color: string, y
   const l = add(base, scale(n, w * 1.6));
   const r = add(base, scale(n, -w * 1.6));
   b.tri(l.x, y, l.z, r.x, y, r.z, tip.x, y, tip.z, _c.set(color));
-}
-
-/** Height of a part's ghost box: walls plus a simple allowance for pitched roofs. */
-const ghostHeight = (p: BuildingPart): number => p.floors * p.floorHeight + (p.roof === 'flat' ? 0 : Math.min(p.width, p.depth) * 0.35);
-
-/** Translucent extruded outlines of a building type in its local frame (footprint parts included). */
-function ghostGeometries(type: BuildingType): THREE.BufferGeometry[] {
-  return type.parts.map((part) => {
-    const shape = new THREE.Shape(partOutline(part).map((v) => new THREE.Vector2(v.x, -v.z)));
-    const g = new THREE.ExtrudeGeometry(shape, { depth: ghostHeight(part), bevelEnabled: false });
-    g.rotateX(-Math.PI / 2);
-    g.translate(0, part.baseHeight, 0);
-    return g;
-  });
 }
 
 interface PeerTag {
@@ -127,9 +119,14 @@ export class OverlayLayer {
   private phases: DynLayer;
   private flow: DynLayer;
   private cursorMesh: THREE.InstancedMesh;
-  private ghostBuilding = new THREE.Group();
-  private ghostWallMat = new THREE.MeshBasicMaterial({ color: '#4ade80', transparent: true, opacity: 0.45, depthWrite: false, side: THREE.DoubleSide });
-  private ghostKey = '';
+  private ghost = new GhostBuilding();
+  /** Numbers/colors of the last drawn preview, to skip identical rebuilds on pointer moves. */
+  private previewNums: number[] = [];
+  private previewCols: string[] = [];
+  private previewDrawn = false;
+  /** Layers whose inputs a command changed since the last refresh (everything starts dirty). */
+  private stale = D_ALL;
+  private selectionStale = true;
   private parcels: ParcelLayer;
   private peerTags: PeerTag[] = [];
   private labels = new Map<string, HTMLDivElement>();
@@ -161,59 +158,88 @@ export class OverlayLayer {
     this.cursorMesh.count = 0;
     this.cursorMesh.frustumCulled = false;
     this.group.add(this.cursorMesh);
-    this.group.add(this.ghostBuilding);
+    this.group.add(this.ghost.group);
     this.parcels = new ParcelLayer(labelRoot);
     this.group.add(this.parcels.group);
   }
 
   setPreview(p: ToolPreview): void {
-    const b = new MeshBuilder();
-    for (const l of p.lines) line(b, l.pts, l.width, l.color, Y_OVER + 0.02);
-    for (const pt of p.points) disc(b, pt.pos, pt.radius, pt.color, Y_OVER + 0.04);
-    this.preview.set(b);
+    if (!this.previewDrawn || !this.samePreview(p)) {
+      this.previewDrawn = true;
+      this.storePreview(p);
+      const b = new MeshBuilder();
+      for (const l of p.lines) line(b, l.pts, l.width, l.color, Y_OVER + 0.02);
+      for (const pt of p.points) disc(b, pt.pos, pt.radius, pt.color, Y_OVER + 0.04);
+      this.preview.set(b);
+    }
 
     // Translucent 3D ghost for building placement and moves (geometry cached per design revision).
     const pb = p.building;
-    const doc = this.store.getState().doc;
-    const type = pb ? doc.buildingTypes[pb.typeId] : undefined;
-    const key = type ? `${type.id}:${type.rev ?? 0}:${JSON.stringify(type.parts).length}` : '';
-    if (key !== this.ghostKey) {
-      this.ghostKey = key;
-      for (const c of [...this.ghostBuilding.children]) {
-        (c as THREE.Mesh).geometry.dispose();
-        this.ghostBuilding.remove(c);
-      }
-      if (type) {
-        for (const g of ghostGeometries(type)) {
-          const m = new THREE.Mesh(g, this.ghostWallMat);
-          m.renderOrder = 14;
-          this.ghostBuilding.add(m);
-        }
-      }
+    this.ghost.set(pb ? this.store.getState().doc.buildingTypes[pb.typeId] : undefined, pb);
+  }
+
+  /** Whether the line/point geometry equals the last drawn preview (no allocation). */
+  private samePreview(p: ToolPreview): boolean {
+    const n = this.previewNums;
+    const c = this.previewCols;
+    let i = 0;
+    let k = 0;
+    if (n[i++] !== p.lines.length) return false;
+    for (const l of p.lines) {
+      if (n[i++] !== l.width || n[i++] !== l.pts.length || c[k++] !== l.color) return false;
+      for (const v of l.pts) if (n[i++] !== v.x || n[i++] !== v.z) return false;
     }
-    this.ghostBuilding.visible = !!(pb && type);
-    if (pb && type) {
-      this.ghostWallMat.color.set(pb.color);
-      this.ghostBuilding.position.set(pb.pos.x, 0, pb.pos.z);
-      this.ghostBuilding.rotation.y = pb.rotation;
+    if (n[i++] !== p.points.length) return false;
+    for (const pt of p.points) if (n[i++] !== pt.pos.x || n[i++] !== pt.pos.z || n[i++] !== pt.radius || c[k++] !== pt.color) return false;
+    return i === n.length && k === c.length;
+  }
+
+  private storePreview(p: ToolPreview): void {
+    const n: number[] = [p.lines.length];
+    const c: string[] = [];
+    for (const l of p.lines) {
+      n.push(l.width, l.pts.length);
+      c.push(l.color);
+      for (const v of l.pts) n.push(v.x, v.z);
     }
+    n.push(p.points.length);
+    for (const pt of p.points) {
+      n.push(pt.pos.x, pt.pos.z, pt.radius);
+      c.push(pt.color);
+    }
+    this.previewNums = n;
+    this.previewCols = c;
+  }
+
+  /** A command was applied: mark the layers it can change (called from the store's applied hook). */
+  invalidate(cmd: Command): void {
+    this.stale |= commandDomains(cmd);
+    const sel = this.store.getState().selection;
+    if (sel && touchesSelection(cmd, sel)) this.selectionStale = true;
+  }
+
+  /** The whole doc was replaced (resync). */
+  invalidateAll(): void {
+    this.stale = D_ALL;
+    this.selectionStale = true;
   }
 
   /** Rebuild layers whose store inputs changed. */
   refresh(): void {
     const s = this.store.getState();
     const p = this.prev;
-    const docChanged = p.docVersion !== s.docVersion;
-    if (docChanged || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
-    if (docChanged || p.overlays?.violations !== s.overlays.violations) this.parcels.update(s.doc, s.overlays.violations);
+    const d = this.stale;
+    this.stale = 0;
+    const selStale = this.selectionStale;
+    this.selectionStale = false;
+    if (d & (D_ROADS | D_BUILDINGS | D_BUS_STOPS | D_PARCELS) || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
+    if (d & (D_PARCELS | D_BUILDINGS) || p.overlays?.violations !== s.overlays.violations) this.parcels.update(s.doc, s.overlays.violations);
     if (p.pending !== s.pending) this.buildPending(s);
     if (p.flashes !== s.flashes) this.buildFlash(s);
-    if (docChanged || p.selection !== s.selection) this.buildSelection(s);
-    if (docChanged) {
-      this.buildTransit(s.doc);
-      this.buildClosures(s.doc);
-    }
-    if (docChanged || p.phaseHighlight !== s.phaseHighlight) this.buildPhases(s);
+    if (selStale || p.selection !== s.selection) this.buildSelection(s);
+    if (d & (D_ROADS | D_BUS_STOPS | D_BUS_LINES)) this.buildTransit(s.doc);
+    if (d & D_ROADS) this.buildClosures(s.doc);
+    if (d & D_ROADS || p.phaseHighlight !== s.phaseHighlight) this.buildPhases(s);
     this.prev = s;
   }
 
@@ -322,12 +348,13 @@ export class OverlayLayer {
 
   private buildTransit(doc: CityDoc): void {
     const b = new MeshBuilder();
+    const router = new BusRouter(doc);
     for (const lineDef of Object.values(doc.busLines)) {
       const stops = lineDef.stopIds.map((id) => doc.busStops[id]).filter((x) => x !== undefined);
       for (let i = 0; i < stops.length; i++) {
         const a = stops[i]!;
         const c = stops[(i + 1) % stops.length]!;
-        const route = routeBetween(doc, a, c);
+        const route = router.routeBetween(a, c);
         if (route.length >= 2) line(b, route, 0.9, lineDef.color, Y_OVER - 0.02);
       }
     }
@@ -507,5 +534,18 @@ export class OverlayLayer {
         this.labels.delete(id);
       }
     }
+  }
+
+  dispose(): void {
+    for (const l of [this.preview, this.peers, this.pending, this.flash, this.selection, this.transit, this.closures, this.phases, this.flow]) l.dispose();
+    this.cursorMesh.geometry.dispose();
+    (this.cursorMesh.material as THREE.Material).dispose();
+    this.cursorMesh.dispose();
+    this.ghost.dispose();
+    this.parcels.dispose();
+    for (const t of this.peerTags) t.el.remove();
+    this.peerTags = [];
+    for (const label of this.labels.values()) label.remove();
+    this.labels.clear();
   }
 }

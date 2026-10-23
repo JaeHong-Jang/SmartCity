@@ -36,6 +36,8 @@ interface TypeEntry {
   /** Building id of each instance slot, and the per-instance window-light level. */
   ids: string[];
   occ: THREE.InstancedBufferAttribute;
+  /** Scratch for the next window-light levels, compared with `occ` before uploading. */
+  next: Float32Array;
   cap: number;
   /** The doc object the geometry was baked from (fast path), and its design signature (after a resync). */
   ref: BuildingType;
@@ -106,7 +108,7 @@ export class BuildingLayer {
         let capacity = 16;
         while (capacity < n) capacity *= 2;
         const occ = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
-        e = { rev: t.rev ?? 0, ids: [], occ, cap: buildingCapacity(t), ref: t, sig: designSig(t), mesh: this.createMesh(id, bakeBuildingGeometry(t), capacity, occ), capacity };
+        e = { rev: t.rev ?? 0, ids: [], occ, next: new Float32Array(capacity), cap: buildingCapacity(t), ref: t, sig: designSig(t), mesh: this.createMesh(id, bakeBuildingGeometry(t), capacity, occ), capacity };
         this.types.set(id, e);
       } else if (n > e.capacity) {
         let capacity = e.capacity;
@@ -114,7 +116,9 @@ export class BuildingLayer {
         const geo = e.mesh.geometry;
         this.group.remove(e.mesh);
         e.mesh.dispose();
+        e.occ.dispose();
         e.occ = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
+        e.next = new Float32Array(capacity);
         e.mesh = this.createMesh(id, geo, capacity, e.occ);
         e.capacity = capacity;
       }
@@ -151,16 +155,39 @@ export class BuildingLayer {
     this.occStale = false;
     const known = !!snap && snap.buildingIds?.length > 0 && !!snap.occupancy;
     const scale = snap?.stats.citizens?.scale ?? 1;
-    for (const e of this.types.values()) e.occ.array.fill(known ? 0 : IDLE_OCCUPANCY);
+    for (const e of this.types.values()) e.next.fill(known ? 0 : IDLE_OCCUPANCY);
     if (known) {
       const ids = snap!.buildingIds;
       const occ = snap!.occupancy;
       for (let i = 0; i < ids.length; i++) {
         const at = this.slotOf.get(ids[i]!);
-        if (at) (at.e.occ.array as Float32Array)[at.slot] = occupancyLevel(occ[i] ?? 0, scale, at.e.cap);
+        if (at) at.e.next[at.slot] = occupancyLevel(occ[i] ?? 0, scale, at.e.cap);
       }
     }
-    for (const e of this.types.values()) e.occ.needsUpdate = true;
+    // Upload only the types whose levels actually changed.
+    for (const e of this.types.values()) {
+      const cur = e.occ.array as Float32Array;
+      let same = true;
+      for (let i = 0; i < cur.length; i++) {
+        if (cur[i] !== e.next[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) continue;
+      cur.set(e.next);
+      e.occ.needsUpdate = true;
+    }
+  }
+
+  dispose(): void {
+    for (const e of this.types.values()) {
+      this.drop(e);
+      e.occ.dispose();
+    }
+    this.types.clear();
+    this.slotOf.clear();
+    this.material.dispose();
   }
 
   /** Number of instanced meshes currently drawn (one per design in use). */

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyDoc, type Command } from '@smartcity/shared';
 import { compileNetwork } from '../network/compile.js';
-import { buildPedGraph, PedEdgeKind, PedRouter } from '../network/pedGraph.js';
+import { buildPedGraph, PedEdgeKind } from '../network/pedGraph.js';
+import { PedRouter } from '../network/pedQuery.js';
 import { Simulation } from '../simulation.js';
 import { apply, checkInvariants, checkZoneInvariants, crossDoc, internals, lineDoc, pedestriansOnCrossings } from '../testkit.js';
 import { PedSignal } from '../types.js';

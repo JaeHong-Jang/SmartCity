@@ -101,6 +101,21 @@ export function buildZones(net: Net): ZoneIndex {
   }
   const length = new Float64Array(g.crossings.length);
   const byZone: ZoneIndex['byZone'] = g.crossings.map(() => []);
+  // Connector bounding boxes (x0, z0, x1, z1): disjoint from a zone means no passage.
+  const cbox = new Float64Array(4 * g.connectors.length);
+  for (const k of g.connectors) {
+    let x0 = Infinity;
+    let z0 = Infinity;
+    let x1 = -Infinity;
+    let z1 = -Infinity;
+    for (const q of k.points) {
+      x0 = Math.min(x0, q.x);
+      z0 = Math.min(z0, q.z);
+      x1 = Math.max(x1, q.x);
+      z1 = Math.max(z1, q.z);
+    }
+    cbox.set([x0, z0, x1, z1], 4 * k.index);
+  }
   for (const cr of g.crossings) {
     const seg = g.segments.get(cr.segmentId)!;
     length[cr.index] = dist(cr.a, cr.b);
@@ -121,7 +136,25 @@ export function buildZones(net: Net): ZoneIndex {
       byZone[cr.index]!.push({ edge, p });
     };
     if (cr.kind === 'junction') {
+      let px0 = Infinity;
+      let pz0 = Infinity;
+      let px1 = -Infinity;
+      let pz1 = -Infinity;
+      for (const q of poly) {
+        px0 = Math.min(px0, q.x);
+        pz0 = Math.min(pz0, q.z);
+        px1 = Math.max(px1, q.x);
+        pz1 = Math.max(pz1, q.z);
+      }
+      const M = 1e-6;
+      // polylineInside skips (near-)zero-length polygon edges, so a degenerate zone can reach beyond its
+      // box (e.g. a zero tangent on a folded curve): the box test is only exact when every edge is real.
+      let minEdge = Infinity;
+      for (let i = 0; i < poly.length; i++) minEdge = Math.min(minEdge, dist(poly[i]!, poly[(i + 1) % poly.length]!));
+      const boxed = minEdge >= 0.01;
       for (const ci of byNode.get(cr.nodeId!) ?? []) {
+        const o = 4 * ci;
+        if (boxed && (cbox[o]! > px1 + M || cbox[o + 2]! < px0 - M || cbox[o + 1]! > pz1 + M || cbox[o + 3]! < pz0 - M)) continue;
         const k = g.connectors[ci]!;
         push(nLanes + ci, conn[ci]!, k.points, k.cum);
       }

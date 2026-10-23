@@ -133,7 +133,6 @@ type Hover =
 
 export class StreetTool implements Tool {
   readonly id = 'street' as const;
-  private lastPos: Vec2 | null = null;
   private hover: Hover | null = null;
 
   constructor(
@@ -181,7 +180,6 @@ export class StreetTool implements Tool {
 
   onPointerDown(e: ToolPointer): void {
     if (e.button !== 0) return;
-    this.lastPos = e.pos;
     const hover = this.resolve(e.pos);
     this.hover = hover;
     if (!hover) return;
@@ -217,7 +215,6 @@ export class StreetTool implements Tool {
   }
 
   onPointerMove(e: ToolPointer): void {
-    this.lastPos = e.pos;
     this.hover = this.resolve(e.pos);
     this.setHint(this.hover);
     this.ctx.changed();

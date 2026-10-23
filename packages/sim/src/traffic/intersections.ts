@@ -22,6 +22,9 @@ interface Req {
 // Scratch marks for "blocked by a conflict this tick"; stamps never repeat, so instances cannot interfere.
 let blockedMark = new Uint32Array(0);
 let blockedStamp = 0;
+// Request records reused across ticks (processRequests is synchronous, so instances cannot interfere).
+const reqPool: Req[] = [];
+const reqs: Req[] = [];
 
 function byOrder(a: Req, b: Req): number {
   return a.node - b.node || a.pri - b.pri || a.order - b.order || a.v.id - b.v.id;
@@ -40,10 +43,20 @@ function freeSpace(w: World, lane: number): number {
 }
 
 export function processRequests(w: World): void {
+  try {
+    grantRequests(w);
+  } finally {
+    // Drop vehicle references so the scratch does not keep removed vehicles alive.
+    for (const r of reqs) r.v = undefined as unknown as Vehicle;
+    reqs.length = 0;
+  }
+}
+
+function grantRequests(w: World): void {
   const net = w.net;
   const nLanes = net.nLanes;
   const conns = w.graph.connectors;
-  const reqs: Req[] = [];
+  let n = 0;
   for (let l = 0; l < nLanes; l++) {
     const list = w.onEdge[l]!;
     if (list.length === 0) continue;
@@ -62,9 +75,17 @@ export function processRequests(w: World): void {
     const c = nxt - nLanes;
     const node = net.connNode[c]!;
     // Turn priority only applies at signals; uncontrolled junctions are first come, first served.
-    reqs.push({ v, c, node, pri: net.nodeSignalized[node] ? net.connPri[c]! : 0, order: stopReq ? v.stopTick : v.reqTick });
+    let r = reqPool[n];
+    if (!r) reqPool.push((r = { v, c: 0, node: 0, pri: 0, order: 0 }));
+    r.v = v;
+    r.c = c;
+    r.node = node;
+    r.pri = net.nodeSignalized[node] ? net.connPri[c]! : 0;
+    r.order = stopReq ? v.stopTick : v.reqTick;
+    reqs[n++] = r;
   }
-  if (reqs.length === 0 || w.noGrantTick === w.tick) return;
+  reqs.length = n;
+  if (n === 0 || w.noGrantTick === w.tick) return;
   reqs.sort(byOrder);
 
   if (blockedMark.length < conns.length) blockedMark = new Uint32Array(conns.length * 2);

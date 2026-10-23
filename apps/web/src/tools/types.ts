@@ -39,8 +39,6 @@ export interface ToolPreview {
   building?: PreviewBuilding;
 }
 
-export const EMPTY_PREVIEW: ToolPreview = { lines: [], points: [] };
-
 /** Left-drag camera pan over the ground plane: the point under the cursor stays under the cursor. */
 export interface GroundPan {
   start(clientX: number, clientY: number): boolean;

@@ -11,8 +11,9 @@ import { laneSAtT } from '../traffic/demand.js';
 import { createVehicle } from '../traffic/ops.js';
 import { canPlace, despawn, type Goal, type Vehicle, type World } from '../traffic/world.js';
 import type { BuildingAccess } from '../network/pedGraph.js';
-import { CLOCK_SCALE, CLOCK_START, type CitizenStats } from '../types.js';
+import type { CitizenStats } from '../types.js';
 import { DOOR_SECONDS, removePed, requestRoute, setRoute, spawnPed } from './peds.js';
+import { gameDuration, gameSec, hash01, heapPop, schedule, tickAt, type Ev } from './schedule.js';
 
 export const CitState = { home: 0, leaving: 1, walking: 2, driving: 3, entering: 4, atWork: 5, atShop: 6, displaced: 7 } as const;
 const N_STATES = 8;
@@ -57,12 +58,6 @@ export interface Citizen {
   ped: number;
   car: Vehicle | null;
   carWait: number;
-  seq: number;
-}
-
-interface Ev {
-  due: number;
-  pid: number;
   seq: number;
 }
 
@@ -118,63 +113,6 @@ export function newCitizenWorld(seed: number, enabled: boolean, max: number): Ci
     removedCitizens: 0,
     trips: 0,
   };
-}
-
-// ---------- time ----------
-
-const gameSec = (w: World, tick: number): number => CLOCK_START + (tick / w.tickRate) * CLOCK_SCALE;
-const tickAt = (w: World, game: number): number => Math.ceil(((game - CLOCK_START) / CLOCK_SCALE) * w.tickRate);
-const gameDuration = (w: World, sec: number): number => Math.round((sec / CLOCK_SCALE) * w.tickRate);
-
-/** Deterministic hash of (person, day, salt) in [0, 1). */
-function hash01(a: number, b: number, c: number): number {
-  let h = Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b + 0x7f4a7c15, 0xc2b2ae35) ^ Math.imul(c + 0x165667b1, 0x27d4eb2f);
-  h ^= h >>> 16;
-  h = Math.imul(h, 0x85ebca6b);
-  h ^= h >>> 13;
-  h = Math.imul(h, 0xc2b2ae35);
-  h ^= h >>> 16;
-  return (h >>> 0) / 4294967296;
-}
-
-// ---------- event queue: (dueTick, personId, seq) ----------
-
-const evLess = (a: Ev, b: Ev): boolean => a.due < b.due || (a.due === b.due && (a.pid < b.pid || (a.pid === b.pid && a.seq < b.seq)));
-
-function heapPush(h: Ev[], e: Ev): void {
-  h.push(e);
-  let i = h.length - 1;
-  while (i > 0) {
-    const p = (i - 1) >> 1;
-    if (!evLess(h[i]!, h[p]!)) break;
-    [h[i], h[p]] = [h[p]!, h[i]!];
-    i = p;
-  }
-}
-
-function heapPop(h: Ev[]): Ev {
-  const top = h[0]!;
-  const last = h.pop()!;
-  if (h.length > 0) {
-    h[0] = last;
-    let i = 0;
-    for (;;) {
-      const l = 2 * i + 1;
-      const r = l + 1;
-      let m = i;
-      if (l < h.length && evLess(h[l]!, h[m]!)) m = l;
-      if (r < h.length && evLess(h[r]!, h[m]!)) m = r;
-      if (m === i) break;
-      [h[i], h[m]] = [h[m]!, h[i]!];
-      i = m;
-    }
-  }
-  return top;
-}
-
-function schedule(w: World, c: Citizen, due: number): void {
-  c.seq++;
-  heapPush(w.cz.heap, { due: Math.max(due, w.tick + 1), pid: c.id, seq: c.seq });
 }
 
 // ---------- population ----------

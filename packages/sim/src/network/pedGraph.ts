@@ -27,7 +27,6 @@ import {
 } from '@smartcity/shared';
 import type { CompiledSegment, RoadGraph } from '../types.js';
 import { CROSSWALK_ZONE } from './compile.js';
-import { MinHeap } from './route.js';
 
 export const PedEdgeKind = { sidewalk: 0, corner: 1, crossing: 2, access: 3 } as const;
 
@@ -36,10 +35,9 @@ export const ACCESS_RADIUS = 80;
 const NODE_MERGE = 0.25;
 const MITER_LIMIT = 2 * SIDEWALK_WIDTH;
 const DEG = Math.PI / 180;
-const GRID = 32;
+export const GRID = 32;
 /** Route cost: walking time at the mean speed plus a fixed wait for every crossing. */
 export const ROUTE_SPEED = 1.3;
-const CROSSING_COST = 8;
 
 export interface BuildingAccess {
   door: number;
@@ -77,15 +75,15 @@ export interface PedGraph {
   /** Sorted building ids and their access (null = not connected). */
   buildingIds: string[];
   access: (BuildingAccess | null)[];
-  /** Edges by grid cell, for re-projection. */
-  grid: Map<number, number[]>;
+  /** Edges by grid cell (CSR), for re-projection: cell (ix, iz) → edges[start[c]..start[c + 1]]. */
+  grid: { x0: number; z0: number; nx: number; nz: number; start: Int32Array; edges: Int32Array };
+  /** Per edge: bounding box x0, z0, x1, z1. */
+  box: Float64Array;
   /** Connected component of each node (walkable both ways, access edges included). */
   comp: Int32Array;
   /** Scratch stamps for neighbour searches (never part of the graph's meaning). */
   mark: Uint32Array;
 }
-
-let markStamp = 0;
 
 interface Run {
   seg: CompiledSegment;
@@ -100,7 +98,6 @@ interface Run {
   nodes: number[];
 }
 
-const cellKey = (ix: number, iz: number): number => (ix + 32768) * 65536 + (iz + 32768);
 
 function sidePoint(seg: CompiledSegment, cum: number[], s: number, side: number, off: number): Vec2 {
   const c = pointAtLength(seg.centerline, cum, s);
@@ -401,7 +398,11 @@ export function buildPedGraph(doc: CityDoc, g: RoadGraph): PedGraph {
     adj[fill[eFrom[e]!]!++] = e * 2;
     adj[fill[eTo[e]!]!++] = e * 2 + 1;
   }
-  const grid = new Map<number, number[]>();
+  const box = new Float64Array(4 * nEdges);
+  let gx0 = Infinity;
+  let gz0 = Infinity;
+  let gx1 = -Infinity;
+  let gz1 = -Infinity;
   for (let e = 0; e < nEdges; e++) {
     let x0 = Infinity;
     let z0 = Infinity;
@@ -413,14 +414,28 @@ export function buildPedGraph(doc: CityDoc, g: RoadGraph): PedGraph {
       x1 = Math.max(x1, p.x);
       z1 = Math.max(z1, p.z);
     }
-    for (let ix = Math.floor(x0 / GRID); ix <= Math.floor(x1 / GRID); ix++)
-      for (let iz = Math.floor(z0 / GRID); iz <= Math.floor(z1 / GRID); iz++) {
-        const k = cellKey(ix, iz);
-        const l = grid.get(k);
-        if (l) l.push(e);
-        else grid.set(k, [e]);
-      }
+    box[4 * e] = x0;
+    box[4 * e + 1] = z0;
+    box[4 * e + 2] = x1;
+    box[4 * e + 3] = z1;
+    gx0 = Math.min(gx0, Math.floor(x0 / GRID));
+    gz0 = Math.min(gz0, Math.floor(z0 / GRID));
+    gx1 = Math.max(gx1, Math.floor(x1 / GRID));
+    gz1 = Math.max(gz1, Math.floor(z1 / GRID));
   }
+  // Edges by cell (CSR, cells row-major by x then z; edges ascending within a cell).
+  const gnx = nEdges ? gx1 - gx0 + 1 : 0;
+  const gnz = nEdges ? gz1 - gz0 + 1 : 0;
+  const cellStart = new Int32Array(gnx * gnz + 1);
+  const eachCell = (e: number, fn: (c: number) => void): void => {
+    for (let ix = Math.floor(box[4 * e]! / GRID); ix <= Math.floor(box[4 * e + 2]! / GRID); ix++)
+      for (let iz = Math.floor(box[4 * e + 1]! / GRID); iz <= Math.floor(box[4 * e + 3]! / GRID); iz++) fn((ix - gx0) * gnz + (iz - gz0));
+  };
+  for (let e = 0; e < nEdges; e++) eachCell(e, (c) => cellStart[c + 1]!++);
+  for (let c = 0; c < gnx * gnz; c++) cellStart[c + 1]! += cellStart[c]!;
+  const cellFill = cellStart.slice(0, gnx * gnz);
+  const cellEdges = new Int32Array(cellStart[gnx * gnz]!);
+  for (let e = 0; e < nEdges; e++) eachCell(e, (c) => (cellEdges[cellFill[c]!++] = e));
   const parent = new Int32Array(nNodes);
   for (let i = 0; i < nNodes; i++) parent[i] = i;
   const find = (a: number): number => {
@@ -451,123 +466,9 @@ export function buildPedGraph(doc: CityDoc, g: RoadGraph): PedGraph {
     crossingEdge,
     buildingIds,
     access,
-    grid,
+    grid: { x0: gx0, z0: gz0, nx: gnx, nz: gnz, start: cellStart, edges: cellEdges },
+    box,
     comp,
     mark: new Uint32Array(nEdges),
   };
-}
-
-/** Calls `fn` once for every edge whose grid cells come within `radius` of p. */
-function forEdgesNear(pg: PedGraph, p: Vec2, radius: number, fn: (e: number) => void): void {
-  const stamp = ++markStamp;
-  for (let ix = Math.floor((p.x - radius) / GRID); ix <= Math.floor((p.x + radius) / GRID); ix++)
-    for (let iz = Math.floor((p.z - radius) / GRID); iz <= Math.floor((p.z + radius) / GRID); iz++) {
-      const list = pg.grid.get(cellKey(ix, iz));
-      if (!list) continue;
-      for (const e of list) {
-        if (pg.mark[e] === stamp) continue;
-        pg.mark[e] = stamp;
-        fn(e);
-      }
-    }
-}
-
-/** Closest node within `radius` (in component `comp`, −1 = any), ties by node index; −1 when none. */
-export function nearestNode(pg: PedGraph, p: Vec2, radius: number, comp = -1): number {
-  let best = -1;
-  let bd = Infinity;
-  const consider = (n: number): void => {
-    if (comp >= 0 && pg.comp[n] !== comp) return;
-    const d = Math.hypot(pg.x[n]! - p.x, pg.z[n]! - p.z);
-    if (d <= radius && (d < bd - 1e-9 || (Math.abs(d - bd) <= 1e-9 && n < best))) {
-      best = n;
-      bd = d;
-    }
-  };
-  forEdgesNear(pg, p, radius, (e) => {
-    consider(pg.from[e]!);
-    consider(pg.to[e]!);
-  });
-  return best;
-}
-
-/** Closest point on a sidewalk or corner edge within `radius` (in component `comp`, −1 = any), ties by edge index. */
-export function nearestEdge(pg: PedGraph, p: Vec2, radius: number, comp = -1): { edge: number; s: number; d: number } | null {
-  let best: { edge: number; s: number; d: number } | null = null;
-  forEdgesNear(pg, p, radius, (e) => {
-    const k = pg.kind[e];
-    if (k === PedEdgeKind.crossing || k === PedEdgeKind.access || (comp >= 0 && pg.comp[pg.from[e]!] !== comp)) return;
-    const cp = closestPointOnPolyline(pg.pts[e]!, p);
-    if (cp.distance > radius) return;
-    if (!best || cp.distance < best.d - 1e-9 || (Math.abs(cp.distance - best.d) <= 1e-9 && e < best.edge)) best = { edge: e, s: cp.s, d: cp.distance };
-  });
-  return best;
-}
-
-/** A* over pedestrian nodes. Paths are signed edges; ties pop the smaller node first. */
-export class PedRouter {
-  private readonly g: Float64Array;
-  private readonly via: Int32Array;
-  private readonly seen: Uint32Array;
-  private readonly done: Uint32Array;
-  private readonly heap = new MinHeap();
-  private stamp = 0;
-
-  constructor(private readonly pg: PedGraph) {
-    this.g = new Float64Array(pg.nNodes);
-    this.via = new Int32Array(pg.nNodes);
-    this.seen = new Uint32Array(pg.nNodes);
-    this.done = new Uint32Array(pg.nNodes);
-  }
-
-  /** Signed-edge path from node `src` to node `dst` and its length, or null when unreachable. */
-  find(src: number, dst: number): { path: Int32Array; length: number } | null {
-    const pg = this.pg;
-    if (src === dst) return { path: new Int32Array(0), length: 0 };
-    const stamp = ++this.stamp;
-    const heap = this.heap;
-    heap.clear();
-    const tx = pg.x[dst]!;
-    const tz = pg.z[dst]!;
-    const h = (n: number): number => Math.hypot(pg.x[n]! - tx, pg.z[n]! - tz) / ROUTE_SPEED;
-    this.g[src] = 0;
-    this.seen[src] = stamp;
-    this.via[src] = -1;
-    heap.push(h(src), src);
-    while (heap.size > 0) {
-      const n = heap.pop();
-      if (this.done[n] === stamp) continue;
-      this.done[n] = stamp;
-      if (n === dst) {
-        const out: number[] = [];
-        let length = 0;
-        let cur = n;
-        while (cur !== src) {
-          const se = this.via[cur]!;
-          out.push(se);
-          const e = se >> 1;
-          length += pg.len[e]!;
-          cur = se & 1 ? pg.to[e]! : pg.from[e]!;
-        }
-        out.reverse();
-        return { path: Int32Array.from(out), length };
-      }
-      const gn = this.g[n]!;
-      for (let k = pg.adjStart[n]!; k < pg.adjStart[n + 1]!; k++) {
-        const se = pg.adj[k]!;
-        const e = se >> 1;
-        const m = se & 1 ? pg.from[e]! : pg.to[e]!;
-        if (this.done[m] === stamp) continue;
-        // Access edges only start or end a trip: no walking through buildings.
-        if (pg.kind[e] === PedEdgeKind.access && m !== dst && n !== src) continue;
-        const ng = gn + pg.len[e]! / ROUTE_SPEED + (pg.kind[e] === PedEdgeKind.crossing ? CROSSING_COST : 0);
-        if (this.seen[m] === stamp && ng >= this.g[m]!) continue;
-        this.seen[m] = stamp;
-        this.g[m] = ng;
-        this.via[m] = se;
-        heap.push(ng + h(m), m);
-      }
-    }
-    return null;
-  }
 }

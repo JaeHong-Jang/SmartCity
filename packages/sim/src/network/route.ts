@@ -127,24 +127,8 @@ export class Router {
     const heap = this.heap;
     heap.clear();
 
-    const relax = (n: number, gPrev: number, from: number): void => {
-      if (this.done[n] === stamp) return;
-      if (net.closed[n] || (!bus && net.busOnly[n])) return;
-      const isGoal = n < net.nLanes && this.goalMark[n] === stamp;
-      let cost: number;
-      if (n < net.nLanes) cost = (isGoal ? this.goalS[n]! / net.speed[n]! : net.baseCost[n]!) + stopped[n]! * QUEUE_COST;
-      else cost = net.baseCost[n]!;
-      const ng = gPrev + cost;
-      if (this.seen[n] === stamp && ng >= this.g[n]!) return;
-      this.seen[n] = stamp;
-      this.g[n] = ng;
-      this.parent[n] = from;
-      const h = isGoal ? 0 : Math.hypot(net.endX[n]! - destP.x, net.endZ[n]! - destP.z) / HEURISTIC_SPEED;
-      heap.push(ng + h, n);
-    };
-
     const gStart = Math.max(0, net.len[start]! - s) / net.speed[start]!;
-    for (const n of net.next[start]!) relax(n, gStart, -1);
+    for (const n of net.next[start]!) this.relax(n, gStart, -1, stamp, bus, stopped, destP.x, destP.z);
     while (heap.size > 0) {
       const e = heap.pop();
       if (this.done[e] === stamp) continue;
@@ -162,9 +146,26 @@ export class Router {
         return { path, destS: this.goalS[e]! };
       }
       const ge = this.g[e]!;
-      for (const n of net.next[e]!) relax(n, ge, e);
+      for (const n of net.next[e]!) this.relax(n, ge, e, stamp, bus, stopped, destP.x, destP.z);
     }
     return null;
+  }
+
+  private relax(n: number, gPrev: number, from: number, stamp: number, bus: boolean, stopped: Int32Array, dx: number, dz: number): void {
+    const net = this.net;
+    if (this.done[n] === stamp) return;
+    if (net.closed[n] || (!bus && net.busOnly[n])) return;
+    const isGoal = n < net.nLanes && this.goalMark[n] === stamp;
+    let cost: number;
+    if (n < net.nLanes) cost = (isGoal ? this.goalS[n]! / net.speed[n]! : net.baseCost[n]!) + stopped[n]! * QUEUE_COST;
+    else cost = net.baseCost[n]!;
+    const ng = gPrev + cost;
+    if (this.seen[n] === stamp && ng >= this.g[n]!) return;
+    this.seen[n] = stamp;
+    this.g[n] = ng;
+    this.parent[n] = from;
+    const h = isGoal ? 0 : Math.hypot(net.endX[n]! - dx, net.endZ[n]! - dz) / HEURISTIC_SPEED;
+    this.heap.push(ng + h, n);
   }
 }
 

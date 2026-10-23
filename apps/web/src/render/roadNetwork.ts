@@ -222,8 +222,3 @@ function dedupe(pts: Vec2[]): Vec2[] {
 function sortAround(c: Vec2, pts: Vec2[]): Vec2[] {
   return pts.sort((p, q) => Math.atan2(p.z - c.z, p.x - c.x) - Math.atan2(q.z - c.z, q.x - c.x));
 }
-
-/** Arc-length span of the drivable part of a segment (between the two junction areas). */
-export function trimmedSpan(g: RoadSegGeom): [number, number] {
-  return [g.setbackA, g.length - g.setbackB];
-}

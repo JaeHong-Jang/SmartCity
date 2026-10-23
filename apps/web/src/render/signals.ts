@@ -34,6 +34,9 @@ export class SignalLayer {
   private readonly poleMat = new THREE.MeshStandardMaterial({ color: '#2b2f36', roughness: 0.6 });
   private readonly lampMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
   private lastSnapshot: unknown = null;
+  /** Pose (x, z, heading) and lit lamp written to each slot, so only changed slots are rewritten. */
+  private pose = new Float32Array(64 * 3).fill(NaN);
+  private litSlot = new Uint8Array(64).fill(255);
 
   constructor(private readonly stream: SimulationStream) {
     this.group.name = 'signals';
@@ -61,27 +64,50 @@ export class SignalLayer {
       this.poles = makeInstanced(this.group, this.poleGeo, this.poleMat, cap, false);
       this.lamps = this.lampGeos.map((g) => makeInstanced(this.group, g, this.lampMat, cap));
       this.capacity = cap;
+      // New meshes start empty: every slot must be written again.
+      this.pose = new Float32Array(cap * 3).fill(NaN);
+      this.litSlot = new Uint8Array(cap).fill(255);
     }
     const a = snap.signals;
+    let moved = false;
+    let recolored = false;
     for (let i = 0; i < n; i++) {
       const o = i * SIGNAL_STRIDE;
-      _p.set(a[o]!, 0, a[o + 1]!);
-      _q.setFromAxisAngle(_up, -a[o + 2]!);
-      _m.compose(_p, _q, _s);
-      this.poles.setMatrixAt(i, _m);
+      const pose = this.pose;
+      if (pose[i * 3] !== a[o] || pose[i * 3 + 1] !== a[o + 1] || pose[i * 3 + 2] !== a[o + 2]) {
+        pose[i * 3] = a[o]!;
+        pose[i * 3 + 1] = a[o + 1]!;
+        pose[i * 3 + 2] = a[o + 2]!;
+        _p.set(a[o]!, 0, a[o + 1]!);
+        _q.setFromAxisAngle(_up, -a[o + 2]!);
+        _m.compose(_p, _q, _s);
+        this.poles.setMatrixAt(i, _m);
+        for (const l of this.lamps) l.setMatrixAt(i, _m);
+        moved = true;
+      }
       const lit = Math.min(2, Math.max(0, a[o + 3]! | 0));
-      for (let k = 0; k < 3; k++) {
-        this.lamps[k]!.setMatrixAt(i, _m);
-        this.lamps[k]!.setColorAt(i, k === lit ? LAMP_ON[k]! : LAMP_OFF[k]!);
+      if (this.litSlot[i] !== lit) {
+        this.litSlot[i] = lit;
+        for (let k = 0; k < 3; k++) this.lamps[k]!.setColorAt(i, k === lit ? LAMP_ON[k]! : LAMP_OFF[k]!);
+        recolored = true;
       }
     }
     this.poles.count = n;
-    this.poles.instanceMatrix.needsUpdate = true;
+    if (moved) this.poles.instanceMatrix.needsUpdate = true;
     for (const l of this.lamps) {
       l.count = n;
-      l.instanceMatrix.needsUpdate = true;
-      if (l.instanceColor) l.instanceColor.needsUpdate = true;
+      if (moved) l.instanceMatrix.needsUpdate = true;
+      if (recolored && l.instanceColor) l.instanceColor.needsUpdate = true;
     }
+  }
+
+  dispose(): void {
+    this.poles.dispose();
+    for (const l of this.lamps) l.dispose();
+    this.poleGeo.dispose();
+    for (const g of this.lampGeos) g.dispose();
+    this.poleMat.dispose();
+    this.lampMat.dispose();
   }
 }
 
@@ -133,14 +159,19 @@ export function pedSignalHeads(crossings: readonly Crossing[]): PedHead[] {
 }
 
 /** Lamp states of a pedestrian signal: which lamps are lit at `now` (ms). */
-export function pedLampState(signal: number, now: number): { red: boolean; green: boolean } | null {
+const LAMPS_WALK = { red: false, green: true };
+const LAMPS_DARK_GREEN = { red: false, green: false };
+const LAMPS_RED = { red: true, green: false };
+
+/** The returned objects are shared constants: do not mutate them. */
+export function pedLampState(signal: number, now: number): { readonly red: boolean; readonly green: boolean } | null {
   switch (signal) {
     case PedSignal.walk:
-      return { red: false, green: true };
+      return LAMPS_WALK;
     case PedSignal.clearance:
-      return { red: false, green: Math.floor(now / 300) % 2 === 0 };
+      return Math.floor(now / 300) % 2 === 0 ? LAMPS_WALK : LAMPS_DARK_GREEN;
     case PedSignal.red:
-      return { red: true, green: false };
+      return LAMPS_RED;
     default:
       return null;
   }
@@ -166,6 +197,10 @@ export class PedSignalLayer {
   private readonly greenGeo = new THREE.BoxGeometry(0.06, 0.2, 0.2).translate(0.1, 2.42, 0);
   private readonly poleMat = new THREE.MeshStandardMaterial({ color: '#2b2f36', roughness: 0.6 });
   private readonly lampMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
+  /** Head index and lamp bits (1 red, 2 green) written to each slot; -1 / 255 = nothing written yet. */
+  private slotHead = new Int32Array(0);
+  private slotLamps = new Uint8Array(0);
+  private lastY = NaN;
 
   constructor(private readonly stream: SimulationStream) {
     this.group.name = 'ped-signals';
@@ -183,6 +218,8 @@ export class PedSignalLayer {
     this.poles = makeInstanced(this.group, this.poleGeo, this.poleMat, cap, false);
     this.red = makeInstanced(this.group, this.redGeo, this.lampMat, cap);
     this.green = makeInstanced(this.group, this.greenGeo, this.lampMat, cap);
+    this.slotHead = new Int32Array(cap).fill(-1);
+    this.slotLamps = new Uint8Array(cap).fill(255);
   }
 
   /** Recompute head positions when the road network (and so the crossing list) changed. */
@@ -191,6 +228,9 @@ export class PedSignalLayer {
     this.crossings = crossings;
     this.sig = crossingSignature(crossings.map((c) => c.id));
     this.heads = pedSignalHeads(crossings);
+    // Head positions may differ for the same index: rewrite every slot.
+    this.slotHead.fill(-1);
+    this.slotLamps.fill(255);
     if (this.heads.length > this.capacity) {
       let cap = this.capacity;
       while (cap < this.heads.length) cap *= 2;
@@ -204,26 +244,58 @@ export class PedSignalLayer {
     // Indexes are only meaningful for the same crossing list; until the sim catches up with an edit,
     // signalized crossings show red.
     const known = !!data && (snap?.crossingCount ?? 0) > 0 && snap!.crossingSig === this.sig;
+    if (y !== this.lastY) {
+      this.lastY = y;
+      this.slotHead.fill(-1);
+    }
     let n = 0;
-    for (const h of this.heads) {
+    let moved = false;
+    let recolored = false;
+    for (let hi = 0; hi < this.heads.length; hi++) {
+      const h = this.heads[hi]!;
       // Without crossing data from the simulation a signalized crossing shows red.
       const code = known ? (data[h.crossing * CROSSING_STRIDE] ?? PedSignal.none) : PedSignal.red;
       const lamps = pedLampState(code, now);
       if (!lamps) continue;
-      _p.set(h.x, y, h.z);
-      _q.setFromAxisAngle(_up, -Math.atan2(h.dz, h.dx));
-      _m.compose(_p, _q, _s);
-      this.poles.setMatrixAt(n, _m);
-      this.red.setMatrixAt(n, _m);
-      this.green.setMatrixAt(n, _m);
-      this.red.setColorAt(n, lamps.red ? PED_RED : PED_RED_OFF);
-      this.green.setColorAt(n, lamps.green ? PED_GREEN : PED_GREEN_OFF);
+      if (this.slotHead[n] !== hi) {
+        this.slotHead[n] = hi;
+        _p.set(h.x, y, h.z);
+        _q.setFromAxisAngle(_up, -Math.atan2(h.dz, h.dx));
+        _m.compose(_p, _q, _s);
+        this.poles.setMatrixAt(n, _m);
+        this.red.setMatrixAt(n, _m);
+        this.green.setMatrixAt(n, _m);
+        moved = true;
+      }
+      const bits = (lamps.red ? 1 : 0) | (lamps.green ? 2 : 0);
+      if (this.slotLamps[n] !== bits) {
+        this.slotLamps[n] = bits;
+        this.red.setColorAt(n, lamps.red ? PED_RED : PED_RED_OFF);
+        this.green.setColorAt(n, lamps.green ? PED_GREEN : PED_GREEN_OFF);
+        recolored = true;
+      }
       n++;
     }
-    for (const m of [this.poles, this.red, this.green]) {
-      m.count = n;
-      m.instanceMatrix.needsUpdate = true;
-      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    this.poles.count = this.red.count = this.green.count = n;
+    if (moved) {
+      this.poles.instanceMatrix.needsUpdate = true;
+      this.red.instanceMatrix.needsUpdate = true;
+      this.green.instanceMatrix.needsUpdate = true;
     }
+    if (recolored) {
+      this.red.instanceColor!.needsUpdate = true;
+      this.green.instanceColor!.needsUpdate = true;
+    }
+  }
+
+  dispose(): void {
+    this.poles.dispose();
+    this.red.dispose();
+    this.green.dispose();
+    this.poleGeo.dispose();
+    this.redGeo.dispose();
+    this.greenGeo.dispose();
+    this.poleMat.dispose();
+    this.lampMat.dispose();
   }
 }

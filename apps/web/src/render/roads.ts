@@ -36,6 +36,14 @@ interface ItemRecord {
 
 const r2 = (v: number): number => Math.round(v * 100) / 100;
 
+/** Road types are replaced, never edited in place, so their serialization can be cached per object. */
+const roadTypeSigs = new WeakMap<RoadType, string>();
+function roadTypeSig(rt: RoadType): string {
+  let sig = roadTypeSigs.get(rt);
+  if (sig === undefined) roadTypeSigs.set(rt, (sig = JSON.stringify(rt)));
+  return sig;
+}
+
 function segSig(g: RoadSegGeom, net: RoadNetworkGeom): string {
   const first = g.centerline[0]!;
   const last = g.centerline[g.centerline.length - 1]!;
@@ -45,13 +53,23 @@ function segSig(g: RoadSegGeom, net: RoadNetworkGeom): string {
   const crossings = g.crossings.map((c) => `${c.id}:${c.signal ? 1 : 0}:${c.polygon.map((p) => `${r2(p.x)},${r2(p.z)}`).join(';')}`).join('/');
   return [
     r2(first.x), r2(first.z), r2(mid.x), r2(mid.z), r2(last.x), r2(last.z), g.centerline.length, r2(g.setbackA), r2(g.setbackB),
-    JSON.stringify(g.roadType), deg(g.a) >= 3, deg(g.b) >= 3,
+    roadTypeSig(g.roadType), deg(g.a) >= 3, deg(g.b) >= 3,
     r2(g.laneStartA), r2(g.laneStartB), g.speedBumps.map(r2).join(','), g.schoolZone, control(g.a), control(g.b), crossings,
   ].join('|');
 }
 
 function nodeSig(n: RoadNodeGeom): string {
   return n.polygon.map((p) => `${r2(p.x)},${r2(p.z)}`).join(';');
+}
+
+function groupByChunk(records: Map<string, ItemRecord>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const [id, rec] of records) {
+    const list = out.get(rec.chunk);
+    if (list) list.push(id);
+    else out.set(rec.chunk, [id]);
+  }
+  return out;
 }
 
 const midpoint = (g: RoadSegGeom): Vec2 => g.centerline[g.centerline.length >> 1]!;
@@ -61,6 +79,9 @@ export class RoadLayer {
   private chunks = new Map<string, ChunkMeshes>();
   private segRecords = new Map<string, ItemRecord>();
   private nodeRecords = new Map<string, ItemRecord>();
+  /** Segment / node ids per chunk, in record order, so a dirty chunk does not scan every item. */
+  private segsByChunk = new Map<string, string[]>();
+  private nodesByChunk = new Map<string, string[]>();
   /** One material for everything so each chunk is a single draw call; layers are separated by height. */
   private readonly mat: THREE.MeshStandardMaterial;
   /** Number of chunks rebuilt by the last update (for tests and stats). */
@@ -100,6 +121,8 @@ export class RoadLayer {
 
     this.segRecords = nextSeg;
     this.nodeRecords = nextNode;
+    this.segsByChunk = groupByChunk(nextSeg);
+    this.nodesByChunk = groupByChunk(nextNode);
     this.lastRebuilt = dirty.size;
     for (const key of dirty) this.rebuildChunk(key, net);
   }
@@ -112,14 +135,8 @@ export class RoadLayer {
       this.chunks.delete(key);
     }
     const b = new MeshBuilder();
-    for (const [id, rec] of this.segRecords) {
-      if (rec.chunk !== key) continue;
-      buildSegment(net.segments.get(id)!, net, b);
-    }
-    for (const [id, rec] of this.nodeRecords) {
-      if (rec.chunk !== key) continue;
-      b.polygon(net.nodes.get(id)!.polygon, Y_ROAD, C_JUNCTION);
-    }
+    for (const id of this.segsByChunk.get(key) ?? []) buildSegment(net.segments.get(id)!, net, b);
+    for (const id of this.nodesByChunk.get(key) ?? []) b.polygon(net.nodes.get(id)!.polygon, Y_ROAD, C_JUNCTION);
     if (b.empty) return;
     const mesh = new THREE.Mesh(b.build(), this.mat);
     mesh.name = `road-chunk-${key}`;

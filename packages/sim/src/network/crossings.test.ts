@@ -4,7 +4,8 @@ import { apply, crossDoc } from '../testkit.js';
 import { compileNetwork, CROSSWALK_ZONE } from './compile.js';
 import { SCHOOL_ZONE_SPEED } from '../types.js';
 import { Simulation } from '../simulation.js';
-import { crossingSignature } from './crossings.js';
+import { buildZones, crossingSignature } from './crossings.js';
+import { buildNet } from './net.js';
 
 const ctrl = (extra: Record<string, unknown>): Command =>
   ({ type: 'intersection.set', control: { nodeId: 'c', kind: 'signal', yellow: 3, allRed: 2, offset: 0, ...extra } }) as Command;
@@ -143,5 +144,25 @@ describe('street features in compileNetwork', () => {
     expect(after.crossingCount).toBe(3);
     expect(after.crossingSig).toBe(crossingSignature(['c|N', 'c|S', 'c|W']));
     expect(after.crossingSig).not.toBe(before.crossingSig);
+  });
+
+  it('keeps every passage of a degenerate junction zone (folded curve with a zero tangent; Sol 3a review #1)', () => {
+    const doc = apply(createEmptyDoc('fold', 1), [
+      { type: 'node.add', node: { id: 'c', pos: { x: 0, z: 0 } } },
+      { type: 'node.add', node: { id: 'a', pos: { x: 75, z: 0 } } },
+      { type: 'node.add', node: { id: 'p', pos: { x: 0, z: 100 } } },
+      { type: 'node.add', node: { id: 'q', pos: { x: 0, z: -100 } } },
+      { type: 'segment.add', segment: { id: 'a', a: 'c', b: 'a', roadTypeId: 'road-2', control: { x: -36.513157894736835, z: 0 } } },
+      { type: 'segment.add', segment: { id: 'p', a: 'c', b: 'p', roadTypeId: 'road-2' } },
+      { type: 'segment.add', segment: { id: 'q', a: 'c', b: 'q', roadTypeId: 'road-2' } },
+    ]);
+    const net = buildNet(compileNetwork(doc));
+    const zones = buildZones(net);
+    const cr = net.graph.crossings.find((c) => c.id === 'c|a')!;
+    // Before the bounding-box shortcut (HEAD of 3a), all 6 connectors at c pass through this zone.
+    const atNode = net.graph.connectors.filter((k) => k.nodeId === 'c');
+    const got = zones.byZone[cr.index]!.map((x) => x.edge).sort((p, q) => p - q);
+    expect(got.length).toBe(6);
+    expect(got.every((e) => e >= net.nLanes && atNode.some((k) => net.nLanes + k.index === e))).toBe(true);
   });
 });

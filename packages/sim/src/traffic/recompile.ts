@@ -24,6 +24,16 @@ function mapEdge(w: World, old: Net, e: number): number {
   return c === undefined ? -1 : net.nLanes + c;
 }
 
+/** Old edge → new edge (−1 when it vanished), computed lazily once per recompile. */
+function edgeMapper(w: World, old: Net): (e: number) => number {
+  const memo = new Int32Array(old.nEdges).fill(-2);
+  return (e) => {
+    let m = memo[e]!;
+    if (m === -2) memo[e] = m = mapEdge(w, old, e);
+    return m;
+  };
+}
+
 /** Street-feature tables of the current graph (zones, bumps, stop-required lanes). */
 export function installStreet(w: World): void {
   w.zones = buildZones(w.net);
@@ -40,7 +50,7 @@ export function installStreet(w: World): void {
  * the old route back until the tail is covered). Null when one of them vanished or changed length: the
  * body position would no longer be meaningful.
  */
-function bodyEdges(w: World, old: Net, v: Vehicle): number[] | null {
+function bodyEdges(w: World, old: Net, map: (e: number) => number, v: Vehicle): number[] | null {
   const out: number[] = [];
   let over = v.len - v.s;
   for (let j = v.ri; j >= 0; j--) {
@@ -49,7 +59,7 @@ function bodyEdges(w: World, old: Net, v: Vehicle): number[] | null {
       if (over <= 1e-6) break;
       over -= old.len[oe]!;
     }
-    const ne = mapEdge(w, old, oe);
+    const ne = map(oe);
     if (ne < 0 || Math.abs(w.net.len[ne]! - old.len[oe]!) >= KEEP_LENGTH_DELTA) return null;
     out.push(ne);
   }
@@ -62,7 +72,7 @@ function bodyEdges(w: World, old: Net, v: Vehicle): number[] | null {
  * the route), mapped by crossing id; (2) every zone the body overlaps now; (3) on the current connector,
  * every zone not yet cleared (the vehicle can no longer stop before it). Pending reservations are dropped.
  */
-function restoreZones(w: World, old: Net, v: Vehicle, body: number[]): ZoneHold[] {
+function restoreZones(w: World, old: Net, map: (e: number) => number, byId: ReadonlyMap<string, number>, v: Vehicle, body: number[]): ZoneHold[] {
   const net = w.net;
   const out: ZoneHold[] = [];
   const add = (z: number, edge: number, exitS: number, rel: number): void => {
@@ -70,11 +80,10 @@ function restoreZones(w: World, old: Net, v: Vehicle, body: number[]): ZoneHold[
     if (h) h.rel = Math.max(h.rel, rel);
     else out.push({ z, edge, exitS, rel });
   };
-  const byId = new Map(w.graph.crossings.map((c) => [c.id, c.index]));
   for (const h of v.zones) {
     if (h.rel === Infinity || h.rel <= v.odo + 1e-9) continue;
     const z = byId.get(old.graph.crossings[h.z]!.id);
-    const edge = mapEdge(w, old, h.edge);
+    const edge = map(h.edge);
     if (z === undefined || edge < 0) continue;
     const list = edge < net.nLanes ? w.zones.lane[edge]! : w.zones.conn[edge - net.nLanes]!;
     add(z, edge, list.find((p) => p.z === z)?.exitS ?? h.exitS, h.rel);
@@ -101,7 +110,7 @@ function restoreZones(w: World, old: Net, v: Vehicle, body: number[]): ZoneHold[
  */
 export function recompileWorld(w: World): void {
   const old = w.net;
-  w.graph = compileNetwork(w.doc);
+  w.graph = compileNetwork(w.doc, w.compileCache);
   w.net = buildNet(w.graph);
   const net = w.net;
   w.router = new Router(net);
@@ -115,11 +124,13 @@ export function recompileWorld(w: World): void {
   installStreet(w);
   w.noGrantTick = w.tick;
   const occupied = new Uint8Array(w.graph.connectors.length);
+  const map = edgeMapper(w, old);
+  const crossingById = new Map(w.graph.crossings.map((c) => [c.id, c.index]));
   for (const v of w.vehicles) {
     if (!v.alive) continue;
-    const ne = mapEdge(w, old, v.edge);
+    const ne = map(v.edge);
     // Same id and (almost) the same length for every edge under the body, so positions stay valid.
-    const body = bodyEdges(w, old, v);
+    const body = bodyEdges(w, old, map, v);
     let keep = ne >= 0 && body !== null;
     const held: Held[] = [];
     if (keep) {
@@ -138,7 +149,7 @@ export function recompileWorld(w: World): void {
       v.person = -1;
       continue;
     }
-    v.zones = restoreZones(w, old, v, body!);
+    v.zones = restoreZones(w, old, map, crossingById, v, body!);
     for (const h of v.zones) w.zs.veh[h.z]!++;
     v.stopCnt = 0;
     v.stopTick = -1;

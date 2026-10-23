@@ -1,0 +1,28 @@
+export const LIMITS = {
+  idLength: 64,
+  nameLength: 80,
+  batchSize: 1000,
+  nodes: 50_000,
+  segments: 50_000,
+  buildings: 100_000,
+  buildingTypes: 2_000,
+  buildingParts: 48,
+  buildingProps: 64,
+  features: 50_000,
+  /** Point features keep this far (m, arc length) from the segment ends: the junction is there. */
+  featureEndClearance: 12,
+  /** Minimum distance between two point features on one segment, m. */
+  featureSpacing: 6,
+  vehicleParts: 24,
+  vehicleTypes: 500,
+  roadTypes: 200,
+  busStops: 10_000,
+  busLines: 1_000,
+  stopsPerLine: 100,
+  busesPerLine: 50,
+  minSegmentLength: 8,
+  parcels: 50_000,
+  polygonVertices: 128,
+  footprintVertices: 32,
+  evChargers: 500,
+} as const;

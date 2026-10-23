@@ -175,6 +175,15 @@ export class VehicleLayer {
       this.visibleCount += tm.mesh.count;
     }
   }
+
+  dispose(): void {
+    for (const tm of this.types.values()) {
+      tm.mesh.geometry.dispose();
+      tm.mesh.dispose();
+    }
+    this.types.clear();
+    this.mat.dispose();
+  }
 }
 
 /** Plain mesh for one vehicle type (editor preview). */

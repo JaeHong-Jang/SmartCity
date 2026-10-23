@@ -4,6 +4,7 @@ import type { CityDoc, Rng, TravelDir, VehicleKind, VehicleType } from '@smartci
 import type { CitizenWorld } from '../citizens/citizens.js';
 import type { PedPool, PedWorld } from '../citizens/peds.js';
 import type { ZoneIndex } from '../network/crossings.js';
+import type { CompileCache } from '../network/compile.js';
 import type { Net } from '../network/net.js';
 import type { Router } from '../network/route.js';
 import type { RoadGraph } from '../types.js';
@@ -110,6 +111,8 @@ export interface World {
   demandOn: boolean;
   rng: Rng;
   graph: RoadGraph;
+  /** Reused between recompiles (per-node conflict tables). */
+  compileCache: CompileCache;
   net: Net;
   router: Router;
   graphRevision: number;

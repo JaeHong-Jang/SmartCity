@@ -64,7 +64,25 @@ interface End {
   out: Vec2;
 }
 
-export function compileNetwork(doc: CityDoc): RoadGraph {
+/**
+ * Per-node conflict tables of the previous compile, reused when a node's connectors are unchanged
+ * (same ids and bit-identical points). Conflicts depend only on those, so results are identical.
+ */
+export interface CompileCache {
+  conflicts: Map<NodeId, NodeConflicts>;
+}
+
+interface NodeConflicts {
+  /** Connector ids in order, and their points as x, z pairs. */
+  ids: string;
+  coords: Float64Array;
+  /** Conflicts per connector, as indexes relative to the node's first connector. */
+  local: number[][];
+}
+
+export const newCompileCache = (): CompileCache => ({ conflicts: new Map() });
+
+export function compileNetwork(doc: CityDoc, cache?: CompileCache): RoadGraph {
   const infos: SegInfo[] = [];
   const ends = new Map<NodeId, End[]>();
   const pushEnd = (id: NodeId, e: End): void => {
@@ -179,12 +197,14 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
 
   const connectors: Connector[] = [];
   const nodes = new Map<NodeId, CompiledNode>();
+  const nextCache: CompileCache['conflicts'] = new Map();
   for (const nodeId of Object.keys(doc.nodes).sort()) {
     const node = doc.nodes[nodeId]!;
     const list = ends.get(nodeId) ?? [];
     const first = connectors.length;
     buildConnectors(nodeId, list, lanes, connectors);
-    buildConflicts(connectors, first);
+    if (cache) nextCache.set(nodeId, cachedConflicts(cache.conflicts.get(nodeId), connectors, first));
+    else buildConflicts(connectors, first);
     const ctrl = doc.intersections[nodeId];
     nodes.set(nodeId, {
       id: nodeId,
@@ -195,6 +215,7 @@ export function compileNetwork(doc: CityDoc): RoadGraph {
     });
   }
 
+  if (cache) cache.conflicts = nextCache;
   const crossings = buildFeatures(doc, infos, segments, nodes);
   return { lanes, connectors, segments, nodes, laneById, crossings };
 }
@@ -429,6 +450,33 @@ function buildConflicts(cs: Connector[], first: number): void {
       }
     }
   }
+}
+
+/** Conflicts of connectors[first..] from the cached entry when the connectors are unchanged, else computed. */
+function cachedConflicts(prev: NodeConflicts | undefined, cs: Connector[], first: number): NodeConflicts {
+  let ids = '';
+  let n = 0;
+  for (let i = first; i < cs.length; i++) {
+    ids += `${cs[i]!.id};`;
+    n += cs[i]!.points.length;
+  }
+  const coords = new Float64Array(2 * n);
+  let k = 0;
+  for (let i = first; i < cs.length; i++)
+    for (const p of cs[i]!.points) {
+      coords[k++] = p.x;
+      coords[k++] = p.z;
+    }
+  let same = prev !== undefined && prev.ids === ids && prev.coords.length === coords.length;
+  for (let j = 0; same && j < coords.length; j++) if (!Object.is(prev!.coords[j], coords[j])) same = false;
+  if (same) {
+    prev!.local.forEach((l, i) => (cs[first + i]!.conflicts = l.map((x) => x + first)));
+    return prev!;
+  }
+  buildConflicts(cs, first);
+  const local: number[][] = [];
+  for (let i = first; i < cs.length; i++) local.push(cs[i]!.conflicts.map((x) => x - first));
+  return { ids, coords, local };
 }
 
 /** Corners of every trimmed road end at the node, sorted by angle around the node. */

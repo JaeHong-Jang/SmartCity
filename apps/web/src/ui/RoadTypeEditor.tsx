@@ -1,13 +1,12 @@
 import { useState } from 'react';
 import { cloneJson, roadHalfWidth, type RoadType } from '@smartcity/shared';
-import { useServices, useStore } from './context';
+import { useDoc, useServices } from './context';
 
 const kmh = (ms: number): number => Math.round(ms * 3.6);
 
 export function RoadTypeEditor() {
   const { store, dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const [selected, setSelected] = useState<string | null>(Object.keys(doc.roadTypes)[0] ?? null);
   const [draft, setDraft] = useState<RoadType | null>(null);
   const base = selected ? doc.roadTypes[selected] : undefined;

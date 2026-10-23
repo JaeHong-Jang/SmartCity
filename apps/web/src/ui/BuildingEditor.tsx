@@ -12,7 +12,7 @@ import { VolumeFields } from './building/VolumeFields';
 import { applyPaint, besideParts, CONFLICT_KO, newPart, partTop, preflight, stackOn, type PaintResult } from './building/designDraft';
 import './building/building.css';
 import { translateError } from '../app/store';
-import { useServices, useStore } from './context';
+import { useDoc, useServices, useStore } from './context';
 import { PartPreview } from './PartPreview';
 import { TOO_LARGE_KO } from '../studio/design';
 import { openStudio } from './studio/studioHost';
@@ -31,8 +31,7 @@ type Upsert = Extract<Command, { type: 'buildingType.upsert' }>;
 
 export function BuildingEditor() {
   const { store, dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  const docVersion = useStore((s) => s.docVersion);
+  const { doc, version } = useDoc();
   const pending = useStore((s) => s.pending);
   const results = useStore((s) => s.results);
   // Bumped on every draft change, so a late save response never clobbers newer work.
@@ -56,14 +55,14 @@ export function BuildingEditor() {
     for (const b of Object.values(doc.buildings)) m.set(b.typeId, (m.get(b.typeId) ?? 0) + 1);
     return m;
     // The doc is mutated in place; docVersion marks its changes.
-  }, [doc, docVersion]);
+  }, [version]);
   const inUse = bt ? (counts.get(bt.id) ?? 0) : 0;
   const part = bt?.parts[Math.min(partIdx, (bt?.parts.length ?? 1) - 1)];
   const plot = plotChoice ?? (bt ? autoPlot(bt.parts) : 60);
   const studioTooLarge = useMemo(() => (bt ? partsToVoxels(bt.parts).tooLarge : false), [bt]);
 
   const cmd: Upsert | null = draft ? { type: 'buildingType.upsert', buildingType: draft, expectedRev: baseRev } : null;
-  const check = useMemo(() => (cmd ? preflight(doc, cmd) : null), [doc, docVersion, draft, baseRev]);
+  const check = useMemo(() => (cmd ? preflight(doc, cmd) : null), [version, draft, baseRev]);
   const blocked = !!paint?.empty;
 
   // Outcome of our save, from the server's own answer to this ref (not inferred from the doc,

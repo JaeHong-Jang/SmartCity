@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyDoc } from '@smartcity/shared';
-import { apply, crossDoc } from '../testkit.js';
-import { compileNetwork } from './compile.js';
+import { apply, crossDoc, gridDoc } from '../testkit.js';
+import { compileNetwork, newCompileCache } from './compile.js';
 import type { RoadGraph } from '../types.js';
 
 const conn = (g: RoadGraph, from: string, to: string) => g.connectors.find((c) => c.id === `${from}>${to}`);
@@ -94,5 +94,30 @@ describe('compileNetwork', () => {
   it('is deterministic', () => {
     const doc = crossDoc(120, 'road-4');
     expect(JSON.stringify(compileNetwork(doc).connectors)).toBe(JSON.stringify(compileNetwork(doc).connectors));
+  });
+
+  it('reuses per-node conflict tables without changing the result (incremental compile)', () => {
+    const doc = gridDoc(5, 80, 'road-4');
+    const cache = newCompileCache();
+    const same = (): void => {
+      const a = compileNetwork(doc, cache);
+      const b = compileNetwork(doc);
+      expect(a.connectors.map((c) => [c.id, c.conflicts])).toEqual(b.connectors.map((c) => [c.id, c.conflicts]));
+      expect(a).toEqual(b);
+    };
+    same();
+    same();
+    const edits = [
+      { type: 'node.move', id: 'n_2_2', pos: { x: 6, z: -3 } },
+      { type: 'segment.setType', id: 'h_1_1', roadTypeId: 'road-2' },
+      { type: 'feature.upsert', feature: { id: 'f', segmentId: 'v_3_1', kind: 'crosswalk', t: 0.5 } },
+      { type: 'segment.split', id: 'h_0_3', t: 0.4, nodeId: 'm', segmentIds: ['h_0_3a', 'h_0_3b'] },
+      { type: 'segment.remove', id: 'v_2_2' },
+      { type: 'intersection.set', control: { nodeId: 'n_1_3', kind: 'uncontrolled', crosswalkLegs: [], yellow: 3, allRed: 1, offset: 0 } },
+    ] as const;
+    for (const e of edits) {
+      apply(doc, [e as never]);
+      same();
+    }
   });
 });

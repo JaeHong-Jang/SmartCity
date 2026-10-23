@@ -3,7 +3,7 @@
 
 import { useMemo } from 'react';
 import { designStats } from '@smartcity/shared';
-import { useStore } from './context';
+import { useDoc, useStore } from './context';
 
 const n0 = (v: number): string => Math.round(v).toLocaleString('ko-KR');
 
@@ -35,12 +35,11 @@ function Stat({ label, value, unit }: { label: string; value: string; unit?: str
 }
 
 export function Dashboard({ onClose }: { onClose(): void }) {
-  const doc = useStore((s) => s.doc);
-  const docVersion = useStore((s) => s.docVersion);
+  const { doc, version } = useDoc();
   const sim = useStore((s) => s.simStats);
   // The doc object is updated in place; docVersion is the change counter (bumps on every applied
   // command and on welcome/resync).
-  const st = useMemo(() => designStats(doc), [doc, docVersion]);
+  const st = useMemo(() => designStats(doc), [version]);
   const solarShare = st.energyDemand > 0 ? Math.min(1, st.solarProduction / st.energyDemand) : 0;
   return (
     <section className="panel dashboard" aria-label="도시 현황">

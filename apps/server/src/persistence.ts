@@ -18,7 +18,12 @@ interface Checkpoint {
 const logPath = (dir: string, room: string) => join(dir, `${room}.log.jsonl`);
 const checkpointPath = (dir: string, room: string) => join(dir, `${room}.json`);
 
+// Log files whose directory exists and whose size we track, so appends skip mkdir/exists/stat.
+// Absent = unknown: the next append prepares the directory and stats the file again.
+const knownLogSize = new Map<string, number>();
+
 export function loadRoom(dir: string, room: string): LoadedRoom {
+  knownLogSize.delete(logPath(dir, room));
   let doc: CityDoc | null = null;
   let seq = 0;
   const cp = checkpointPath(dir, room);
@@ -87,12 +92,18 @@ function replayLog(lp: string, room: string, doc: CityDoc, seq: number): number 
  * to its previous length so a partial write never leaves a broken record behind.
  */
 export function appendLog(dir: string, room: string, seq: number, cmdJson: string): void {
-  mkdirSync(dir, { recursive: true });
   const lp = logPath(dir, room);
-  const before = existsSync(lp) ? statSync(lp).size : 0;
+  let before = knownLogSize.get(lp);
+  if (before === undefined) {
+    mkdirSync(dir, { recursive: true });
+    before = existsSync(lp) ? statSync(lp).size : 0;
+  }
+  const line = `{"seq":${seq},"cmd":${cmdJson}}\n`;
   try {
-    appendFileSync(lp, `{"seq":${seq},"cmd":${cmdJson}}\n`);
+    appendFileSync(lp, line);
+    knownLogSize.set(lp, before + Buffer.byteLength(line));
   } catch (e) {
+    knownLogSize.delete(lp);
     try {
       truncateSync(lp, before);
     } catch {
@@ -108,7 +119,10 @@ export function writeCheckpoint(dir: string, room: string, seq: number, doc: Cit
   const cp = checkpointPath(dir, room);
   const tmp = `${cp}.tmp`;
   const body: Checkpoint = { schema: 1, seq, doc };
+  const lp = logPath(dir, room);
+  knownLogSize.delete(lp);
   writeFileSync(tmp, JSON.stringify(body));
   renameSync(tmp, cp);
-  writeFileSync(logPath(dir, room), '');
+  writeFileSync(lp, '');
+  knownLogSize.set(lp, 0);
 }

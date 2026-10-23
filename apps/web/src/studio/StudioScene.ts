@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import CameraControls from 'camera-controls';
 import { parseVoxel, voxelKey, voxelsToParts, VOXEL_LIMITS, type BuildingProp, type VoxelModel } from '@smartcity/shared';
 import { bakeBuildingGeometry, createBuildingMaterial } from '../render/buildingGeometry';
+import { configureRenderer, createSun } from '../render/sceneKit';
 import { pickVoxel, planeCell, rayBox, type V3, type VoxelHit } from './picking';
 import { propBox } from './props';
 import { StudioEditor, TOOL_INFO, type RectMode } from './StudioEditor';
@@ -64,7 +65,7 @@ export class StudioScene {
   private readonly grid: THREE.GridHelper;
   private readonly selBox = new THREE.Box3Helper(new THREE.Box3(), new THREE.Color('#facc15'));
   private readonly handle = new THREE.Group();
-  private readonly sun = new THREE.DirectionalLight('#fff3dd', 2.1);
+  private readonly sun = createSun(2.1, 2048, 0.3);
 
   private raf = 0;
   private last = performance.now();
@@ -76,29 +77,21 @@ export class StudioScene {
   private pointer: { x: number; y: number } | null = null;
   private problemProps: number[] = [];
   private readonly unsub: () => void;
-  private ghostKey = '';
+  /** Serialized prop the hover ghost geometry was baked from. */
+  private propGhostKey = '';
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly editor: StudioEditor,
   ) {
     const r = new THREE.WebGLRenderer({ canvas, antialias: true });
-    r.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    r.outputColorSpace = THREE.SRGBColorSpace;
-    r.toneMapping = THREE.ACESFilmicToneMapping;
-    r.toneMappingExposure = 1.05;
-    r.shadowMap.enabled = true;
-    r.shadowMap.type = THREE.PCFShadowMap;
+    configureRenderer(r);
     this.renderer = r;
 
     const s = this.scene;
     s.background = new THREE.Color('#bcd3e6');
     s.add(new THREE.HemisphereLight('#e8f1fb', '#56603f', 1.3));
     this.sun.position.set(-40, 70, 45);
-    this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(2048, 2048);
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = 0.3;
     const sc = this.sun.shadow.camera;
     sc.left = -60;
     sc.right = 60;
@@ -444,10 +437,9 @@ export class StudioScene {
   }
 
   private clearGhost(): void {
-    if (this.ghost.count === 0 && !this.propGhost.visible && this.ghostKey === '') return;
+    if (this.ghost.count === 0 && !this.propGhost.visible) return;
     this.ghost.count = 0;
     this.propGhost.visible = false;
-    this.ghostKey = '';
     this.dirty = true;
   }
 
@@ -508,9 +500,13 @@ export class StudioScene {
   }
 
   private ghostProp(prop: BuildingProp, ok: boolean): void {
-    const old = this.propGhost.geometry;
-    this.propGhost.geometry = bakeBuildingGeometry({ parts: [], props: [prop] });
-    old.dispose();
+    const key = JSON.stringify(prop);
+    if (key !== this.propGhostKey) {
+      this.propGhostKey = key;
+      const old = this.propGhost.geometry;
+      this.propGhost.geometry = bakeBuildingGeometry({ parts: [], props: [prop] });
+      old.dispose();
+    }
     this.propGhostMat.color.set(ok ? '#ffffff' : '#ff6b6b');
     this.propGhostMat.opacity = ok ? 0.75 : 0.6;
     this.propGhost.visible = true;

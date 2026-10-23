@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { cloneJson, type VehicleKind, type VehiclePart, type VehicleType } from '@smartcity/shared';
 import { vehiclePreview } from '../render/vehicles';
-import { useServices, useStore } from './context';
+import { useDoc, useServices } from './context';
 import { PartPreview } from './PartPreview';
 import { clampNum } from './RoadTypeEditor';
 
@@ -10,8 +10,7 @@ const newPart = (): VehiclePart => ({ offset: { x: 0, y: 0.3, z: 0 }, length: 2,
 
 export function VehicleEditor() {
   const { dispatcher } = useServices();
-  const doc = useStore((s) => s.doc);
-  useStore((s) => s.docVersion);
+  const { doc } = useDoc();
   const [selected, setSelected] = useState<string | null>(Object.keys(doc.vehicleTypes)[0] ?? null);
   const [draft, setDraft] = useState<VehicleType | null>(null);
   const vt = draft ?? (selected ? doc.vehicleTypes[selected] : undefined);

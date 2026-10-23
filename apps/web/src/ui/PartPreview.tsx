@@ -3,6 +3,7 @@
 
 import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
+import { configureRenderer, createSun } from '../render/sceneKit';
 
 function disposeTree(o: THREE.Object3D): void {
   o.traverse((c) => {
@@ -30,19 +31,10 @@ export function PartPreview({ build, deps, height }: { build: () => THREE.Object
   useEffect(() => {
     const canvas = canvasRef.current!;
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.05;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
+    configureRenderer(renderer);
     const scene = new THREE.Scene();
     scene.add(new THREE.HemisphereLight('#dbeafe', '#56603f', 1.25));
-    const sun = new THREE.DirectionalLight('#fff3dd', 2.2);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    sun.shadow.bias = -0.0004;
-    sun.shadow.normalBias = 0.3;
+    const sun = createSun(2.2, 1024, 0.3);
     scene.add(sun, sun.target);
     const ground = new THREE.Mesh(new THREE.CircleGeometry(1, 48).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: '#3f4b3a' }));
     ground.name = 'preview-ground';
