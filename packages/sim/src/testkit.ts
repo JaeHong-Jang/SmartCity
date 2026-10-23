@@ -166,6 +166,9 @@ export function pedestriansOnCrossings(sim: Simulation): Int32Array {
 /**
  * Citizen bookkeeping: per-state counts match the citizens, their sum is the total, every outdoor citizen
  * owns exactly one live pedestrian or car (and nothing else does), indoor citizens are in an existing building.
+ * Bus passengers (ADR 0009 §2): a waiting citizen keeps its pedestrian and is in exactly one stop queue, a
+ * riding one has no pedestrian or car and is in exactly one live bus's riders or alighting list; queues and
+ * buses hold no duplicates and no orphans (entries of citizens that are gone or in another state).
  */
 export function checkCitizenInvariants(sim: Simulation): string[] {
   const w = internals(sim);
@@ -185,6 +188,8 @@ export function checkCitizenInvariants(sim: Simulation): string[] {
       if (c.ped >= 0 || c.car) problems.push(`citizen ${c.id} indoors with a pedestrian or car`);
     } else if (c.state === 3) {
       if (!c.car || !c.car.alive || c.car.person !== c.slot || c.ped >= 0) problems.push(`citizen ${c.id} driving without its car`);
+    } else if (c.state === 9) {
+      if (c.ped >= 0 || c.car || !c.ride || !c.ride.alive || !c.ride.bus) problems.push(`citizen ${c.id} riding without a live bus (or with a pedestrian/car)`);
     } else {
       if (c.ped < 0 || !p.alive[c.ped] || p.owner[c.ped] !== c.slot || p.pid[c.ped] !== c.id) problems.push(`citizen ${c.id} outdoors without its pedestrian`);
       if (c.car) problems.push(`citizen ${c.id} walking with a car`);
@@ -205,6 +210,46 @@ export function checkCitizenInvariants(sim: Simulation): string[] {
   let alive = 0;
   for (let i = 0; i < p.hi; i++) if (p.alive[i]) alive++;
   if (alive !== p.count) problems.push(`pedestrian count ${p.count} but ${alive} alive`);
+  // Bus relations: every entry once, matching the citizen's state and references.
+  const where = new Map<number, string[]>();
+  const note = (slot: number, what: string): void => {
+    const l = where.get(slot);
+    if (l) l.push(what);
+    else where.set(slot, [what]);
+  };
+  for (const [key, q] of w.transit.queues) {
+    if (q.list.length === 0) problems.push(`empty queue ${key} kept`);
+    for (let k = 0; k < q.list.length; k++) {
+      const wt = q.list[k]!;
+      const prev = q.list[k - 1];
+      if (prev && (prev.tick > wt.tick || (prev.tick === wt.tick && prev.pid >= wt.pid))) problems.push(`queue ${key} not in (tick, id) order`);
+      const c = cz.slots[wt.slot];
+      if (!c || c.id !== wt.pid) problems.push(`queue ${key}: orphan entry ${wt.pid}`);
+      else if (c.state !== 8 || c.board !== q.stop || c.line !== q.line) problems.push(`queue ${key}: citizen ${c.id} in state ${c.state} (${c.board}|${c.line})`);
+      note(wt.slot, `queue ${key}`);
+    }
+  }
+  for (const v of w.vehicles) {
+    if (!v.bus) continue;
+    for (const r of v.bus.riders) {
+      const c = cz.slots[r.slot];
+      if (!c || c.state !== 9 || c.ride !== v) problems.push(`bus ${v.id}: rider slot ${r.slot} is not riding it`);
+      note(r.slot, `riders of ${v.id}`);
+    }
+    for (const slot of v.bus.alighting) {
+      const c = cz.slots[slot];
+      if (!c || c.state !== 9 || c.ride !== v) problems.push(`bus ${v.id}: alighting slot ${slot} is not riding it`);
+      note(slot, `alighting of ${v.id}`);
+    }
+  }
+  for (const c of cz.slots) {
+    if (!c) continue;
+    const n = where.get(c.slot)?.length ?? 0;
+    const want = c.state === 8 || c.state === 9 ? 1 : 0;
+    if (n !== want) problems.push(`citizen ${c.id} (state ${c.state}) in ${n} bus relations: ${where.get(c.slot)?.join(', ') ?? '-'}`);
+    if (c.state === 8 && p.state[c.ped] !== 3) problems.push(`citizen ${c.id} waiting but its pedestrian is not in state busStop`);
+  }
+  for (const slot of where.keys()) if (!cz.slots[slot]) problems.push(`bus relation of a removed citizen slot ${slot}`);
   return problems;
 }
 

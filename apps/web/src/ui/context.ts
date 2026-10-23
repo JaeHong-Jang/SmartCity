@@ -1,5 +1,5 @@
 import { createContext, useContext, useSyncExternalStore } from 'react';
-import type { CityDoc, Vec2 } from '@smartcity/shared';
+import type { CityDoc, ClientMessage, Vec2 } from '@smartcity/shared';
 import type { Dispatcher } from '../app/dispatch';
 import type { ClientState, ClientStore } from '../app/store';
 
@@ -7,6 +7,10 @@ export interface AppServices {
   store: ClientStore;
   dispatcher: Dispatcher;
   focus(p: Vec2): void;
+  /** Send a protocol message over the current transport (no-op while disconnected). */
+  send(msg: ClientMessage): void;
+  /** Ground point the camera looks at. */
+  cameraTarget(): Vec2;
   setName(name: string): void;
 }
 

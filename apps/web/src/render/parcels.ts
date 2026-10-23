@@ -49,6 +49,9 @@ export class ParcelLayer {
   private lines: THREE.Mesh;
   private labels = new Map<string, Label>();
   private seen = new Set<string>();
+  /** Automatic lots get a label only when hovered, selected or in violation (ADR 0009 §4, hundreds of lots). */
+  private autoInfo = new Map<string, { html: string; x: number; z: number; warn: boolean }>();
+  private focus = new Set<string>();
 
   constructor(private readonly labelRoot: HTMLElement) {
     this.group.name = 'parcels';
@@ -86,6 +89,7 @@ export class ParcelLayer {
 
   update(doc: CityDoc, violations: boolean): void {
     this.seen.clear();
+    this.autoInfo.clear();
     const fill = new MeshBuilder();
     const lines = new MeshBuilder();
     const badges = new Map<string, number>();
@@ -100,7 +104,13 @@ export class ParcelLayer {
       lines.band(closedRing(poly), -0.35, 0.35, Y_FILL + 0.02, parcelWide ? _c.set('#fb923c') : _c);
       const c = centroid(poly);
       const warn = parcelWide ? ` <b class="warn">규제 위반 ${parcelWide}</b>` : '';
-      this.label(`p:${id}`, 'parcel-label', `${ZONE_LABELS[pc.zone]} · ${formatArea(polygonArea(poly))}${warn}`, c.x, 1, c.z);
+      const html = `${ZONE_LABELS[pc.zone]} · ${formatArea(polygonArea(poly))}${warn}`;
+      if (pc.auto) {
+        this.autoInfo.set(id, { html, x: c.x, z: c.z, warn: parcelWide > 0 });
+        if (parcelWide > 0 || this.focus.has(id)) this.label(`p:${id}`, 'parcel-label', html, c.x, 1, c.z);
+      } else {
+        this.label(`p:${id}`, 'parcel-label', html, c.x, 1, c.z);
+      }
     }
     for (const [id, n] of badges) {
       const b = doc.buildings[id];
@@ -115,6 +125,29 @@ export class ParcelLayer {
     }
     this.setGeometry(this.fill, fill);
     this.setGeometry(this.lines, lines);
+  }
+
+  /** The selected / hovered parcel ids: their automatic lots show a label. Cheap; no mesh rebuild. */
+  setFocus(ids: readonly (string | null)[]): void {
+    const next = new Set<string>();
+    for (const id of ids) if (id) next.add(id);
+    if (next.size === this.focus.size && [...next].every((id) => this.focus.has(id))) return;
+    const touched = new Set([...this.focus, ...next]);
+    this.focus = next;
+    for (const id of touched) {
+      const info = this.autoInfo.get(id);
+      const key = `p:${id}`;
+      if (info && (info.warn || next.has(id))) {
+        this.seen.add(key);
+        this.label(key, 'parcel-label', info.html, info.x, 1, info.z);
+      } else {
+        const l = this.labels.get(key);
+        if (l) {
+          l.el.remove();
+          this.labels.delete(key);
+        }
+      }
+    }
   }
 
   private setGeometry(mesh: THREE.Mesh, b: MeshBuilder): void {

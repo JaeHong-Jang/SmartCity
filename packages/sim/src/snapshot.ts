@@ -2,6 +2,7 @@
 
 import { fillOccupancy } from './citizens/citizens.js';
 import { gaitPhase, pedElevation, writePedPose } from './citizens/peds.js';
+import { fillQueueRanks, sortedQueues } from './citizens/transit.js';
 import { writePose } from './network/net.js';
 import { headColor } from './traffic/signals.js';
 import type { World } from './traffic/world.js';
@@ -91,6 +92,7 @@ export function writeSnapshot(w: World, scratch: SnapshotScratch, stats: SimStat
     if (!pb || pb.length < nPed * PED_STRIDE) pb = new Float32Array(Math.ceil(nPed * 1.25) * PED_STRIDE);
     let pi = reuse?.pedestrianIds;
     if (!pi || pi.length < nPed) pi = new Uint32Array(Math.ceil(nPed * 1.25));
+    fillQueueRanks(w);
     let k = 0;
     for (let i = 0; i < peds.hi; i++) {
       if (!peds.alive[i]) continue;
@@ -115,6 +117,21 @@ export function writeSnapshot(w: World, scratch: SnapshotScratch, stats: SimStat
     let ob = reuse?.occupancy;
     if (!ob || ob.length < buildingIds.length) ob = new Float32Array(buildingIds.length);
     fillOccupancy(w, w.ped.pg.buildingIds, ob);
+    // Bus passengers (ADR 0009 §2): aboard (riders + alighting) per vehicle, waiting per stop.
+    let bl = reuse?.busLoad;
+    if (!bl || bl.length < n) bl = new Uint16Array(Math.ceil(n * 1.25));
+    for (let i = 0; i < n; i++) {
+      const bus = w.vehicles[i]!.bus;
+      bl[i] = bus ? bus.riders.length + bus.alighting.length : 0;
+    }
+    const busStopIds = Object.keys(w.doc.busStops).sort();
+    let sw = reuse?.stopWaiting;
+    if (!sw || sw.length < busStopIds.length) sw = new Uint16Array(busStopIds.length);
+    sw.fill(0, 0, busStopIds.length);
+    for (const q of sortedQueues(w)) {
+      const k = busStopIds.indexOf(q.stop);
+      if (k >= 0) sw[k]! += q.list.length;
+    }
     return {
       tick: w.tick,
       time: w.tick / w.tickRate,
@@ -133,6 +150,9 @@ export function writeSnapshot(w: World, scratch: SnapshotScratch, stats: SimStat
       crossingSig: w.crossingSig,
       occupancy: ob,
       buildingIds,
+      busLoad: bl,
+      stopWaiting: sw,
+      busStopIds,
       stats,
     };
 }

@@ -3,7 +3,7 @@
 // change, run with GOLDEN_PRINT=1 and paste the printed values.
 
 import { describe, expect, it } from 'vitest';
-import type { Command } from '@smartcity/shared';
+import { createEmptyDoc, type Command } from '@smartcity/shared';
 import { Simulation } from './simulation.js';
 import { apply, cityDoc, gridDoc } from './testkit.js';
 import { CROSSING_STRIDE, PED_STRIDE, SIGNAL_STRIDE, VEHICLE_STRIDE, type SimSnapshot } from './types.js';
@@ -32,7 +32,7 @@ function hashSnapshot(h: number, s: SimSnapshot): number {
 }
 
 /** Runs `ticks` steps, applying `script[tick]` before the step; returns hashes at every `every` ticks. */
-function trace(sim: Simulation, ticks: number, every: number, script: Record<number, Command[]>): { hashes: string[]; maxPeds: number } {
+function trace(sim: Simulation, ticks: number, every: number, script: Record<number, Command[]>, transit = false): { hashes: string[]; maxPeds: number } {
   const out: string[] = [];
   let maxPeds = 0;
   let h = 0x811c9dc5;
@@ -42,6 +42,11 @@ function trace(sim: Simulation, ticks: number, every: number, script: Record<num
     sim.step();
     buf = sim.snapshot(buf);
     h = hashSnapshot(h, buf);
+    // Bus passengers (ADR 0009 §2), only in traces recorded with them.
+    if (transit) {
+      h = fnv(h, new Uint8Array(buf.busLoad.buffer, 0, buf.vehicleCount * 2));
+      h = fnv(h, new Uint8Array(buf.stopWaiting.buffer, 0, buf.busStopIds.length * 2));
+    }
     maxPeds = Math.max(maxPeds, buf.pedestrianCount);
     if ((t + 1) % every === 0) out.push(h.toString(16));
   }
@@ -51,6 +56,9 @@ function trace(sim: Simulation, ticks: number, every: number, script: Record<num
 const PRINT = process.env.GOLDEN_PRINT === '1';
 
 describe('golden traces (behaviour-preserving optimizations)', () => {
+  // Phase 3b (ADR 0009 §2) adds bus stop nodes to the pedestrian graph and the passenger model. In this
+  // 300 m city no bus estimate beats walking, so the trace kept its Phase 3a hashes; passengers are covered
+  // by the corridor trace below.
   it('small city: citizens, bus line, street features, edits that recompile', () => {
     const doc = apply(cityDoc(), [
       { type: 'busStop.add', stop: { id: 's1', segmentId: 'h_0_1', t: 0.5, dir: 'forward' } },
@@ -75,6 +83,58 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
     expect(got).toEqual(SMALL_CITY);
   }, 120_000);
 
+  // Phase 3b regression (ADR 0009 "결과"): bus stops without any line and signals without `scramble` must
+  // behave exactly as in Phase 3a. Recorded before the passenger model and the pedestrian-only phase landed.
+  it('small city without bus lines or scramble: identical to Phase 3a', () => {
+    const doc = apply(cityDoc(), [
+      { type: 'busStop.add', stop: { id: 's1', segmentId: 'h_0_1', t: 0.5, dir: 'forward' } },
+      { type: 'busStop.add', stop: { id: 's2', segmentId: 'h_1_1', t: 0.5, dir: 'forward' } },
+      { type: 'feature.upsert', feature: { id: 'cw', segmentId: 'v_1_0', kind: 'crosswalk', t: 0.5, signal: true } },
+      { type: 'intersection.set', control: { nodeId: 'n_1_1', kind: 'signal', yellow: 3, allRed: 2, offset: 0, scramble: false } },
+    ]);
+    doc.meta.trafficDensity = 2;
+    const sim = new Simulation(doc);
+    const { hashes: got, maxPeds } = trace(sim, 7200, 900, {
+      1500: [{ type: 'busStop.add', stop: { id: 's3', segmentId: 'v_1_1', t: 0.4, dir: 'backward' } }],
+      3000: [{ type: 'busStop.remove', id: 's1' }],
+    });
+    if (PRINT) console.log('no lines', JSON.stringify(got));
+    expect(maxPeds).toBeGreaterThan(20);
+    expect(got).toEqual(NO_LINES);
+  }, 120_000);
+
+  it('bus corridor: passengers queue, board, ride and alight; a line edit and a stop removal mid-run', () => {
+    const doc = apply(createEmptyDoc('corridor', 21), [
+      { type: 'node.add', node: { id: 'a', pos: { x: 0, z: 0 } } },
+      { type: 'node.add', node: { id: 'b', pos: { x: 1600, z: 0 } } },
+      { type: 'segment.add', segment: { id: 'ab', a: 'a', b: 'b', roadTypeId: 'road-2' } },
+      { type: 'building.place', building: { id: 'apt', typeId: 'apartment', pos: { x: 100, z: 35 }, rotation: 0 } },
+      { type: 'building.place', building: { id: 'office', typeId: 'office-tower', pos: { x: 1500, z: 40 }, rotation: 0 } },
+      { type: 'busStop.add', stop: { id: 'Af', segmentId: 'ab', t: 0.0625, dir: 'forward' } },
+      { type: 'busStop.add', stop: { id: 'Bf', segmentId: 'ab', t: 0.9375, dir: 'forward' } },
+      { type: 'busStop.add', stop: { id: 'Bb', segmentId: 'ab', t: 0.9375, dir: 'backward' } },
+      { type: 'busStop.add', stop: { id: 'Ab', segmentId: 'ab', t: 0.0625, dir: 'backward' } },
+      { type: 'busLine.upsert', line: { id: 'L', name: '1', color: '#22aa44', stopIds: ['Af', 'Bf', 'Bb', 'Ab'], vehicleTypeId: 'city-bus', buses: 2 } },
+    ]);
+    doc.meta.trafficDensity = 0.5;
+    const sim = new Simulation(doc);
+    let riders = 0;
+    const { hashes: got } = trace(
+      sim,
+      9000,
+      900,
+      {
+        5000: [{ type: 'busLine.upsert', line: { id: 'L', name: '1', color: '#22aa44', stopIds: ['Af', 'Bf', 'Bb', 'Ab'], vehicleTypeId: 'city-bus', buses: 3 } }],
+        7000: [{ type: 'busStop.remove', id: 'Bb' }],
+      },
+      true,
+    );
+    for (const v of sim.vehicles()) riders += v.passengers ?? 0;
+    if (PRINT) console.log('bus corridor', JSON.stringify(got));
+    expect(riders + sim.stats().citizens.waitingBus).toBeGreaterThan(0);
+    expect(got).toEqual(BUS_CORRIDOR);
+  }, 120_000);
+
   it('dense grid: heavy traffic, signals, splits and node moves', () => {
     const doc = gridDoc(7, 120, 'road-4', 11);
     doc.meta.trafficDensity = 3;
@@ -93,3 +153,5 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
 
 const SMALL_CITY = ["abd22600","7be520d5","3473c037","c963d2b5","d8785a55","77e12fe8","48845201","77c6691","f9cf5552","321bf933","f77774f3","8f7ec53e"];
 const DENSE_GRID = ["53671d38","a711768","93e5a844","953b91d1","525b3568","bd3ff771","c1112f13","706cdc0a"];
+const NO_LINES = ["8863d04b","880f1ab2","b3af70f5","320000a9","8f7b1bf8","f0b3eb82","a1ceba0b","c55fdc77"];
+const BUS_CORRIDOR = ["fc6cbbff","e9d05de9","64ae7cb2","4ad71dff","e532dcbe","159290f4","c0bd4582","78bbdad6","6fb1e2a0","65af2598"];

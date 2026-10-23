@@ -9,6 +9,8 @@ export const MAX_MESSAGE_BYTES = 512 * 1024;
 export const ROOM_ID_RE = /^[a-z0-9-]{1,32}$/;
 
 export const MAX_GHOST_POINTS = 64;
+/** Longest request text the AI building assistant accepts. */
+export const MAX_AI_TEXT = 1000;
 
 /** Ephemeral per-user state shown to collaborators (not persisted, not part of the doc). */
 export interface Presence {
@@ -31,7 +33,10 @@ export type ClientMessage =
   /** `ref` is chosen by the client and echoed back in `applied`/`rejected`. */
   | { t: 'cmd'; ref: number; cmd: Command }
   | { t: 'presence'; presence: Presence }
-  | { t: 'ping'; at: number };
+  | { t: 'ping'; at: number }
+  /** Ask the AI building assistant (ADR 0009 §5). `focus` = the point the user looks at or selected. */
+  | { t: 'ai.ask'; reqId: number; text: string; focus: Vec2 | null }
+  | { t: 'ai.cancel'; reqId: number };
 
 export type ServerMessage =
   | { t: 'welcome'; clientId: string; tag: string; color: string; room: string; seq: number; doc: CityDoc; peers: Peer[] }
@@ -40,7 +45,13 @@ export type ServerMessage =
   | { t: 'peers'; peers: Peer[] }
   | { t: 'presence'; clientId: string; presence: Presence }
   | { t: 'error'; error: string }
-  | { t: 'pong'; at: number };
+  | { t: 'pong'; at: number }
+  /** Sent on join: whether the assistant is available (server has an API key) and which model it uses. */
+  | { t: 'ai.status'; enabled: boolean; model: string | null }
+  | { t: 'ai.progress'; reqId: number; note: string }
+  /** Only to the asker. Commands only add things; the client applies them as its own `cmd` batch after approval. */
+  | { t: 'ai.proposal'; reqId: number; commands: Command[]; summary: string }
+  | { t: 'ai.error'; reqId: number; error: string };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
@@ -84,6 +95,19 @@ export function parseClientMessage(raw: string): ClientMessage | null {
     }
     case 'ping':
       return isFiniteNum(m.at) ? { t: 'ping', at: m.at } : null;
+    case 'ai.ask': {
+      if (!Number.isInteger(m.reqId) || typeof m.text !== 'string') return null;
+      const text = m.text.trim();
+      if (text.length === 0 || text.length > MAX_AI_TEXT) return null;
+      let focus: Vec2 | null = null;
+      if (m.focus !== null && m.focus !== undefined) {
+        if (!isObj(m.focus) || !isFiniteNum(m.focus.x) || !isFiniteNum(m.focus.z)) return null;
+        focus = { x: m.focus.x, z: m.focus.z };
+      }
+      return { t: 'ai.ask', reqId: m.reqId as number, text, focus };
+    }
+    case 'ai.cancel':
+      return Number.isInteger(m.reqId) ? { t: 'ai.cancel', reqId: m.reqId as number } : null;
     default:
       return null;
   }

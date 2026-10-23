@@ -3,10 +3,12 @@ import type { PanelId, SimSpeed } from '../app/store';
 import { SNAP_STEPS, snapLabel } from '../tools/snap';
 import { downloadText, exportDoc, startImport } from '../app/importExport';
 import { formatClock } from '../render/dayNight';
+import { AiPanel } from './AiPanel';
 import { BuildingEditor } from './BuildingEditor';
 import { BusLinePanel } from './BusLinePanel';
 import { useDoc, useServices, useStore } from './context';
 import { Dashboard } from './Dashboard';
+import { GrowthHud } from './GrowthHud';
 import { IconChart, IconCity, IconDownload, IconPause, IconUpload } from './Icons';
 import { Inspector } from './Inspector';
 import { RoadTypeEditor } from './RoadTypeEditor';
@@ -267,6 +269,7 @@ const TABS: { id: PanelId; label: string }[] = [
   { id: 'buildings', label: '건물' },
   { id: 'vehicles', label: '차량' },
   { id: 'busLines', label: '노선' },
+  { id: 'ai', label: 'AI' },
 ];
 
 function SidePanel() {
@@ -288,6 +291,7 @@ function SidePanel() {
           {panel === 'buildings' && <BuildingEditor />}
           {panel === 'vehicles' && <VehicleEditor />}
           {panel === 'busLines' && <BusLinePanel />}
+          {panel === 'ai' && <AiPanel />}
         </div>
       )}
     </aside>
@@ -312,6 +316,7 @@ export function App() {
       <TopBar />
       <Toolbar />
       <ToolOptions />
+      <GrowthHud />
       <SidePanel />
       <ToolHint />
       <Toasts />

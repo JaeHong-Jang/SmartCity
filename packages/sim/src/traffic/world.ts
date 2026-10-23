@@ -3,6 +3,7 @@
 import type { CityDoc, Rng, TravelDir, VehicleKind, VehicleType } from '@smartcity/shared';
 import type { CitizenWorld } from '../citizens/citizens.js';
 import type { PedPool, PedWorld } from '../citizens/peds.js';
+import type { TransitState } from '../citizens/transit.js';
 import type { ZoneIndex } from '../network/crossings.js';
 import type { CompileCache } from '../network/compile.js';
 import type { Net } from '../network/net.js';
@@ -45,6 +46,12 @@ export interface BusInfo {
   stopIdx: number;
   /** Ticks of dwell left; 0 = driving. */
   dwell: number;
+  /** Passengers aboard (citizen slot, stop to get off at), in boarding order (ADR 0009 §2). */
+  riders: { slot: number; alight: string }[];
+  /** Citizen slots getting off at the current stop; they step onto the sidewalk when the dwell ends. */
+  alighting: number[];
+  /** Stop of the current dwell (served for passengers), null otherwise. */
+  atStop: string | null;
 }
 
 export interface Vehicle {
@@ -138,6 +145,8 @@ export interface World {
   ped: PedWorld;
   peds: PedPool;
   cz: CitizenWorld;
+  /** Bus stop queues and mode-choice caches. */
+  transit: TransitState;
   /** Citizens whose car vanished this tick (removed, not arrived). */
   lostDrivers: number[];
   /** Citizens whose car arrived this tick, with the lane it stopped on. */

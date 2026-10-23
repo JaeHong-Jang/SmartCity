@@ -10,3 +10,4 @@ apps/server/data/
 .fablize/
 test-results/
 playwright-report/
+apps/server/.env

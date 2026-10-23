@@ -15,6 +15,7 @@ import { segmentFeatures } from '../tools/streetTool';
 import { useDoc, useServices, useStore } from './context';
 import { BuildingPlanning, ParcelInspector } from './PlanningInspector';
 import { clampNum } from './RoadTypeEditor';
+import { cycleSeconds, scrambleBlockReason } from './scramble';
 
 const DIRS = ['북', '북동', '동', '남동', '남', '남서', '서', '북서'];
 const CONTROL_KO: Record<IntersectionControl['kind'], string> = { signal: '사용자 신호', uncontrolled: '비신호', allStop: '모든 방향 일시정지' };
@@ -91,7 +92,8 @@ function NodeInspector({ id }: { id: string }) {
     const phases = (draft.phases ?? []).map((ph, j) => (j === i ? { ...ph, ...p } : ph));
     setDraft({ ...draft, phases });
   };
-  const valid = draft.kind !== 'signal' || !draft.phases || draft.phases.every((p) => p.approaches.length > 0);
+  const scrambleBlock = scrambleBlockReason(doc, draft);
+  const valid = (draft.kind !== 'signal' || !draft.phases || draft.phases.every((p) => p.approaches.length > 0)) && !(draft.scramble && scrambleBlock);
 
   return (
     <>
@@ -112,7 +114,14 @@ function NodeInspector({ id }: { id: string }) {
           <h3>신호 위상 편집</h3>
           <div className="row">
             <label>종류</label>
-            <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as IntersectionControl['kind'] })}>
+            <select
+              value={draft.kind}
+              onChange={(e) => {
+                const { scramble: _s, ...rest } = draft;
+                const kind = e.target.value as IntersectionControl['kind'];
+                setDraft(kind === 'signal' ? { ...draft, kind } : { ...rest, kind });
+              }}
+            >
               <option value="signal">신호</option>
               <option value="uncontrolled">비신호 (선착순)</option>
               <option value="allStop">모든 방향 일시정지</option>
@@ -190,6 +199,24 @@ function NodeInspector({ id }: { id: string }) {
                 <label style={{ minWidth: 0 }}>전적색</label>
                 <input type="number" min={0} max={10} step={0.5} value={draft.allRed} onChange={(e) => setDraft({ ...draft, allRed: clampNum(e.target.value, 0, 10) })} />
               </div>
+              <label className="toggle" title={scrambleBlock ?? undefined}>
+                <input
+                  type="checkbox"
+                  data-scramble
+                  checked={!!draft.scramble}
+                  disabled={!draft.scramble && scrambleBlock !== null}
+                  onChange={(e) => {
+                    const { scramble: _s, ...rest } = draft;
+                    setDraft(e.target.checked ? { ...rest, scramble: true } : rest);
+                  }}
+                />
+                보행 전용 신호(모든 방향 동시 보행)
+              </label>
+              {scrambleBlock && <span className="muted" data-scramble-reason>{draft.scramble ? '적용할 수 없음: ' : '사용 불가: '}{scrambleBlock}</span>}
+              <span className="muted" data-cycle>
+                총 주기 {draft.phases ? '' : '약 '}
+                {cycleSeconds(doc, draft, draft.phases ?? suggestPhases(doc, id))}초{draft.scramble ? ' (보행 전용 위상 포함)' : ''}
+              </span>
               <div className="row">
                 <label>오프셋</label>
                 <input type="number" min={0} max={600} step={1} value={draft.offset} onChange={(e) => setDraft({ ...draft, offset: clampNum(e.target.value, 0, 600) })} />
@@ -322,6 +349,17 @@ function BuildingInspector({ id }: { id: string }) {
         <button onClick={() => rotateTo(deg + 15)}>+15°</button>
         <button onClick={() => rotateTo(deg + 90)}>+90°</button>
       </div>
+      {b.auto && (
+        <div className="row" data-auto-building>
+          <b style={{ flex: 1 }}>자동 성장 건물</b>
+          <button
+            title="이 건물을 직접 관리합니다 (성장 시스템이 더 이상 바꾸지 않음)"
+            onClick={() => dispatcher.dispatch({ type: 'building.move', id, pos: b.pos, rotation: b.rotation })}
+          >
+            자동 관리 해제
+          </button>
+        </div>
+      )}
       <button className="danger" onClick={() => dispatcher.dispatch({ type: 'building.remove', id })}>
         건물 철거
       </button>
@@ -335,6 +373,7 @@ function StopInspector({ id }: { id: string }) {
   const { doc } = useDoc();
   const st = doc.busStops[id]!;
   const lines = Object.values(doc.busLines).filter((l) => l.stopIds.includes(id));
+  const waiting = useStore((s) => s.transit?.waiting[id] ?? 0);
   return (
     <>
       <h3>버스 정류장</h3>
@@ -345,6 +384,8 @@ function StopInspector({ id }: { id: string }) {
         <dd>{Math.round(st.t * 100)}%</dd>
         <dt>경유 노선</dt>
         <dd>{lines.length ? lines.map((l) => l.name).join(', ') : '없음'}</dd>
+        <dt>대기 승객</dt>
+        <dd>{waiting}명</dd>
       </dl>
       <button className="danger" onClick={() => dispatcher.dispatch({ type: 'busStop.remove', id })}>
         정류장 삭제

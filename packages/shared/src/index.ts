@@ -14,3 +14,6 @@ export * from './editing/footprint.js';
 export * from './planning.js';
 export * from './stats.js';
 export * from './editing/voxels.js';
+export * from './growthPresets.js';
+export * from './editing/zoning.js';
+export * from './growth.js';

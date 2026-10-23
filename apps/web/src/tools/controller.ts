@@ -13,6 +13,7 @@ import { Picker } from './picking';
 import { RoadTool } from './roadTool';
 import { SelectTool } from './selectTool';
 import { StreetTool } from './streetTool';
+import { ZoningTool } from './zoningTool';
 import { CLICK_SLOP_PX } from './gesture';
 import { nextSnapStep, snapLabel } from './snap';
 import { TOOL_META } from './toolMeta';
@@ -80,6 +81,7 @@ export class ToolController {
       closure: new ClosureTool(ctx, index),
       parcel: new ParcelTool(ctx),
       street: new StreetTool(ctx, index),
+      zoning: new ZoningTool(ctx),
     };
     this.active = this.tools[store.getState().tool];
     this.lastDocVersion = store.getState().docVersion;

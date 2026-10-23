@@ -26,6 +26,7 @@ import { commandDomains, D_ALL, D_BUILDINGS, D_BUS_LINES, D_BUS_STOPS, D_PARCELS
 import { GhostBuilding } from './ghostBuilding';
 import { MeshBuilder } from './meshBuilder';
 import { centroid, ParcelLayer } from './parcels';
+import { ProposalLayer } from './proposal';
 import type { RoadNetworkGeom } from './roadNetwork';
 import { BusRouter, stopPosition } from './busRoute';
 
@@ -100,6 +101,16 @@ function arrow(b: MeshBuilder, pts: readonly Vec2[], w: number, color: string, y
   b.tri(l.x, y, l.z, r.x, y, r.z, tip.x, y, tip.z, _c.set(color));
 }
 
+interface StopBadge {
+  el: HTMLDivElement;
+  x: number;
+  z: number;
+  shown: number;
+}
+
+/** Waiting-count badges are hidden beyond this camera distance. */
+const BADGE_MAX_DISTANCE = 700;
+
 interface PeerTag {
   el: HTMLDivElement;
   x: number;
@@ -128,7 +139,9 @@ export class OverlayLayer {
   private stale = D_ALL;
   private selectionStale = true;
   private parcels: ParcelLayer;
+  private proposal = new ProposalLayer();
   private peerTags: PeerTag[] = [];
+  private stopBadges = new Map<string, StopBadge>();
   private labels = new Map<string, HTMLDivElement>();
   private prev: Partial<ClientState> = {};
   private flowGraph: unknown = null;
@@ -161,6 +174,7 @@ export class OverlayLayer {
     this.group.add(this.ghost.group);
     this.parcels = new ParcelLayer(labelRoot);
     this.group.add(this.parcels.group);
+    this.group.add(this.proposal.group);
   }
 
   setPreview(p: ToolPreview): void {
@@ -234,6 +248,10 @@ export class OverlayLayer {
     this.selectionStale = false;
     if (d & (D_ROADS | D_BUILDINGS | D_BUS_STOPS | D_PARCELS) || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
     if (d & (D_PARCELS | D_BUILDINGS) || p.overlays?.violations !== s.overlays.violations) this.parcels.update(s.doc, s.overlays.violations);
+    if (p.selection !== s.selection || p.hoverParcelId !== s.hoverParcelId || d & (D_PARCELS | D_BUILDINGS)) {
+      this.parcels.setFocus([s.selection?.kind === 'parcel' ? s.selection.id : null, s.hoverParcelId]);
+    }
+    if (p.ai?.proposal !== s.ai.proposal || p.proposalStatus !== s.proposalStatus) this.proposal.set(s.doc, s.ai.proposal, s.proposalStatus?.invalid ?? {});
     if (p.pending !== s.pending) this.buildPending(s);
     if (p.flashes !== s.flashes) this.buildFlash(s);
     if (selStale || p.selection !== s.selection) this.buildSelection(s);
@@ -378,6 +396,22 @@ export class OverlayLayer {
       }
       disc(b, pos, 1.8, '#ffffff', Y_OVER);
       disc(b, pos, 1.3, '#1d4ed8', Y_OVER + 0.01);
+      let badge = this.stopBadges.get(st.id);
+      if (!badge) {
+        const el = document.createElement('div');
+        el.className = 'stop-badge';
+        el.dataset.stop = st.id;
+        el.style.display = 'none';
+        this.labelRoot.appendChild(el);
+        this.stopBadges.set(st.id, (badge = { el, x: pos.x, z: pos.z, shown: -1 }));
+      }
+      badge.x = pos.x;
+      badge.z = pos.z;
+    }
+    for (const [id, badge] of this.stopBadges) {
+      if (doc.busStops[id] && stopPosition(doc, doc.busStops[id]!)) continue;
+      badge.el.remove();
+      this.stopBadges.delete(id);
     }
     this.transit.set(b);
   }
@@ -517,6 +551,26 @@ export class OverlayLayer {
       if (visible) label.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
     }
     this.parcels.frame(camera, cameraDistance, width, height);
+    const waiting = s.transit?.waiting;
+    for (const [id, badge] of this.stopBadges) {
+      const n = waiting?.[id] ?? 0;
+      _v.set(badge.x, 4, badge.z).project(camera);
+      const visible = n > 0 && cameraDistance <= BADGE_MAX_DISTANCE && _v.z < 1 && _v.x > -1.05 && _v.x < 1.05 && _v.y > -1.05 && _v.y < 1.05;
+      if (!visible) {
+        if (badge.shown !== 0) {
+          badge.shown = 0;
+          badge.el.style.display = 'none';
+        }
+        continue;
+      }
+      if (badge.shown !== n) {
+        badge.shown = n;
+        badge.el.textContent = String(n);
+        badge.el.title = `대기 ${n}명`;
+        badge.el.style.display = '';
+      }
+      badge.el.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
+    }
     for (const t of this.peerTags) {
       _v.set(t.x, t.y, t.z).project(camera);
       const visible = _v.z < 1 && _v.x > -1.05 && _v.x < 1.05 && _v.y > -1.05 && _v.y < 1.05;
@@ -543,6 +597,9 @@ export class OverlayLayer {
     this.cursorMesh.dispose();
     this.ghost.dispose();
     this.parcels.dispose();
+    this.proposal.dispose();
+    for (const badge of this.stopBadges.values()) badge.el.remove();
+    this.stopBadges.clear();
     for (const t of this.peerTags) t.el.remove();
     this.peerTags = [];
     for (const label of this.labels.values()) label.remove();

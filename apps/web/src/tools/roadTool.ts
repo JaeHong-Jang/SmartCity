@@ -13,6 +13,7 @@ import {
   type RoadPlan,
   type Vec2,
 } from '@smartcity/shared';
+import { RemovalPreview, removalLines } from './removalPreview';
 import { snapLabel, snapPoint } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
@@ -30,6 +31,7 @@ export class RoadTool implements Tool {
   private control: Vec2 | null = null;
   private hover: Vec2 | null = null;
   private plan: RoadPlan | null = null;
+  private readonly removal = new RemovalPreview();
 
   constructor(private readonly ctx: ToolContext) {}
 
@@ -133,6 +135,7 @@ export class RoadTool implements Tool {
     this.start = null;
     this.control = null;
     this.plan = null;
+    this.removal.reset();
     this.updateHint();
     this.ctx.changed();
   }
@@ -173,6 +176,9 @@ export class RoadTool implements Tool {
       prev.points.push({ pos: ep.control, radius: 1.2, color: '#e2e8f0' });
     }
     if (this.plan) for (const j of this.plan.junctions.slice(1, -1)) prev.points.push({ pos: j, radius: 2.4, color: '#facc15' });
+    // Automatic parcels and buildings this road would remove.
+    const st = this.ctx.store.getState();
+    prev.lines.push(...removalLines(doc, this.removal.get(doc, st.docVersion, this.plan?.command ?? null, () => this.ctx.changed())));
     return prev;
   }
 }

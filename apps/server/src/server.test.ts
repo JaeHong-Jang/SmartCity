@@ -6,6 +6,8 @@ import WebSocket from 'ws';
 import { PROTOCOL_VERSION } from '@smartcity/shared';
 import type { Command, ServerMessage } from '@smartcity/shared';
 import { startServer } from './server.js';
+import { AiService } from './ai/service.js';
+import { scriptedModel } from './ai/model.js';
 
 type Srv = Awaited<ReturnType<typeof startServer>>;
 
@@ -297,5 +299,62 @@ describe('server', () => {
     expect(await r.json()).toMatchObject({ ok: true, rooms: 0, clients: 0 });
     const p = await fetch(`http://127.0.0.1:${srv.port}/health`, { method: 'POST' });
     expect(p.status).toBe(405);
+  });
+});
+
+describe('AI building assistant over the socket (ADR 0009 §5, scripted model)', () => {
+  it('answers only the asker with a proposal that applies as that user\'s own command', async () => {
+    const s = await startServer({ port: 0, dataDir: dir, helloTimeoutMs: 300, ai: new AiService(scriptedModel()) });
+    extra.push(s);
+    const a = await TestClient.join(s.port, 'ai-room', 'asker');
+    const b = await TestClient.join(s.port, 'ai-room', 'peer');
+    expect(await a.next('ai.status')).toEqual({ t: 'ai.status', enabled: true, model: 'scripted' });
+    const road: Command = {
+      type: 'batch',
+      commands: [addNode('p', -150), addNode('q', 150), { type: 'segment.add', segment: { id: 'r', a: 'p', b: 'q', roadTypeId: 'road-2' } }],
+    };
+    a.send({ t: 'cmd', ref: 1, cmd: road });
+    await a.next('applied');
+    await b.next('applied');
+    a.send({ t: 'ai.ask', reqId: 7, text: '도로변에 카페 지어줘', focus: { x: 0, z: 0 } });
+    const progress = await a.next('ai.progress');
+    expect(progress.reqId).toBe(7);
+    const p = await a.next('ai.proposal');
+    expect(p.commands.filter((c) => c.type === 'building.place')).toHaveLength(3);
+    // Nothing changed for anyone yet, and the peer saw no AI traffic.
+    expect(b.msgs.some((m) => m.t.startsWith('ai.') && m.t !== 'ai.status')).toBe(false);
+    a.send({ t: 'cmd', ref: 2, cmd: { type: 'batch', commands: p.commands } });
+    const applied = await b.next('applied');
+    expect(applied.cmd.type).toBe('batch');
+    expect(applied.by).toBe((await a.next('applied')).by);
+    a.close();
+    b.close();
+  });
+
+  it('reports a disabled assistant and refuses a second request while one is running', async () => {
+    const off = await startServer({ port: 0, dataDir: dir, helloTimeoutMs: 300, ai: new AiService(null) });
+    extra.push(off);
+    const c = await TestClient.join(off.port, 'r2');
+    expect(await c.next('ai.status')).toEqual({ t: 'ai.status', enabled: false, model: null });
+    c.send({ t: 'ai.ask', reqId: 1, text: '공원', focus: null });
+    expect((await c.next('ai.error')).error).toMatch(/키/);
+    c.close();
+
+    let release!: () => void;
+    const slow = new AiService({ name: 'slow', send: () => new Promise((_, rej) => (release = () => rej(new Error('stop')))) });
+    const s2 = await startServer({ port: 0, dataDir: dir, helloTimeoutMs: 300, ai: slow });
+    extra.push(s2);
+    const d = await TestClient.join(s2.port, 'r3');
+    d.send({ t: 'ai.ask', reqId: 1, text: '하나', focus: null });
+    await sleep(50);
+    d.send({ t: 'ai.ask', reqId: 2, text: '둘', focus: null });
+    expect(await d.next('ai.error')).toMatchObject({ reqId: 2, error: expect.stringMatching(/처리 중/) });
+    // Cancel: the late failure of request 1 is dropped, not reported.
+    d.send({ t: 'ai.cancel', reqId: 1 });
+    await sleep(50);
+    release();
+    await sleep(100);
+    expect(d.msgs.some((m) => m.t === 'ai.error' && m.reqId === 1)).toBe(false);
+    d.close();
   });
 });

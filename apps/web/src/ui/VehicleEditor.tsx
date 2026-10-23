@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { cloneJson, type VehicleKind, type VehiclePart, type VehicleType } from '@smartcity/shared';
+import { DEFAULT_BUS_CAPACITY } from '../app/transit';
 import { vehiclePreview } from '../render/vehicles';
 import { useDoc, useServices } from './context';
 import { PartPreview } from './PartPreview';
@@ -90,6 +91,7 @@ export function VehicleEditor() {
           {num('가속도', vt.maxAccel, 0.3, 6, 0.1, (v) => edit({ maxAccel: v }), 'm/s²')}
           {num('감속도', vt.comfortDecel, 0.5, 8, 0.1, (v) => edit({ comfortDecel: v }), 'm/s²')}
           {num('출현 비중', vt.spawnWeight, 0, 100, 1, (v) => edit({ spawnWeight: v }))}
+          {vt.kind === 'bus' && num('정원', vt.capacity ?? DEFAULT_BUS_CAPACITY, 1, 200, 1, (v) => edit({ capacity: Math.round(v) }), '명')}
           <h3>파트 (x 전방 · y 높이 · z 우측)</h3>
           <table className="parts">
             <thead>

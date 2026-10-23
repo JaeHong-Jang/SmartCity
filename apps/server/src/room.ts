@@ -3,9 +3,14 @@ import type { WebSocket } from 'ws';
 import { tryApplyCommand } from '@smartcity/shared';
 import type { CityDoc, Command, Peer, Presence, ServerMessage } from '@smartcity/shared';
 import { appendLog, LogCorruptedError, writeCheckpoint } from './persistence.js';
+import { GrowthDirector, type GrowthOptions } from './growth.js';
 import { TokenBucket } from './rateLimit.js';
 
 export const MAX_CLIENTS_PER_ROOM = 50;
+/** `by` of commands the server issues itself. */
+export const SYSTEM_ID = 'system';
+
+export type CommitResult = { ok: true; seq: number } | { ok: false; error: string };
 const CHECKPOINT_EVERY = 200;
 const PRESENCE_MIN_INTERVAL_MS = 50; // 20Hz
 const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#469990', '#9a6324'];
@@ -42,15 +47,19 @@ export class Room {
   private writable = true;
   private timer: NodeJS.Timeout;
   unloadTimer: NodeJS.Timeout | null = null;
+  private readonly growth: GrowthDirector;
 
   constructor(
     readonly id: string,
     readonly dataDir: string,
     public doc: CityDoc,
     public seq: number,
+    growth: GrowthOptions = {},
   ) {
     this.timer = setInterval(() => this.checkpointIfDirty(), 30_000);
     this.timer.unref();
+    this.growth = new GrowthDirector(this, growth);
+    this.growth.start();
   }
 
   private send(c: Client, msg: ServerMessage): void {
@@ -98,30 +107,39 @@ export class Room {
       this.send(c, { t: 'rejected', ref, error: 'rate limited' });
       return;
     }
-    if (!this.writable) {
-      this.send(c, { t: 'rejected', ref, error: 'storage error' });
-      return;
-    }
+    const res = this.commit(cmd, c.id, c, ref);
+    if (!res.ok) this.send(c, { t: 'rejected', ref, error: res.error });
+  }
+
+  /**
+   * Commit a command made by the server itself (automatic growth). It takes the same path as a user
+   * command: validation, log append with rollback, seq, broadcast; `by` is 'system'.
+   */
+  system(cmd: Command): CommitResult {
+    return this.commit(cmd, SYSTEM_ID, null, 0);
+  }
+
+  /**
+   * The single commit path: serialize, apply (validates), append to the log (rolling back on
+   * failure), assign seq, broadcast. `origin` additionally receives its `ref` echoed in `applied`.
+   */
+  private commit(cmd: Command, by: string, origin: Client | null, ref: number): CommitResult {
+    if (!this.writable) return { ok: false, error: 'storage error' };
     // Serialize first: a command that cannot be logged or broadcast must never touch the doc.
     let cmdJson: string;
     try {
       cmdJson = JSON.stringify(cmd);
     } catch {
-      this.send(c, { t: 'rejected', ref, error: 'command not serializable' });
-      return;
+      return { ok: false, error: 'command not serializable' };
     }
     const res = tryApplyCommand(this.doc, cmd);
-    if (!res.ok) {
-      this.send(c, { t: 'rejected', ref, error: res.error });
-      return;
-    }
+    if (!res.ok) return res;
     try {
       appendLog(this.dataDir, this.id, this.seq + 1, cmdJson); // synchronous, before broadcast
     } catch (e) {
       // Only acknowledged edits may change the doc (ADR 0002): undo and refuse.
       res.rollback();
       console.error(`[room ${this.id}] log append failed: ${(e as Error).message}`);
-      this.send(c, { t: 'rejected', ref, error: 'storage error' });
       if (e instanceof LogCorruptedError) {
         // The rejected record may still sit in the log as seq+1. Burn that number so the next
         // checkpoint covers it and replay never resurrects it; clients see the gap and resync.
@@ -129,16 +147,17 @@ export class Room {
         this.writable = false;
         this.checkpoint();
       }
-      return;
+      return { ok: false, error: 'storage error' };
     }
     this.seq++;
-    const head = `{"t":"applied","seq":${this.seq},"by":${JSON.stringify(c.id)},"cmd":${cmdJson}`;
+    const head = `{"t":"applied","seq":${this.seq},"by":${JSON.stringify(by)},"cmd":${cmdJson}`;
     const data = `${head}}`;
     const withRef = `${head},"ref":${ref}}`;
     for (const o of this.clients) {
-      if (o.ws.readyState === o.ws.OPEN) o.ws.send(o === c ? withRef : data);
+      if (o.ws.readyState === o.ws.OPEN) o.ws.send(o === origin ? withRef : data);
     }
     if (++this.sinceCheckpoint >= CHECKPOINT_EVERY) this.checkpoint();
+    return { ok: true, seq: this.seq };
   }
 
   presence(c: Client, presence: Presence): void {
@@ -179,6 +198,7 @@ export class Room {
   }
 
   dispose(): void {
+    this.growth.stop();
     clearInterval(this.timer);
     if (this.unloadTimer) clearTimeout(this.unloadTimer);
     this.checkpointIfDirty();

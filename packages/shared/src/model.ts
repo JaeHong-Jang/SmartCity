@@ -1,6 +1,7 @@
 // City document: the single editable, synchronized state of a city.
 // World units are meters on the XZ plane (Y is up). Traffic drives on the right.
 
+import { GROWTH_PRESETS } from './growthPresets.js';
 import type { Vec2 } from './geometry.js';
 
 export type NodeId = string;
@@ -130,6 +131,8 @@ export interface BuildingType {
   props?: BuildingProp[];
   /** Revision, incremented by applyCommand on every upsert (clients send `expectedRev` to avoid lost updates). */
   rev?: number;
+  /** Candidate for automatic growth on zoned lots (ADR 0009 §4). Only level 1 for now. */
+  growth?: { level: 1 };
 }
 
 export interface Building {
@@ -138,6 +141,8 @@ export interface Building {
   pos: Vec2;
   /** Radians; same convention as Three.js rotation.y (see geometry.rotateY). */
   rotation: number;
+  /** Placed by automatic growth; cleared when a user moves it (then it is no longer managed). */
+  auto?: true;
 }
 
 export type VehicleKind = 'car' | 'bus' | 'truck' | 'emergency';
@@ -172,6 +177,8 @@ export interface VehicleType {
   spawnWeight: number;
   /** Visual structure. `length`/`width`/`height` stay the physical envelope used by the simulation. */
   parts: VehiclePart[];
+  /** Passengers (1..200). Omitted: 40 for buses, 4 otherwise. */
+  capacity?: number;
 }
 
 export interface SignalPhase {
@@ -196,6 +203,11 @@ export interface IntersectionControl {
   allRed: number;
   /** Cycle offset in seconds, for green-wave coordination. */
   offset: number;
+  /**
+   * Exclusive pedestrian phase (보행 전용 위상): after the vehicle phases every crosswalk leg walks at once
+   * while all vehicles are red; vehicle phases then have no WALK. Signals of degree 3–4 only (ADR 0009 §3).
+   */
+  scramble?: boolean;
 }
 
 export type TravelDir = 'forward' | 'backward';
@@ -239,6 +251,10 @@ export interface Parcel {
   polygon: Vec2[];
   zone: ParcelZone;
   regulation: Regulation;
+  /** Laid out by the zoning tool along a road: automatic growth may build here (ADR 0009 §4). */
+  auto?: true;
+  /** The road side the lot faces (auto lots). Growth stops when the road is gone. */
+  frontage?: { segmentId: SegmentId; side: 'left' | 'right' };
 }
 
 export type RoadFeatureKind = 'crosswalk' | 'speedBump';
@@ -268,10 +284,12 @@ export interface CityMeta {
   halfSize: number;
   /** Global traffic demand multiplier, 0..3. */
   trafficDensity: number;
+  /** Automatic growth on zoned lots; omitted = on. */
+  growth?: boolean;
 }
 
 /** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
-export const DOC_VERSION = 3;
+export const DOC_VERSION = 4;
 
 export interface CityDoc {
   version: number;
@@ -293,7 +311,8 @@ export interface CityDoc {
 /**
  * Migrate a doc saved by an older version (in place). v1 → v2: parcels collection, design
  * revisions, and the v1 city-hall preset whose wings overlapped by 1 m (v2 forbids overlapping volumes).
- * v2 → v3: road features collection.
+ * v2 → v3: road features collection. v3 → v4: growth presets (only added by this migration, so a
+ * user who deletes one does not get it back).
  */
 export function normalizeDoc(doc: CityDoc): CityDoc {
   // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
@@ -309,6 +328,10 @@ export function normalizeDoc(doc: CityDoc): CityDoc {
     doc.version = 2;
   }
   if (doc.version < 3) doc.version = 3;
+  if (doc.version < 4) {
+    for (const t of GROWTH_PRESETS) if (!doc.buildingTypes[t.id]) doc.buildingTypes[t.id] = { ...cloneJson(t), rev: 1 };
+    doc.version = 4;
+  }
   return doc;
 }
 

@@ -1,7 +1,9 @@
 // Road-network cascades: segment split/removal, bus stop removal, feature pruning.
 
-import { splitQuadBezier, type Vec2 } from '../geometry.js';
+import { closestPointOnPolyline, sampleSegmentCurve, splitQuadBezier, type Vec2 } from '../geometry.js';
+import { polygonsBlockRoad } from '../editing/buildings.js';
 import type { BusStop, CityDoc, RoadFeature, RoadSegment, SegmentId } from '../model.js';
+import { buildingsInParcel } from '../planning.js';
 import { fail, type Tx } from './tx.js';
 import {
   checkId,
@@ -39,6 +41,21 @@ export function pruneFeatures(doc: CityDoc, segId: SegmentId, tx: Tx): void {
       continue;
     }
     last = s;
+  }
+}
+
+/**
+ * After roads were added, moved or widened: remove the auto lots whose polygon now overlaps the
+ * carriageway or sidewalk of any of `segIds`, together with the auto buildings standing in them
+ * (ADR 0009 §4). User parcels and buildings are untouched.
+ */
+export function pruneAutoLots(doc: CityDoc, segIds: SegmentId[], tx: Tx): void {
+  const segs = segIds.map((id) => doc.segments[id]).filter((s): s is RoadSegment => !!s);
+  if (segs.length === 0) return;
+  for (const p of Object.values(doc.parcels)) {
+    if (!p.auto || !polygonsBlockRoad(doc, [p.polygon], segs)) continue;
+    for (const id of buildingsInParcel(doc, p)) if (doc.buildings[id]!.auto) tx.set(doc.buildings, id, undefined);
+    tx.set(doc.parcels, p.id, undefined);
   }
 }
 
@@ -154,6 +171,22 @@ export function splitSegment(
   }
   pruneFeatures(doc, first.id, tx);
   pruneFeatures(doc, second.id, tx);
+  // Lots keep facing the half of the road they are next to. (segment.remove instead leaves its lots
+  // in place with a dangling frontage; growth skips them.)
+  const firstPts = sampleSegmentCurve(a, mid, c0);
+  const secondPts = sampleSegmentCurve(mid, doc.nodes[s.b]!.pos, c1);
+  for (const p of Object.values(doc.parcels)) {
+    if (p.frontage?.segmentId !== s.id) continue;
+    let cx = 0;
+    let cz = 0;
+    for (const v of p.polygon) {
+      cx += v.x / p.polygon.length;
+      cz += v.z / p.polygon.length;
+    }
+    const c = { x: cx, z: cz };
+    const onFirst = closestPointOnPolyline(firstPts, c).distance <= closestPointOnPolyline(secondPts, c).distance;
+    tx.set(doc.parcels, p.id, { ...p, frontage: { segmentId: onFirst ? first.id : second.id, side: p.frontage.side } });
+  }
   const closure = doc.closures[s.id];
   if (closure) {
     tx.set(doc.closures, s.id, undefined);

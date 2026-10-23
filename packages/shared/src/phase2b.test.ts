@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyCommand, cloneJson, createEmptyDoc, docToCommands, LIMITS, normalizeDoc, type CityDoc, type Command, type RoadFeature } from './index.js';
+import { applyCommand, cloneJson, DOC_VERSION, createEmptyDoc, docToCommands, LIMITS, normalizeDoc, type CityDoc, type Command, type RoadFeature } from './index.js';
 
 function ok(doc: CityDoc, cmd: Command): void {
   expect(applyCommand(doc, cmd)).toEqual({ ok: true });
@@ -195,7 +195,7 @@ describe('doc v3 migration', () => {
     delete (doc as { features?: unknown }).features;
     doc.version = 2;
     normalizeDoc(doc);
-    expect(doc.version).toBe(3);
+    expect(doc.version).toBe(DOC_VERSION);
     expect(doc.features).toEqual({});
   });
 });

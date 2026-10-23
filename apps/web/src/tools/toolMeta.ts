@@ -10,4 +10,5 @@ export const TOOL_META: readonly { id: ToolId; label: string; key: string }[] = 
   { id: 'closure', label: '폐쇄', key: '6' },
   { id: 'parcel', label: '필지', key: '7' },
   { id: 'street', label: '교통 시설', key: '8' },
+  { id: 'zoning', label: '조닝', key: '9' },
 ];

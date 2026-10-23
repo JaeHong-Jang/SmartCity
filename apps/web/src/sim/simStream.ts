@@ -75,6 +75,8 @@ export class WorkerSimStream implements SimulationStream, SimControl {
       pedestrianIds: s.pedestrianIds,
       crossings: s.crossings,
       occupancy: s.occupancy,
+      busLoad: s.busLoad,
+      stopWaiting: s.stopWaiting,
     };
     this.post({ t: 'returnBuffers', buffers }, snapshotTransferables(buffers));
   }

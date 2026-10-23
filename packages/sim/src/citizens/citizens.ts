@@ -3,23 +3,29 @@
 // `maxCitizens` agents (each agent stands for `scale` residents), distributed by largest remainder (ties by
 // building id). A citizen is in exactly one state; events run in (dueTick, personId, seq) order and the
 // next one is always scheduled from the actual arrival. Trips: door → walk (route ≤ 1 km, or no car) or
-// door → curb → car (personId on the vehicle) → curb → walk → door.
+// door → curb → car (personId on the vehicle) → curb → walk → door, or (ADR 0009 §2, only when a direct bus
+// line serves both ends) door → stop → queue → bus → stop → walk → door. A citizen belongs to exactly one
+// of: building, pedestrian, car, stop queue (it keeps its pedestrian there), bus riders, bus alighting.
 
 import { AREA_PER_JOB, AREA_PER_PERSON, buildingMetrics, Rng, WORKFORCE_SHARE, type CityDoc, type TravelDir } from '@smartcity/shared';
 import { groupKey } from '../network/net.js';
 import { laneSAtT } from '../traffic/demand.js';
 import { createVehicle } from '../traffic/ops.js';
 import { canPlace, despawn, type Goal, type Vehicle, type World } from '../traffic/world.js';
-import type { BuildingAccess } from '../network/pedGraph.js';
-import type { CitizenStats } from '../types.js';
+import { ROUTE_SPEED, type BuildingAccess } from '../network/pedGraph.js';
+import { PedState, type CitizenStats } from '../types.js';
 import { DOOR_SECONDS, removePed, requestRoute, setRoute, spawnPed } from './peds.js';
 import { gameDuration, gameSec, hash01, heapPop, schedule, tickAt, type Ev } from './schedule.js';
+import { busOption, capacityOf, dequeue, dwellSeconds, enqueue, EST_SPEED, MAX_BOARD, queueOf, sortedQueues, takeFront, WAIT_MINUTES } from './transit.js';
 
-export const CitState = { home: 0, leaving: 1, walking: 2, driving: 3, entering: 4, atWork: 5, atShop: 6, displaced: 7 } as const;
-const N_STATES = 8;
+export const CitState = { home: 0, leaving: 1, walking: 2, driving: 3, entering: 4, atWork: 5, atShop: 6, displaced: 7, waiting: 8, riding: 9 } as const;
+const N_STATES = 10;
 const Purpose = { home: 0, work: 1, shop: 2 } as const;
-/** Trip leg: none, waiting for the walking route (mode choice), walking to the door, walking to the car, walking from the car. */
-const Leg = { none: 0, plan: 1, walk: 2, toCar: 3, fromCar: 4 } as const;
+/**
+ * Trip leg: none, waiting for the walking route (mode choice), walking to the door, walking to the car,
+ * walking from the car, walking to the bus stop, queued at the stop, aboard a bus (riders or alighting).
+ */
+export const Leg = { none: 0, plan: 1, walk: 2, toCar: 3, fromCar: 4, toStop: 5, wait: 6, ride: 7 } as const;
 
 /** Walk when the walking route is at most this long (m). */
 export const WALK_MAX = 1000;
@@ -59,6 +65,12 @@ export interface Citizen {
   car: Vehicle | null;
   carWait: number;
   seq: number;
+  /** Bus leg of the current trip: line, boarding and alighting stop ids (null when not travelling by bus). */
+  line: string | null;
+  board: string | null;
+  alight: string | null;
+  /** Bus the citizen is aboard (riders or alighting). */
+  ride: Vehicle | null;
 }
 
 export interface CitizenWorld {
@@ -142,8 +154,25 @@ const access = (w: World, id: string | null): BuildingAccess | null => {
   return i === undefined ? null : w.ped.pg.access[i]!;
 };
 
+/** Leave every bus relation (stop queue, riders, alighting). Idempotent; a dropped queue place voids the patience event. */
+function detachBus(w: World, c: Citizen): void {
+  if (c.board !== null && c.line !== null && dequeue(w, c.board, c.line, c.slot)) c.seq++;
+  const bus = c.ride?.bus;
+  if (bus) {
+    const k = bus.riders.findIndex((r) => r.slot === c.slot);
+    if (k >= 0) bus.riders.splice(k, 1);
+    const a = bus.alighting.indexOf(c.slot);
+    if (a >= 0) bus.alighting.splice(a, 1);
+  }
+  c.ride = null;
+  c.line = null;
+  c.board = null;
+  c.alight = null;
+}
+
 function removeCitizen(w: World, c: Citizen): void {
   const cz = w.cz;
+  detachBus(w, c);
   if (c.ped >= 0) removePed(w, c.ped);
   c.ped = -1;
   if (c.car) {
@@ -203,6 +232,10 @@ function createCitizen(w: World, home: string): Citizen {
     car: null,
     carWait: 0,
     seq: 0,
+    line: null,
+    board: null,
+    alight: null,
+    ride: null,
   };
   cz.slots[slot] = c;
   cz.byId.set(c.id, c);
@@ -345,6 +378,8 @@ function pickShop(w: World): string | null {
 }
 
 function act(w: World, c: Citizen): void {
+  // Patience at the stop ran out: walk the rest of the way.
+  if (c.state === CitState.waiting) return leaveStop(w, c);
   if (c.state === CitState.home) {
     if (c.worker && c.work !== null && w.doc.buildings[c.work]) return startTrip(w, c, c.work, Purpose.work);
     const shop = pickShop(w);
@@ -392,6 +427,7 @@ function failTrip(w: World, c: Citizen): void {
 }
 
 function arrive(w: World, c: Citizen): void {
+  detachBus(w, c);
   let dest = c.dest;
   let purpose = c.purpose;
   if (dest === null || !w.doc.buildings[dest]) {
@@ -465,6 +501,134 @@ function walkToDoor(w: World, c: Citizen): void {
   requestRoute(w, c.ped, ad.door);
 }
 
+// ---------- buses (ADR 0009 §2) ----------
+
+/** Sidewalk node of a served stop on the current pedestrian graph, −1 when the stop is not served. */
+function stopNode(w: World, stop: string | null): number {
+  const k = stop === null ? undefined : w.ped.pg.stopIndex.get(stop);
+  return k === undefined ? -1 : w.ped.pg.stopNode[k]!;
+}
+
+/** The queue (stop, line) still exists in the doc and the stop is served. */
+function queueValid(w: World, stop: string, line: string): boolean {
+  return stopNode(w, stop) >= 0 && (w.doc.busLines[line]?.stopIds.includes(stop) ?? false);
+}
+
+/** Out of the stop queue (patience, stop or line gone): walk from where the pedestrian stands. */
+function leaveStop(w: World, c: Citizen): void {
+  if (c.board !== null && c.line !== null && dequeue(w, c.board, c.line, c.slot)) c.seq++;
+  c.line = null;
+  c.board = null;
+  c.alight = null;
+  if (c.ped < 0) return failTrip(w, c);
+  w.peds.state[c.ped] = PedState.waiting;
+  setState(w, c, CitState.walking);
+  walkToDoor(w, c);
+}
+
+/** The pedestrian reached its boarding stop: join the queue (or walk on when it is gone). */
+function joinStop(w: World, c: Citizen): void {
+  const node = stopNode(w, c.board);
+  if (c.board === null || c.line === null || node < 0 || w.peds.node[c.ped] !== node || !queueValid(w, c.board, c.line)) {
+    c.line = null;
+    c.board = null;
+    c.alight = null;
+    return walkToDoor(w, c);
+  }
+  enqueue(w, c.board, c.line, { slot: c.slot, pid: c.id, tick: w.tick });
+  c.leg = Leg.wait;
+  w.peds.state[c.ped] = PedState.busStop;
+  setState(w, c, CitState.waiting);
+  schedule(w, c, w.tick + gameDuration(w, WAIT_MINUTES * 60));
+}
+
+/**
+ * Stop arrival of bus `v` (called once, at the arrival tick, buses in vehicle id order): riders for this
+ * stop — or whose stop left the line — move to `alighting`, then up to min(capacity − staying riders, 20)
+ * waiters board in FIFO order. Returns the dwell in seconds.
+ */
+export function busArrive(w: World, v: Vehicle): number {
+  const bus = v.bus!;
+  bus.atStop = null;
+  const line = w.doc.busLines[bus.lineId];
+  const stop = line?.stopIds[bus.stopIdx];
+  if (!line || stop === undefined || stopNode(w, stop) < 0) return dwellSeconds(0, 0);
+  bus.atStop = stop;
+  const keep: { slot: number; alight: string }[] = [];
+  let alight = 0;
+  for (const r of bus.riders) {
+    if (r.alight === stop || !line.stopIds.includes(r.alight) || stopNode(w, r.alight) < 0) {
+      bus.alighting.push(r.slot);
+      alight++;
+    } else keep.push(r);
+  }
+  bus.riders = keep;
+  const room = Math.max(0, capacityOf(w.types.get(v.typeId)) - keep.length);
+  const n = Math.min(queueOf(w, stop, line.id)?.length ?? 0, room, MAX_BOARD);
+  for (const wt of takeFront(w, stop, line.id, n)) {
+    const c = w.cz.slots[wt.slot]!;
+    if (c.ped >= 0) removePed(w, c.ped);
+    c.ped = -1;
+    c.ride = v;
+    c.leg = Leg.ride;
+    // Boarding voids the patience event.
+    c.seq++;
+    setState(w, c, CitState.riding);
+    bus.riders.push({ slot: c.slot, alight: c.alight! });
+  }
+  return dwellSeconds(alight, n);
+}
+
+/** End of the dwell: alighting passengers step onto the sidewalk at the stop and walk to their destination. */
+export function busDepart(w: World, v: Vehicle): void {
+  const bus = v.bus!;
+  const list = bus.alighting;
+  bus.alighting = [];
+  const node = stopNode(w, bus.atStop);
+  bus.atStop = null;
+  for (const slot of list) {
+    const c = w.cz.slots[slot];
+    if (!c || c.ride !== v) continue;
+    c.ride = null;
+    c.line = null;
+    c.board = null;
+    c.alight = null;
+    if (node < 0) {
+      failTrip(w, c);
+      continue;
+    }
+    c.ped = spawnPed(w, node, c.id, c.slot, c.vPref, c.style, 0);
+    setState(w, c, CitState.walking);
+    walkToDoor(w, c);
+  }
+}
+
+/**
+ * After an edit (derived refresh): waiters of a queue whose stop left its line, or whose line is gone, walk;
+ * riders of a line without any served stop left end their trip (counted).
+ */
+export function syncTransit(w: World): void {
+  for (const q of sortedQueues(w)) {
+    if (queueValid(w, q.stop, q.line)) continue;
+    for (const wt of q.list.slice()) {
+      const c = w.cz.slots[wt.slot];
+      if (c) leaveStop(w, c);
+    }
+  }
+  for (const v of w.vehicles) {
+    if (!v.alive || !v.bus || v.bus.riders.length === 0) continue;
+    const line = w.doc.busLines[v.bus.lineId];
+    if (line && line.stopIds.some((s) => stopNode(w, s) >= 0)) continue;
+    for (const r of v.bus.riders.slice()) {
+      const c = w.cz.slots[r.slot];
+      if (c && c.ride === v) failTrip(w, c);
+    }
+  }
+}
+
+/** Mode-choice bias of a citizen for mode m (0 walk, 1 bus, 2 car): a fixed hash in [0.85, 1.15). */
+const modeBias = (c: Citizen, m: number): number => 0.85 + 0.3 * hash01(c.id, m, 0x6d6f6465);
+
 // ---------- per tick ----------
 
 /** Due events (before vehicles and pedestrians move). */
@@ -484,8 +648,12 @@ export function updateCitizens(w: World): void {
   const p = w.peds;
   for (const i of w.ped.failed) {
     const c = cz.slots[p.owner[i]!];
-    if (c && c.ped === i) failTrip(w, c);
-    else removePed(w, i);
+    if (c && c.ped === i) {
+      // No walking route to the destination: a direct bus may still connect the two doors (Sol 3b review
+      // #8). Without a bus candidate this is exactly the old rule (counted failure).
+      if (c.leg === Leg.plan && busInstead(w, c, i)) continue;
+      failTrip(w, c);
+    } else removePed(w, i);
   }
   for (const i of w.ped.arrived) {
     const c = cz.slots[p.owner[i]!];
@@ -497,7 +665,8 @@ export function updateCitizens(w: World): void {
       const r = tryCar(w, c);
       if (r === 'walk') walkToDoor(w, c);
       else if (r === 'wait') c.carWait = 1;
-    } else arrive(w, c);
+    } else if (c.leg === Leg.toStop) joinStop(w, c);
+    else arrive(w, c);
   }
   for (const d of w.arrivedDrivers) {
     const c = cz.slots[d.person];
@@ -528,17 +697,42 @@ export function updateCitizens(w: World): void {
   }
   // Mode choice once the walking route is known; curb waits for a car; outdoor states from the pedestrian.
   for (const c of cz.slots) {
-    if (!c || c.ped < 0) continue;
+    if (!c) continue;
+    // The bus this citizen rode vanished (removed, recompiled, line changed or deleted): counted failure.
+    if (c.ride && !c.ride.alive) {
+      failTrip(w, c);
+      continue;
+    }
+    if (c.ped < 0) continue;
     const i = c.ped;
     if (c.leg === Leg.plan && !p.pending[i]) {
       const route = p.route[i]!;
       let length = 0;
       for (let k = p.ri[i]! + 1; k < route.length; k++) length += w.ped.pg.len[route[k]! >> 1]!;
       const ao = access(w, c.from);
-      if (c.hasCar && length > WALK_MAX && ao) {
+      const ad = access(w, c.dest);
+      const bus = ao && ad ? busOption(w, ao.door, ad.door) : null;
+      const car = c.hasCar && length > WALK_MAX && ao !== null;
+      // No direct bus candidate: exactly the Phase 2b rule. Otherwise the cheapest biased estimate wins
+      // (ties walk < bus < car); the car stays limited to the trips that rule would drive.
+      let mode = car ? 2 : 0;
+      if (bus) {
+        const tWalk = (length / ROUTE_SPEED) * modeBias(c, 0);
+        const tBus = bus.time * modeBias(c, 1);
+        const tCar = car ? (length / EST_SPEED + CAR_WAIT / 2) * modeBias(c, 2) : Infinity;
+        mode = tWalk <= tBus && tWalk <= tCar ? 0 : tBus <= tCar ? 1 : 2;
+      }
+      if (mode === 2) {
         c.leg = Leg.toCar;
         p.doorOnArrive[i] = 0;
-        setRoute(w, i, Int32Array.of(ao.accessEdge * 2));
+        setRoute(w, i, Int32Array.of(ao!.accessEdge * 2));
+      } else if (mode === 1) {
+        c.leg = Leg.toStop;
+        c.line = bus!.line;
+        c.board = bus!.board;
+        c.alight = bus!.alight;
+        p.doorOnArrive[i] = 0;
+        requestRoute(w, i, stopNode(w, bus!.board));
       } else c.leg = Leg.walk;
     } else if (c.leg === Leg.toCar && c.carWait > 0) {
       // Standing at the curb until there is room to start the car; walking after CAR_WAIT.
@@ -549,10 +743,25 @@ export function updateCitizens(w: World): void {
         walkToDoor(w, c);
       }
     }
-    if (c.ped < 0) continue;
+    if (c.ped < 0 || c.leg === Leg.wait) continue;
     const st = p.arriving[c.ped] ? CitState.entering : p.timer[c.ped]! > 0 ? CitState.leaving : CitState.walking;
     if (c.state !== st) setState(w, c, st);
   }
+}
+
+/** Switch a citizen whose walking route failed to a direct bus, if one connects the doors. */
+function busInstead(w: World, c: Citizen, i: number): boolean {
+  const ao = access(w, c.from);
+  const ad = access(w, c.dest);
+  const bus = ao && ad ? busOption(w, ao.door, ad.door) : null;
+  if (!bus) return false;
+  c.leg = Leg.toStop;
+  c.line = bus.line;
+  c.board = bus.board;
+  c.alight = bus.alight;
+  w.peds.doorOnArrive[i] = 0;
+  requestRoute(w, i, stopNode(w, bus.board));
+  return true;
 }
 
 /**
@@ -575,6 +784,40 @@ export function retargetCitizens(w: World, lost: Set<number>): void {
     if (c.dest !== null && !w.doc.buildings[c.dest]) {
       c.dest = c.home;
       c.purpose = Purpose.home;
+    }
+    // Waiting at a stop that is still served (and within reach): stay in the queue at its new node.
+    if (c.leg === Leg.wait) {
+      const node = stopNode(w, c.board);
+      const p = w.peds;
+      if (node >= 0 && Math.hypot(w.ped.pg.x[node]! - w.ped.pg.x[p.node[c.ped]!]!, w.ped.pg.z[node]! - w.ped.pg.z[p.node[c.ped]!]!) <= 20 && p.edge[c.ped]! < 0) {
+        p.node[c.ped] = node;
+        p.state[c.ped] = PedState.busStop;
+        continue;
+      }
+      if (c.board !== null && c.line !== null && dequeue(w, c.board, c.line, c.slot)) c.seq++;
+      setState(w, c, CitState.walking);
+      p.state[c.ped] = PedState.waiting;
+      c.leg = Leg.walk;
+      const door = access(w, c.dest)?.door ?? -1;
+      if (door < 0) {
+        failTrip(w, c);
+        continue;
+      }
+      p.goal[c.ped] = door;
+    }
+    if (c.leg === Leg.toStop) {
+      const node = stopNode(w, c.board);
+      if (node >= 0) {
+        w.peds.doorOnArrive[c.ped] = 0;
+        requestRoute(w, c.ped, node);
+        continue;
+      }
+      c.leg = Leg.walk;
+    }
+    if (c.leg === Leg.walk && c.board !== null) {
+      c.line = null;
+      c.board = null;
+      c.alight = null;
     }
     // Same goal as the re-projection used (citizenGoal): the curb for a car leg, else the door.
     if (c.leg === Leg.toCar && access(w, c.from)) {
@@ -601,6 +844,10 @@ export function citizenGoal(w: World, slot: number): number {
     const ao = access(w, c.from);
     if (ao) return ao.attach;
   }
+  if (c.leg === Leg.toStop || c.leg === Leg.wait) {
+    const node = stopNode(w, c.board);
+    if (node >= 0) return node;
+  }
   const dest = c.dest !== null && w.doc.buildings[c.dest] ? c.dest : c.home;
   return access(w, dest)?.door ?? -1;
 }
@@ -615,8 +862,8 @@ export function citizenStats(w: World): CitizenStats {
     atWork: k[CitState.atWork]! + k[CitState.atShop]!,
     walking: k[CitState.leaving]! + k[CitState.walking]! + k[CitState.entering]!,
     driving: k[CitState.driving]!,
-    waitingBus: 0,
-    riding: 0,
+    waitingBus: k[CitState.waiting]!,
+    riding: k[CitState.riding]!,
   };
 }
 

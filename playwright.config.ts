@@ -46,7 +46,8 @@ export default defineConfig({
           {
             command: 'npm run start -w @smartcity/server',
             port: SERVER_PORT,
-            env: { PORT: String(SERVER_PORT), DATA_DIR: 'test-results/server-data' },
+            // SC_AI_FAKE: the scripted AI assistant (no API key, no network) for the phase 3c flow.
+            env: { PORT: String(SERVER_PORT), DATA_DIR: 'test-results/server-data', SC_AI_FAKE: '1' },
             reuseExistingServer: false,
             timeout: 60_000,
           },

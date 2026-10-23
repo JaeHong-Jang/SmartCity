@@ -37,3 +37,14 @@ export class Rng {
     return weights.length - 1;
   }
 }
+
+/**
+ * Deterministic hash of (seed, epoch, key) → float in [0, 1). Lets independent decisions (one per lot)
+ * be reproduced from the document alone, without carrying RNG state between calls.
+ */
+export function hash01(seed: number, epoch: number, key: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < key.length; i++) h = Math.imul(h ^ key.charCodeAt(i), 0x01000193);
+  h ^= Math.imul(seed | 0, 0x9e3779b1) ^ Math.imul(epoch | 0, 0x85ebca6b);
+  return new Rng(h).next();
+}

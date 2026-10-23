@@ -30,7 +30,8 @@ export type Command =
   | { type: 'segment.setType'; id: SegmentId; roadTypeId: string }
   | { type: 'segment.setSchoolZone'; id: SegmentId; schoolZone: boolean }
   | { type: 'roadType.upsert'; roadType: RoadType }
-  | { type: 'building.place'; building: Building }
+  /** `ifClear`: also refused when it would overlap another building (AI proposals, growth: ADR 0009 §5). */
+  | { type: 'building.place'; building: Building; ifClear?: true }
   | { type: 'building.remove'; id: string }
   | { type: 'building.move'; id: string; pos: Vec2; rotation: number }
   /** With `expectedRev`, rejected unless the stored design still has that revision (0 = must be new). */
@@ -49,11 +50,12 @@ export type Command =
   | { type: 'busLine.remove'; id: string }
   | { type: 'closure.set'; closure: Closure }
   | { type: 'closure.remove'; segmentId: SegmentId }
-  | { type: 'parcel.upsert'; parcel: Parcel }
+  /** `ifAbsent`: refused when the id exists, so a stale proposal never overwrites someone's parcel. */
+  | { type: 'parcel.upsert'; parcel: Parcel; ifAbsent?: true }
   | { type: 'parcel.remove'; id: string }
   | { type: 'feature.upsert'; feature: RoadFeature }
   | { type: 'feature.remove'; id: string }
-  | { type: 'meta.update'; name?: string; trafficDensity?: number }
+  | { type: 'meta.update'; name?: string; trafficDensity?: number; growth?: boolean }
   /** Applied atomically: if any command fails, none take effect. Not nestable. */
   | { type: 'batch'; commands: Command[] };
 

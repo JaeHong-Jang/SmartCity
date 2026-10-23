@@ -13,9 +13,10 @@ import {
   type CityDoc,
   type Command,
 } from '@smartcity/shared';
-import { citizenGoal, citizenStats, refreshBuildingIndex, newCitizenWorld, processCitizenEvents, reconcileCitizens, retargetCitizens, updateCitizens } from './citizens/citizens.js';
+import { citizenGoal, citizenStats, refreshBuildingIndex, newCitizenWorld, processCitizenEvents, reconcileCitizens, retargetCitizens, syncTransit, updateCitizens } from './citizens/citizens.js';
 import { movePeds, newPedWorld, pedRequests, PedPool, processPedQueue, removePed, resetBands } from './citizens/peds.js';
 import { reprojectPeds, retargetWalkers, routeCrossers, walkerGoal } from './citizens/reproject.js';
+import { capacityOf, clearTransitCaches, newTransit } from './citizens/transit.js';
 import { compileNetwork, newCompileCache } from './network/compile.js';
 import { buildPedGraph, type PedGraph } from './network/pedGraph.js';
 import { buildNet } from './network/net.js';
@@ -70,7 +71,7 @@ export class Simulation {
   private derivedDirty = false;
   /** Snapshot scratch for laneFlow (internal, never handed out). */
   private readonly snapScratch = newSnapshotScratch();
-  /** Building layout signature: the pedestrian graph (doors) is rebuilt when it changes. */
+  /** Building layout and served bus stops: the pedestrian graph (doors, stop nodes) is rebuilt when it changes. */
   private buildingSig = '';
 
   constructor(doc: CityDoc, opts: SimOptions = {}) {
@@ -109,6 +110,7 @@ export class Simulation {
       ped: undefined as unknown as World['ped'],
       peds: new PedPool(),
       cz: newCitizenWorld(d.meta.seed, opts.citizens ?? true, opts.maxCitizens ?? 8000),
+      transit: newTransit(),
       lostDrivers: [],
       arrivedDrivers: [],
       stopped: new Int32Array(nLanes),
@@ -221,7 +223,11 @@ export class Simulation {
         heading: p.heading,
         state: v.bus && v.bus.dwell > 0 ? 'dwelling' : v.v < STOP_SPEED ? 'waiting' : 'driving',
       };
-      if (v.bus) view.busLineId = v.bus.lineId;
+      if (v.bus) {
+        view.busLineId = v.bus.lineId;
+        view.passengers = v.bus.riders.length + v.bus.alighting.length;
+        view.capacity = capacityOf(w.types.get(v.typeId));
+      }
       if (v.person >= 0) view.personId = w.cz.slots[v.person]?.id;
       return view;
     });
@@ -270,7 +276,10 @@ export class Simulation {
     return { x: p.x, z: p.z, heading: Math.atan2(t.z, t.x) };
   }
 
-  /** Buildings (position, rotation, type and design revision) as one comparable string. */
+  /**
+   * Buildings (position, rotation, type and design revision) and the bus stops of lines (the stops the
+   * pedestrian graph gives a node, ADR 0009 §2) as one comparable string.
+   */
   private buildingSignature(): string {
     const d = this.w.doc;
     let sig = '';
@@ -278,6 +287,12 @@ export class Simulation {
       const b = d.buildings[id]!;
       const t = d.buildingTypes[b.typeId];
       sig += `${id}:${b.typeId}:${t?.rev ?? 0}:${t ? t.parts.length : -1}:${b.pos.x},${b.pos.z},${b.rotation};`;
+    }
+    const served = new Set<string>();
+    for (const line of Object.values(d.busLines)) for (const s of line.stopIds) served.add(s);
+    for (const id of [...served].sort()) {
+      const s = d.busStops[id];
+      if (s) sig += `|${id}:${s.segmentId}:${s.t}:${s.dir}`;
     }
     return sig;
   }
@@ -333,6 +348,8 @@ export class Simulation {
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
     w.demand = buildDemand(w.doc, w.net);
     syncBusLines(w);
+    syncTransit(w);
+    clearTransitCaches(w);
     w.vehicles = w.vehicles.filter((v) => v.alive);
   }
 

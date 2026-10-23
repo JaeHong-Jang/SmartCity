@@ -451,3 +451,55 @@ test('phase 2b: street features, citizens walking out of homes, building studio'
 
   expect(errors).toEqual([]);
 });
+
+test('phase 3b·3c: zoning grows buildings, AI assistant proposes and applies', async ({ page }) => {
+  test.skip(process.env.E2E_SERVER !== '1', 'needs E2E_SERVER=1 (growth director and AI run on the server)');
+  test.setTimeout(240_000);
+  const errors = trackErrors(page);
+  await page.goto(`/?room=e2e-3b-${Date.now().toString(36)}`);
+  await expect(page.locator('.badge')).toContainText('온라인');
+  await page.waitForFunction(() => !!(window as unknown as { __smartcity?: CityHook }).__smartcity);
+  await lookAt(page, -40, 220, 220, 0, 20);
+  const doc = () => page.evaluate(() => (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState().doc as unknown as {
+    parcels: Record<string, { auto?: boolean }>;
+    buildings: Record<string, { auto?: boolean; typeId: string }>;
+  });
+
+  // One long road.
+  await page.locator('[data-tool="road"]').click();
+  await clickWorld(page, -180, 0);
+  await clickWorld(page, 180, 0);
+  await page.keyboard.press('Escape');
+  await expect.poll(async () => (await counts(page)).segments, { timeout: 5000 }).toBe(1);
+
+  // Zoning tool (9): paint residential along the south side, 2 cells deep.
+  await page.keyboard.press('9');
+  await page.locator('[data-zoning-zone="residential"]').click();
+  await page.locator('[data-zoning-depth="2"]').click();
+  await dragWorld(page, [-150, 14], [150, 14], { screenshot: 'test-results/phase3b-zoning-drag.png' });
+  await expect.poll(async () => Object.values((await doc()).parcels).filter((p) => p.auto).length, { timeout: 5000 }).toBeGreaterThan(4);
+
+  // The server's growth director builds on the lots (every 5 s while someone is connected).
+  await expect.poll(async () => Object.values((await doc()).buildings).filter((b) => b.auto).length, { timeout: 60_000, intervals: [2000] }).toBeGreaterThan(0);
+  await expect(page.locator('[data-growth-hud]')).toBeVisible();
+  await page.screenshot({ path: 'test-results/phase3b-growth.png' });
+
+  // AI assistant (scripted model on the server): ask, preview, apply.
+  await page.keyboard.press('1');
+  await page.locator('[role="tab"]', { hasText: 'AI' }).click();
+  await expect(page.locator('[data-ai-panel]')).toBeVisible({ timeout: 5000 });
+  await page.locator('textarea[aria-label="AI에게 요청"]').fill('도로 북쪽에 카페 지어줘');
+  await page.locator('[data-ai-send]').click();
+  await expect(page.locator('[data-ai-proposal]')).toBeVisible({ timeout: 20_000 });
+  await page.screenshot({ path: 'test-results/phase3c-ai-proposal.png' });
+  // Nothing is built before approval.
+  const proposed = await page.evaluate(() => {
+    const s = (window as unknown as { __smartcity: CityHook }).__smartcity.store.getState() as unknown as { doc: { buildings: Record<string, unknown> } };
+    return Object.keys(s.doc.buildings).filter((id) => id.startsWith('ai-')).length;
+  });
+  expect(proposed).toBe(0);
+  await page.locator('[data-ai-apply]').click();
+  await expect.poll(async () => Object.keys((await doc()).buildings).filter((id) => id.startsWith('ai-')).length, { timeout: 5000 }).toBeGreaterThan(0);
+  await page.screenshot({ path: 'test-results/phase3c-ai-applied.png' });
+  expect(errors).toEqual([]);
+});

@@ -11,16 +11,22 @@ export const D_BUS_LINES = 16;
 export const D_PARCELS = 32;
 export const D_ALL = D_ROADS | D_BUILDINGS | D_VEHICLE_TYPES | D_BUS_STOPS | D_BUS_LINES | D_PARCELS;
 
+/**
+ * Road edits that also remove automatic lots and their grown buildings in the same transaction, or remap
+ * lot frontages (shared `pruneAutoLots`, ADR 0009 §4).
+ */
+const D_ROAD_PRUNE = D_ROADS | D_BUILDINGS | D_PARCELS;
+
 /** `batch` is resolved from its children. `meta.update` changes nothing drawn. */
 const DOMAINS: Record<Exclude<CommandType, 'batch'>, number> = {
   'node.add': D_ROADS,
-  'node.move': D_ROADS,
-  'segment.add': D_ROADS,
+  'node.move': D_ROAD_PRUNE,
+  'segment.add': D_ROAD_PRUNE,
   'segment.remove': D_ROADS,
-  'segment.split': D_ROADS,
-  'segment.setType': D_ROADS,
+  'segment.split': D_ROAD_PRUNE,
+  'segment.setType': D_ROAD_PRUNE,
   'segment.setSchoolZone': D_ROADS,
-  'roadType.upsert': D_ROADS,
+  'roadType.upsert': D_ROAD_PRUNE,
   'closure.set': D_ROADS,
   'closure.remove': D_ROADS,
   'intersection.set': D_ROADS,
@@ -84,9 +90,10 @@ export function touchesSelection(cmd: Command, sel: { kind: string; id: string }
     case 'busStop':
       return (d & D_ROADS) !== 0 || ((d & D_BUS_STOPS) !== 0 && directId(cmd) === sel.id);
     case 'building':
-      return cmd.type === 'buildingType.upsert' || cmd.type === 'buildingType.remove' || ((d & D_BUILDINGS) !== 0 && directId(cmd) === sel.id);
+      // A road edit may remove the selected (grown) building: d === D_ROAD_PRUNE.
+      return cmd.type === 'buildingType.upsert' || cmd.type === 'buildingType.remove' || d === D_ROAD_PRUNE || ((d & D_BUILDINGS) !== 0 && directId(cmd) === sel.id);
     case 'parcel':
-      return (d & D_PARCELS) !== 0 && directId(cmd) === sel.id;
+      return d === D_ROAD_PRUNE || ((d & D_PARCELS) !== 0 && directId(cmd) === sel.id);
     default:
       return true;
   }

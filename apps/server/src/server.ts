@@ -9,6 +9,7 @@ import { createHttpHandler } from './http.js';
 import { Client, MAX_CLIENTS_PER_ROOM } from './room.js';
 import type { Room } from './room.js';
 import { RoomManager } from './roomManager.js';
+import { AiService } from './ai/service.js';
 
 export interface ServerOptions {
   port: number;
@@ -19,6 +20,8 @@ export interface ServerOptions {
   unloadMs?: number;
   /** Static web root (default apps/web/dist next to this package). */
   webDist?: string;
+  /** AI building assistant (default: from the environment, disabled without a key). */
+  ai?: AiService;
 }
 
 const MAX_CONSECUTIVE_BAD = 20;
@@ -27,6 +30,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const webDist = opts.webDist ?? fileURLToPath(new URL('../../web/dist', import.meta.url));
   const rooms = new RoomManager(opts.dataDir, opts.unloadMs);
+  const ai = opts.ai ?? AiService.fromEnv();
   const http = createServer(createHttpHandler(() => rooms.stats(), webDist));
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
 
@@ -41,14 +45,14 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws));
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, req.socket.remoteAddress ?? 'unknown'));
   });
 
   const send = (ws: WebSocket, msg: ServerMessage) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
   };
 
-  function onConnection(ws: WebSocket): void {
+  function onConnection(ws: WebSocket, ip: string): void {
     let room: Room | null = null;
     let client: Client | null = null;
     let bad = 0;
@@ -93,6 +97,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
           room = r;
           client = new Client(ws, msg.name);
           r.join(client);
+          send(ws, ai.status());
           return;
         }
 
@@ -104,6 +109,14 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
             return;
           case 'presence':
             room.presence(client, msg.presence);
+            return;
+          case 'ai.ask': {
+            const c = client;
+            ai.ask(room, { id: c.id, send: (m) => send(ws, m) }, ip, msg.reqId, msg.text, msg.focus);
+            return;
+          }
+          case 'ai.cancel':
+            ai.cancel(client.id, msg.reqId);
             return;
           case 'ping':
             send(ws, { t: 'pong', at: msg.at });
@@ -119,6 +132,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
     ws.on('close', () => {
       clearTimeout(helloTimer);
       if (room && client) {
+        ai.drop(client.id);
         room.leave(client);
         rooms.scheduleUnload(room);
       }

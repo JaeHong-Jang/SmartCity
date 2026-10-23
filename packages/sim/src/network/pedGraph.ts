@@ -1,6 +1,7 @@
 // Pedestrian graph (ADR 0008 §4, Sol 06 §2): derived from the compiled road network and the buildings,
 // separate from the lane graph. Edges: sidewalks (sidewalk centerline = carriageway edge + half the
-// sidewalk), corners around junctions (miter / bevel / arc, never through the junction center),
+// sidewalk), corners around junctions (miter / bevel / arc, never through the junction center), bus stop
+// nodes (ADR 0009 §2: stops of a line split the sidewalk of their travel side),
 // crossings (one per RoadGraph crossing) and building access edges (door on the footprint face nearest the
 // sidewalk → sidewalk, never across a carriageway). Every edge is walkable both ways. Pure and
 // deterministic: segments, nodes, crossings and buildings are visited in sorted-id order.
@@ -81,6 +82,18 @@ export interface PedGraph {
   box: Float64Array;
   /** Connected component of each node (walkable both ways, access edges included). */
   comp: Int32Array;
+  /**
+   * Bus stops served for passengers (ADR 0009 §2): stops of at least one line with a sidewalk on their
+   * travel side, sorted ids. Per stop: its sidewalk node, the bus travel direction there (stopTx/Tz) and the
+   * unit normal from the carriageway towards the sidewalk (stopNx/Nz).
+   */
+  stopIds: string[];
+  stopIndex: Map<string, number>;
+  stopNode: Int32Array;
+  stopTx: Float64Array;
+  stopTz: Float64Array;
+  stopNx: Float64Array;
+  stopNz: Float64Array;
   /** Scratch stamps for neighbour searches (never part of the graph's meaning). */
   mark: Uint32Array;
 }
@@ -255,6 +268,23 @@ export function buildPedGraph(doc: CityDoc, g: RoadGraph): PedGraph {
     pending.push(found);
   }
 
+  // ---- bus stops: sidewalk node at the stop's t on its travel side (stops of a line only) ----
+  const served = new Set<string>();
+  for (const id of Object.keys(doc.busLines).sort()) for (const sid of doc.busLines[id]!.stopIds) served.add(sid);
+  const stopPending: { id: string; run: Run; s: number; t: Vec2 }[] = [];
+  for (const id of [...served].sort()) {
+    const st = doc.busStops[id];
+    const seg = st ? g.segments.get(st.segmentId) : undefined;
+    if (!st || !seg) continue;
+    const run = runOf.get(`${seg.id}|${st.dir === 'forward' ? 1 : -1}`);
+    if (!run) continue;
+    const cum = cumOf.get(seg.id)!;
+    const s = Math.max(run.s0, Math.min(run.s1, st.t * seg.length));
+    const tan = tangentAtLength(seg.centerline, cum, Math.max(1e-6, Math.min(seg.length, s)));
+    run.splits.push(s);
+    stopPending.push({ id, run, s, t: st.dir === 'forward' ? tan : scale(tan, -1) });
+  }
+
   // ---- run nodes and sidewalk edges ----
   for (const r of runs) {
     const ss = [r.s0, ...r.splits.map((s) => Math.max(r.s0, Math.min(r.s1, s))), r.s1].sort((p, q) => p - q);
@@ -354,6 +384,21 @@ export function buildPedGraph(doc: CityDoc, g: RoadGraph): PedGraph {
     }
     crossingEdge[cr.index] = addEdge(a, b, [{ x: nx[a]!, z: nz[a]! }, { x: nx[b]!, z: nz[b]! }], PedEdgeKind.crossing, cr.index);
   }
+
+  const stopIds = stopPending.map((p) => p.id);
+  const stopNode = new Int32Array(stopIds.length);
+  const stopTx = new Float64Array(stopIds.length);
+  const stopTz = new Float64Array(stopIds.length);
+  const stopNx = new Float64Array(stopIds.length);
+  const stopNz = new Float64Array(stopIds.length);
+  stopPending.forEach((p, k) => {
+    stopNode[k] = nodeAt(p.run, p.s);
+    const n = rightNormal(p.t);
+    stopTx[k] = p.t.x;
+    stopTz[k] = p.t.z;
+    stopNx[k] = n.x;
+    stopNz[k] = n.z;
+  });
 
   // ---- building access edges ----
   const access: (BuildingAccess | null)[] = pending.map((f) => {
@@ -470,5 +515,12 @@ export function buildPedGraph(doc: CityDoc, g: RoadGraph): PedGraph {
     box,
     comp,
     mark: new Uint32Array(nEdges),
+    stopIds,
+    stopIndex: new Map(stopIds.map((id, k) => [id, k])),
+    stopNode,
+    stopTx,
+    stopTz,
+    stopNx,
+    stopNz,
   };
 }

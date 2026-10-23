@@ -24,6 +24,7 @@ import { removeCommandFor } from './bulldozeTool';
 import { GHOST_ID, placeAt, placementGuide, placementStatus, STATUS_COLORS, type Placement, type PlacementStatus } from './buildingTool';
 import { DragGesture } from './gesture';
 import { buildingGizmo, highlightPreview } from './highlight';
+import { RemovalPreview, removalLines } from './removalPreview';
 import { pickAt, type PickIndex, type PickResult } from './picking';
 import { snapPoint } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
@@ -54,6 +55,7 @@ export function ghostPolyline(polys: readonly Vec2[][]): Vec2[] {
 export class SelectTool implements Tool {
   readonly id = 'select' as const;
   private hover: PickResult | null = null;
+  private readonly removal = new RemovalPreview();
   private gesture = new DragGesture();
   private downHit: DownHit | null = null;
   private downPos: Vec2 = { x: 0, z: 0 };
@@ -114,6 +116,7 @@ export class SelectTool implements Tool {
     const hit = pickAt(this.index(), e.pos, { parcels: true });
     if (hit?.id !== this.hover?.id || hit?.kind !== this.hover?.kind) {
       this.hover = hit;
+      this.setHoverParcel(hit?.kind === 'parcel' ? hit.id : null);
       this.ctx.changed();
     }
     const hint = this.selectedBuilding()
@@ -235,6 +238,7 @@ export class SelectTool implements Tool {
   }
 
   private finishDrag(): void {
+    this.removal.reset();
     const d = this.drag;
     const doc = this.doc;
     if (!d) return;
@@ -320,9 +324,14 @@ export class SelectTool implements Tool {
     return true;
   }
 
+  private setHoverParcel(id: string | null): void {
+    if (this.ctx.store.getState().hoverParcelId !== id) this.ctx.store.set({ hoverParcelId: id });
+  }
+
   onLeave(): void {
     if (this.gesture.phase !== 'idle') return;
     this.hover = null;
+    this.setHoverParcel(null);
     this.ctx.changed();
   }
 
@@ -371,9 +380,11 @@ export class SelectTool implements Tool {
   }
 
   cancel(): void {
+    this.removal.reset();
     this.cancelDrag();
     this.commitRotation();
     this.hover = null;
+    this.setHoverParcel(null);
     this.ctx.changed();
   }
 
@@ -414,6 +425,9 @@ export class SelectTool implements Tool {
         if (c) out.lines.push({ pts: c, width: rt ? roadHalfWidth(rt) * 2 : 8, color });
       }
       out.points.push({ pos: d.pos, radius: 2.4, color });
+      // Automatic parcels and buildings this move would remove.
+      const cmd: Command | null = d.error ? null : { type: 'node.move', id: d.id, pos: d.pos };
+      out.lines.push(...removalLines(doc, this.removal.get(doc, this.ctx.store.getState().docVersion, cmd, () => this.ctx.changed())));
       return out;
     }
     if (d?.kind === 'vertex') {

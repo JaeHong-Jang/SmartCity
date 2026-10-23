@@ -63,7 +63,7 @@ export interface RoadNetworkGeom {
 /** Signature of a node's doc-side control settings. */
 export function controlSig(doc: CityDoc, nodeId: string): string {
   const c = doc.intersections[nodeId];
-  return c ? `${c.kind}:${c.crosswalkLegs ? c.crosswalkLegs.join(',') : '*'}` : 'auto';
+  return c ? `${c.kind}:${c.crosswalkLegs ? c.crosswalkLegs.join(',') : '*'}${c.scramble ? ':scramble' : ''}` : 'auto';
 }
 
 /** Speed bump positions (arc length from node a) taken from the doc's road features. */

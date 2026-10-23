@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { snapshotTransferables } from './protocol';
 
 describe('snapshotTransferables', () => {
-  it('lists every distinct buffer, including pedestrians, crossings and occupancy', () => {
+  it('lists every distinct buffer, including pedestrians, crossings, occupancy and bus buffers', () => {
     const b = {
       vehicles: new Float32Array(6),
       signals: new Float32Array(4),
@@ -11,10 +11,12 @@ describe('snapshotTransferables', () => {
       pedestrianIds: new Uint32Array(2),
       crossings: new Float32Array(3),
       occupancy: new Float32Array(5),
+      busLoad: new Uint16Array(3),
+      stopWaiting: new Uint16Array(2),
     };
     const list = snapshotTransferables(b);
-    expect(list).toHaveLength(7);
-    expect(new Set(list).size).toBe(7);
+    expect(list).toHaveLength(9);
+    expect(new Set(list).size).toBe(9);
   });
 
   it('ignores missing and empty arrays (older simulation builds)', () => {

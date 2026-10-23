@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.2.0",
     "@smartcity/shared": "0.1.0",
     "ws": "^8.22.0"
   },

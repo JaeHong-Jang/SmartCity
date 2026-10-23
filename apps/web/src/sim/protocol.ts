@@ -21,7 +21,7 @@ export const TICK_MS = 1000 / TICK_HZ;
 /** Distinct ArrayBuffers behind a snapshot's arrays, for postMessage transfer lists. */
 export function snapshotTransferables(b: SnapshotBuffers): ArrayBuffer[] {
   const out: ArrayBuffer[] = [];
-  for (const a of [b.vehicles, b.signals, b.laneFlow, b.pedestrians, b.pedestrianIds, b.crossings, b.occupancy]) {
+  for (const a of [b.vehicles, b.signals, b.laneFlow, b.pedestrians, b.pedestrianIds, b.crossings, b.occupancy, b.busLoad, b.stopWaiting]) {
     if (a && a.buffer instanceof ArrayBuffer && a.buffer.byteLength > 0 && !out.includes(a.buffer)) out.push(a.buffer);
   }
   return out;

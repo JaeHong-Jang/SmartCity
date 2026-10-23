@@ -1,13 +1,14 @@
-// Bus lines: `buses` vehicles per line spread evenly over the stops, looping stop → stop with a
-// 10 s dwell. Missing buses (removed by edits) are respawned at their slot's stop.
+// Bus lines: `buses` vehicles per line spread evenly over the stops, looping stop → stop with a dwell
+// of 10 s plus boarding/alighting time (ADR 0009 §2). Missing buses (removed by edits) are respawned at
+// their slot's stop.
 
 import type { BusLine } from '@smartcity/shared';
+import { busArrive, busDepart } from '../citizens/citizens.js';
 import { groupKey } from '../network/net.js';
 import { laneSAtT } from './demand.js';
 import { createVehicle, routeVehicle } from './ops.js';
 import { canPlace, despawn, type Goal, type Vehicle, type World } from './world.js';
 
-export const DWELL_SECONDS = 10;
 const RETRY_SECONDS = 5;
 
 export interface BusLineState {
@@ -103,7 +104,7 @@ export function maintainBuses(w: World): void {
       const L = w.net.len[lane]!;
       const s = Math.max(Math.min(type.length, L), laneSAtT(w.net, lane, here.t));
       const v = canPlace(w, lane, s, type.length, 1)
-        ? createVehicle(w, line.vehicleTypeId, lane, s, goal, { lineId: line.id, slot: k, stopIdx: (at + 1) % n, dwell: 0 })
+        ? createVehicle(w, line.vehicleTypeId, lane, s, goal, { lineId: line.id, slot: k, stopIdx: (at + 1) % n, dwell: 0, riders: [], alighting: [], atStop: null })
         : null;
       if (v) st.slots[k] = v;
       else failed = true;
@@ -112,12 +113,16 @@ export function maintainBuses(w: World): void {
   }
 }
 
-/** Per tick, per bus: start a dwell on reaching the stop; when it ends, head for the next stop. */
+/**
+ * Per tick, per bus (vehicle id order): on reaching the stop, passengers get off and on and the dwell
+ * starts; when it ends, the alighting passengers step onto the sidewalk and the bus heads for the next stop.
+ */
 export function updateBus(w: World, v: Vehicle): void {
   const bus = v.bus!;
   if (bus.dwell > 0) {
     v.v = 0;
     if (--bus.dwell > 0) return;
+    busDepart(w, v);
     const line = w.doc.busLines[bus.lineId];
     const goal = line ? stopGoal(w, line, (bus.stopIdx + 1) % line.stopIds.length) : null;
     if (!line || !goal) return;
@@ -130,7 +135,7 @@ export function updateBus(w: World, v: Vehicle): void {
     return;
   }
   if (!v.queued && v.ri === v.route.length - 1 && v.edge < w.net.nLanes && v.s >= v.destS - 1) {
-    bus.dwell = Math.round(DWELL_SECONDS * w.tickRate);
+    bus.dwell = Math.max(1, Math.round(busArrive(w, v) * w.tickRate));
     v.v = 0;
   }
 }

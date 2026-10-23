@@ -14,6 +14,14 @@ const IconStreet = () => (
   </svg>
 );
 
+const IconZoning = () => (
+  <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M3 17h18" />
+    <rect x={4} y={6} width={6} height={8} />
+    <rect x={14} y={6} width={6} height={8} />
+  </svg>
+);
+
 const STREET_MODES: { id: StreetMode; label: string }[] = [
   { id: 'crosswalk', label: '횡단보도' },
   { id: 'signalCrosswalk', label: '신호 횡단보도' },
@@ -31,6 +39,7 @@ const TOOL_ICONS: Record<ToolId, ReactNode> = {
   closure: <IconClosure />,
   parcel: <IconParcel />,
   street: <IconStreet />,
+  zoning: <IconZoning />,
 };
 
 export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[] = TOOL_META.map((t) => ({ ...t, icon: TOOL_ICONS[t.id] }));
@@ -128,6 +137,33 @@ export function ToolOptions() {
           </button>
         </div>
         <span className="muted">{opts.parcelPolygon ? '꼭짓점 클릭 · Enter/첫 점 클릭으로 닫기' : '드래그로 사각형'} · 규제값은 인스펙터에서 수정</span>
+      </section>
+    );
+  }
+  if (tool === 'zoning') {
+    return (
+      <section className="panel tool-options" aria-label="조닝 도구 옵션">
+        <h3>조닝 (도로를 따라 자동 성장 필지)</h3>
+        <div className="list">
+          {(['residential', 'commercial', 'office'] as const).map((z) => (
+            <button key={z} data-zoning-zone={z} className={!opts.zoningErase && opts.zoningZone === z ? 'active' : ''} onClick={() => store.setToolOptions({ zoningZone: z, zoningErase: false })}>
+              <span className="swatch" style={{ background: ZONE_COLORS[z] }} />
+              <span style={{ flex: 1 }}>{ZONE_LABELS[z]}</span>
+            </button>
+          ))}
+          <button data-zoning-erase className={opts.zoningErase ? 'active' : ''} onClick={() => store.setToolOptions({ zoningErase: !opts.zoningErase })}>
+            <span style={{ flex: 1 }}>지우기</span>
+          </button>
+        </div>
+        <div className="row wrap">
+          <label>깊이</label>
+          {([1, 2, 3, 4] as const).map((d) => (
+            <button key={d} data-zoning-depth={d} className={opts.zoningDepth === d ? 'active' : ''} onClick={() => store.setToolOptions({ zoningDepth: d })} title={`${d * 8}m`}>
+              {d}칸
+            </button>
+          ))}
+        </div>
+        <span className="muted">도로 옆에서 드래그 · [ ] 깊이(8m/칸) · 지우기는 건물이 없는 자동 필지만 · Esc 취소</span>
       </section>
     );
   }

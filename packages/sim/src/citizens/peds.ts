@@ -14,6 +14,8 @@ import type { World } from '../traffic/world.js';
 export const PED_SPACING = 0.7;
 /** Lateral offset of a band from the edge centerline (to the right of travel). */
 export const BAND_OFFSET = 0.65;
+/** Bus stop queue placement (ADR 0009 §2): spacing along the sidewalk and between the two columns. */
+const QUEUE_SPACING = 0.65;
 /** A pedestrian asks for a crossing this far before the curb. */
 const REQUEST_DIST = 2;
 export const DOOR_SECONDS = 1;
@@ -519,6 +521,17 @@ export function writePedPose(w: World, i: number, out: Float32Array, o: number):
   const e = p.edge[i]!;
   if (e < 0) {
     const n = p.node[i]!;
+    // Queued at a bus stop (ADR 0009 §2): two columns behind the stop, 0.65 m apart, facing the road.
+    const k = p.state[i] === PedState.busStop && p.owner[i]! >= 0 ? w.ped.pg.stopIndex.get(w.cz.slots[p.owner[i]!]?.board ?? '') : undefined;
+    if (k !== undefined && pg.stopNode[k] === n) {
+      const rank = w.transit.rank[i] ?? 0;
+      const back = (rank >> 1) * QUEUE_SPACING;
+      const lat = (rank & 1 ? 0.5 : -0.5) * QUEUE_SPACING;
+      out[o] = pg.x[n]! - pg.stopTx[k]! * back + pg.stopNx[k]! * lat;
+      out[o + 1] = pg.z[n]! - pg.stopTz[k]! * back + pg.stopNz[k]! * lat;
+      out[o + 2] = Math.atan2(-pg.stopNz[k]!, -pg.stopNx[k]!);
+      return;
+    }
     out[o] = pg.x[n]!;
     out[o + 1] = pg.z[n]!;
     out[o + 2] = p.heading[i]!;

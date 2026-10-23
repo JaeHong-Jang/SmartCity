@@ -6,6 +6,7 @@ import {
   cloneJson,
   createEmptyDoc,
   DOC_VERSION,
+  growthTick,
   normalizeDoc,
   type CityDoc,
   type ClientMessage,
@@ -24,6 +25,8 @@ interface Saved {
 }
 
 const SAVE_DELAY_MS = 500;
+/** Same cadence as the server's GrowthDirector. */
+const GROWTH_INTERVAL_MS = 5000;
 
 export const localStorageKey = (room: string): string => `smartcity:local:${room}`;
 
@@ -39,6 +42,9 @@ export class LocalTransport implements Transport {
   private messages = new Emitter<ServerMessage>();
   private statuses = new Emitter<TransportStatus>();
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private growthTimer: ReturnType<typeof setInterval> | null = null;
+  /** In memory only, like the server's: growth choices after a reload may differ, results are in the doc. */
+  private growthEpoch = 0;
 
   constructor(
     private readonly room: string,
@@ -67,6 +73,7 @@ export class LocalTransport implements Transport {
   }
 
   connect(): void {
+    this.growthTimer ??= setInterval(() => this.growthStep(), GROWTH_INTERVAL_MS);
     this.statuses.emit('open');
     this.emit({
       t: 'welcome',
@@ -101,6 +108,16 @@ export class LocalTransport implements Transport {
     }
   }
 
+  /** Automatic growth: a system command applied and announced like any other (`by: 'system'`, no ref). */
+  private growthStep(): void {
+    if (this.doc.meta.growth === false) return;
+    const cmd = growthTick(this.doc, this.growthEpoch++);
+    if (!cmd || !applyCommand(this.doc, cmd).ok) return;
+    this.seq++;
+    this.emit({ t: 'applied', seq: this.seq, cmd, by: 'system' });
+    this.scheduleSave();
+  }
+
   private scheduleSave(): void {
     if (!this.storage || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
@@ -130,6 +147,10 @@ export class LocalTransport implements Transport {
   }
 
   close(): void {
+    if (this.growthTimer) {
+      clearInterval(this.growthTimer);
+      this.growthTimer = null;
+    }
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;

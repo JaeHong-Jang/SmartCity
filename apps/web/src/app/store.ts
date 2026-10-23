@@ -15,15 +15,18 @@ import {
   type Vec2,
 } from '@smartcity/shared';
 import type { SimStats } from '@smartcity/sim';
+import { initialAi, reduceAi, type AiEvent, type AiState } from './aiChat';
+import type { ProposalStatus } from './proposal';
+import type { TransitSummary } from './transit';
 
-export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel' | 'street';
+export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel' | 'street' | 'zoning';
 /** Traffic facility tool sub-modes (교통 시설). */
 export type StreetMode = 'crosswalk' | 'signalCrosswalk' | 'speedBump' | 'schoolZone' | 'remove';
 /** Snap resolution in meters; 0 = off. Personal UI state, never stored in the doc. */
 export type SnapStep = 0 | 1 | 2 | 4 | 8;
 export type SimSpeed = 0 | 1 | 2 | 4;
 export type Connection = 'connecting' | 'online' | 'reconnecting' | 'offline';
-export type PanelId = 'inspector' | 'roadTypes' | 'buildings' | 'vehicles' | 'busLines';
+export type PanelId = 'inspector' | 'roadTypes' | 'buildings' | 'vehicles' | 'busLines' | 'ai';
 
 export type Selection =
   | { kind: 'node'; id: string }
@@ -44,6 +47,10 @@ export interface ToolOptions {
   /** Parcel tool: click a polygon instead of dragging a rectangle (P toggles). */
   parcelPolygon: boolean;
   streetMode: StreetMode;
+  /** Zoning tool: the use painted along roads, lot depth in 8 m cells, and erase mode. */
+  zoningZone: 'residential' | 'commercial' | 'office';
+  zoningDepth: 1 | 2 | 3 | 4;
+  zoningErase: boolean;
 }
 
 export interface PendingEntry {
@@ -112,6 +119,14 @@ export interface ClientState {
   simStatus: 'starting' | 'ready' | 'error';
   simError: string | null;
   simStats: SimStats | null;
+  /** Bus passengers and stop queues from the latest snapshot (null until the sim runs). */
+  transit: TransitSummary | null;
+  /** Parcel under the select tool's cursor (its label shows even for automatic lots). */
+  hoverParcelId: string | null;
+  /** AI building assistant: chat, running request and the proposal being reviewed (ADR 0009 §5). */
+  ai: AiState;
+  /** Dry-run result of the shown proposal against the current doc (null = no proposal). */
+  proposalStatus: ProposalStatus | null;
   overlays: Overlays;
   panel: PanelId | null;
   render: RenderStats;
@@ -151,6 +166,11 @@ const ERROR_KO: [RegExp, string][] = [
   [/unknown road feature/, '시설이 이미 바뀌었습니다. 다시 시도하세요'],
   [/crosswalk leg is not connected/, '이 교차로에 연결되지 않은 도로입니다'],
   [/conflict: the design was changed/, '다른 사용자가 이 설계를 먼저 바꿨습니다'],
+  [/overlaps another building/, '다른 건물과 겹칩니다'],
+  [/parcel exists/, '같은 이름의 필지가 이미 있습니다'],
+  [/building exists/, '같은 이름의 건물이 이미 있습니다'],
+  [/a pedestrian-only phase needs/, '보행 전용 신호 조건(신호 교차로, 3~4갈래, 횡단보도 2곳 이상)을 만족하지 않습니다'],
+  [/unknown frontage segment/, '필지가 접한 도로가 없습니다'],
 ];
 
 function withResult(results: Record<number, string>, ref: number, outcome: string): Record<number, string> {
@@ -179,7 +199,7 @@ export function initialState(room: string, name: string): ClientState {
     connection: 'connecting',
     ready: false,
     tool: 'select',
-    toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk' },
+    toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
     toolHint: '',
     selection: null,
     phaseHighlight: null,
@@ -193,6 +213,10 @@ export function initialState(room: string, name: string): ClientState {
     simStatus: 'starting',
     simError: null,
     simStats: null,
+    transit: null,
+    hoverParcelId: null,
+    ai: initialAi(),
+    proposalStatus: null,
     overlays: { flow: false, shadows: true, violations: true },
     panel: 'inspector',
     render: { fps: 0, drawCalls: 0, triangles: 0 },
@@ -332,9 +356,19 @@ export class ClientStore {
       case 'error':
         this.toast(`서버 오류: ${msg.error}`, 'error');
         return;
+      case 'ai.status':
+      case 'ai.progress':
+      case 'ai.proposal':
+      case 'ai.error':
+        this.aiEvent({ kind: 'server', msg });
+        return;
       case 'pong':
         return;
     }
+  }
+
+  aiEvent(ev: AiEvent): void {
+    this.set({ ai: reduceAi(this.state.ai, ev) });
   }
 }
 

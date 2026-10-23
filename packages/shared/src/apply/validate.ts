@@ -125,6 +125,7 @@ export function validateBuildingType(bt: BuildingType): void {
   checkId(bt.id, 'building type');
   checkName(bt.name, 'building type');
   if (!ZONES.includes(bt.zone)) fail('invalid zone');
+  if (bt.growth !== undefined && bt.growth?.level !== 1) fail('invalid growth level');
   if (!Array.isArray(bt.parts) || bt.parts.length < 1 || bt.parts.length > LIMITS.buildingParts) fail('invalid building parts');
   for (const p of bt.parts) {
     checkNum(p.offset?.x, -200, 200, 'part.offset.x');
@@ -215,8 +216,17 @@ export function validateParcel(doc: CityDoc, pc: Parcel): void {
   checkNum(r.far, 0, 20, 'far');
   checkNum(r.maxHeight, 0, 1000, 'maxHeight');
   checkNum(r.setback, 0, 50, 'setback');
+  if (pc.auto !== undefined && pc.auto !== true) fail('invalid auto flag');
+  if (pc.frontage !== undefined) {
+    if (!has(doc.segments, pc.frontage?.segmentId)) fail('unknown frontage segment');
+    if (pc.frontage.side !== 'left' && pc.frontage.side !== 'right') fail('invalid frontage side');
+  }
+  if (!policy.enforce) return;
+  // Bounding boxes first: zoning lays out hundreds of lots per command (ADR 0009 §1).
+  const box = bounds(pc.polygon);
   for (const other of Object.values(doc.parcels)) {
-    if (policy.enforce && other.id !== pc.id && polygonsOverlap(other.polygon, pc.polygon)) fail('parcels overlap');
+    if (other.id === pc.id || !boundsOverlap(box, bounds(other.polygon), 1e-6)) continue;
+    if (polygonsOverlap(other.polygon, pc.polygon)) fail('parcels overlap');
   }
 }
 
@@ -280,6 +290,7 @@ export function validateVehicleType(vt: VehicleType): void {
   checkNum(vt.comfortDecel, 0.5, 8, 'comfortDecel');
   checkColor(vt.color, 'vehicle');
   checkNum(vt.spawnWeight, 0, 100, 'spawnWeight');
+  if (vt.capacity !== undefined) checkInt(vt.capacity, 1, 200, 'capacity');
   if (!Array.isArray(vt.parts) || vt.parts.length < 1 || vt.parts.length > LIMITS.vehicleParts) fail('invalid vehicle parts');
   for (const p of vt.parts) {
     checkNum(p.offset?.x, -20, 20, 'part.offset.x');
@@ -304,6 +315,16 @@ export function validateControl(doc: CityDoc, c: IntersectionControl): void {
   checkNum(c.yellow, 0, 10, 'yellow');
   checkNum(c.allRed, 0, 10, 'allRed');
   checkNum(c.offset, 0, 600, 'offset');
+  if (c.scramble !== undefined) {
+    if (typeof c.scramble !== 'boolean') fail('invalid scramble flag');
+    if (c.scramble) {
+      if (c.kind !== 'signal') fail('a pedestrian-only phase needs a signal');
+      const legs = segmentsAtNode(doc, c.nodeId);
+      if (legs.length < 3 || legs.length > 4) fail('a pedestrian-only phase needs a junction of 3 or 4 legs');
+      const walked = legs.filter((s) => doc.roadTypes[s.roadTypeId]?.sidewalk && (!c.crosswalkLegs || c.crosswalkLegs.includes(s.id)));
+      if (walked.length < 2) fail('a pedestrian-only phase needs crosswalks on at least 2 legs');
+    }
+  }
   if (c.phases !== undefined) {
     if (!Array.isArray(c.phases) || c.phases.length < 1 || c.phases.length > 8) fail('invalid phases');
     const atNode = new Set(segmentsAtNode(doc, c.nodeId).map((s) => s.id));
@@ -355,6 +376,7 @@ export function cleanVehicleType(vt: VehicleType): VehicleType {
       height: p.height,
       color: p.color,
     })),
+    ...(vt.capacity !== undefined ? { capacity: vt.capacity } : {}),
   };
 }
 
@@ -362,6 +384,7 @@ export function cleanControl(c: IntersectionControl): IntersectionControl {
   const out: IntersectionControl = { nodeId: c.nodeId, kind: c.kind, yellow: c.yellow, allRed: c.allRed, offset: c.offset };
   if (c.phases) out.phases = c.phases.map((p) => ({ approaches: p.approaches.slice(), green: p.green }));
   if (c.crosswalkLegs !== undefined) out.crosswalkLegs = [...new Set(c.crosswalkLegs)].sort();
+  if (c.scramble) out.scramble = true;
   return out;
 }
 

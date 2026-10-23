@@ -198,6 +198,11 @@ export interface SimSnapshot {
   /** People inside each building, in `buildingIds` order (sorted ids). */
   occupancy: Float32Array;
   buildingIds: string[];
+  /** Passengers aboard each vehicle, in `vehicles` order (0 for non-buses). ADR 0009 §2. */
+  busLoad: Uint16Array;
+  /** Citizens waiting at each bus stop, in `busStopIds` order (sorted ids). */
+  stopWaiting: Uint16Array;
+  busStopIds: string[];
   stats: SimStats;
 }
 
@@ -210,6 +215,8 @@ export interface SnapshotBuffers {
   pedestrianIds?: Uint32Array;
   crossings?: Float32Array;
   occupancy?: Float32Array;
+  busLoad?: Uint16Array;
+  stopWaiting?: Uint16Array;
 }
 
 export interface SimOptions {
@@ -241,6 +248,9 @@ export interface VehicleView {
   /** Citizen driving this car (same id as in SimSnapshot.pedestrianIds). */
   personId?: number;
   state: 'driving' | 'waiting' | 'dwelling';
+  /** Buses: passengers aboard and capacity. */
+  passengers?: number;
+  capacity?: number;
 }
 
 export interface SignalView {
@@ -251,4 +261,8 @@ export interface SignalView {
   remaining: number;
   /** Approach segments currently allowed to enter. */
   greenApproaches: SegmentId[];
+  /** Full cycle length, seconds (vehicle phases plus the pedestrian-only phase when active). */
+  cycle: number;
+  /** The pedestrian-only phase (`IntersectionControl.scramble`) is active; false when ignored (ADR 0009 §3). */
+  scramble: boolean;
 }

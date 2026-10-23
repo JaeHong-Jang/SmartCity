@@ -11,6 +11,9 @@ describe('commandDomains', () => {
     expect(commandDomains({ type: 'vehicleType.remove', id: 'v' })).toBe(D_VEHICLE_TYPES);
     expect(commandDomains({ type: 'busLine.remove', id: 'l' })).toBe(D_BUS_LINES);
     expect(commandDomains({ type: 'meta.update', name: 'x' })).toBe(0);
+    // Sol 3b review #7: these road edits also remove auto lots and grown buildings.
+    expect(commandDomains({ type: 'segment.setType', id: 's', roadTypeId: 'road-6' })).toBe(D_ROADS | D_BUILDINGS | D_PARCELS);
+    expect(commandDomains({ type: 'node.move', id: 'n', pos: { x: 0, z: 0 } })).toBe(D_ROADS | D_BUILDINGS | D_PARCELS);
     const batch: Command = { type: 'batch', commands: [{ type: 'parcel.remove', id: 'p' }, { type: 'building.remove', id: 'b' }] };
     expect(commandDomains(batch)).toBe(D_PARCELS | D_BUILDINGS);
   });
@@ -25,7 +28,10 @@ describe('touchesSelection', () => {
     expect(touchesSelection({ type: 'parcel.remove', id: 'p1' }, { kind: 'building', id: 'b1' })).toBe(false);
     expect(touchesSelection({ type: 'parcel.remove', id: 'p1' }, { kind: 'parcel', id: 'p1' })).toBe(true);
     expect(touchesSelection({ type: 'node.move', id: 'n', pos: { x: 0, z: 0 } }, { kind: 'segment', id: 's' })).toBe(true);
-    expect(touchesSelection({ type: 'node.move', id: 'n', pos: { x: 0, z: 0 } }, { kind: 'building', id: 'b1' })).toBe(false);
+    // Road edits that can prune auto lots/buildings (ADR 0009 §4) count for building and parcel selections.
+    expect(touchesSelection({ type: 'node.move', id: 'n', pos: { x: 0, z: 0 } }, { kind: 'building', id: 'b1' })).toBe(true);
+    expect(touchesSelection({ type: 'segment.setType', id: 's', roadTypeId: 'road-6' }, { kind: 'parcel', id: 'p1' })).toBe(true);
+    expect(touchesSelection({ type: 'segment.remove', id: 's' }, { kind: 'building', id: 'b1' })).toBe(false);
     expect(touchesSelection({ type: 'batch', commands: [move] }, { kind: 'building', id: 'b1' })).toBe(true);
   });
 });

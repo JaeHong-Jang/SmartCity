@@ -6,6 +6,8 @@ import { ROOM_ID_RE } from '@smartcity/shared';
 import { createDispatcher } from './app/dispatch';
 import { resumeImport } from './app/importExport';
 import { sameDisplayedStats } from './app/simStats';
+import { watchProposal } from './app/proposalWatch';
+import { sameTransit, summarizeTransit } from './app/transit';
 import { ClientStore } from './app/store';
 import { LocalTransport } from './net/localTransport';
 import type { Transport } from './net/transport';
@@ -63,6 +65,8 @@ sim.subscribe((snap) => {
   if (now - lastStatsAt < 250) return;
   lastStatsAt = now;
   if (!sameDisplayedStats(store.getState().simStats, snap.stats)) store.set({ simStats: { ...snap.stats } });
+  const transit = summarizeTransit(snap, store.getState().doc);
+  if (!sameTransit(store.getState().transit, transit)) store.set({ transit });
 });
 
 function attach(t: Transport): void {
@@ -132,10 +136,17 @@ new ToolController(
   { pan: renderer.groundPan, focus: (p) => renderer.focus(p), cursor: (p) => renderer.setCursor(p) },
 );
 
+watchProposal(store);
+
 const services: AppServices = {
   store,
   dispatcher,
   focus: (p) => renderer.focus(p),
+  send: (msg) => transport?.send(msg),
+  cameraTarget() {
+    const t = renderer.cam.controls.getTarget(new THREE.Vector3());
+    return { x: t.x, z: t.z };
+  },
   setName(n: string) {
     const v = n.trim().slice(0, 32);
     if (!v) return;

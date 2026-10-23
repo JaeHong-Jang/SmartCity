@@ -5,12 +5,13 @@ import {
   intersectionArea,
   pointInPolygon,
   polygonArea,
+  polygonsOverlap,
   rotateY,
   sampleSegmentCurve,
   segmentDistance,
   type Vec2,
 } from '../geometry.js';
-import type { Building, BuildingPart, BuildingType, CityDoc, Zone } from '../model.js';
+import type { Building, BuildingPart, BuildingType, CityDoc, RoadSegment, Zone } from '../model.js';
 import { roadHalfWidth } from '../roads.js';
 
 /** Outline of a part in the building frame: its stored footprint, or the offset/width/depth rectangle. */
@@ -85,6 +86,21 @@ const ROAD_CLEARANCE_EPS = 0.05;
  * distance between road centerlines and footprint edges, plus centerlines running inside a footprint.
  * The server runs the same test, so the client's red preview and acceptance always agree.
  */
+/** True if the building would overlap the footprint of any other building (ids other than its own). */
+export function buildingOverlapsBuildings(doc: CityDoc, b: Pick<Building, 'id' | 'pos' | 'rotation'>, type: BuildingType): boolean {
+  const polys = buildingFootprints(b, type);
+  const box = bounds(polys.flat());
+  for (const o of Object.values(doc.buildings)) {
+    if (o.id === b.id) continue;
+    const t = doc.buildingTypes[o.typeId];
+    if (!t) continue;
+    const other = buildingFootprints(o, t);
+    if (!boundsOverlap(box, bounds(other.flat()), 0)) continue;
+    if (polys.some((p) => other.some((q) => polygonsOverlap(p, q)))) return true;
+  }
+  return false;
+}
+
 export function buildingBlocksRoad(doc: CityDoc, b: Pick<Building, 'pos' | 'rotation'>, type: BuildingType): boolean {
   // Stacked volumes often repeat the same outline: test each distinct outline once.
   const seen = new Set<string>();
@@ -92,8 +108,13 @@ export function buildingBlocksRoad(doc: CityDoc, b: Pick<Building, 'pos' | 'rota
     const k = JSON.stringify(p);
     return !seen.has(k) && (seen.add(k), true);
   });
+  return polygonsBlockRoad(doc, polys);
+}
+
+/** True if any polygon overlaps the surface of the given roads (default: every road), sidewalks included. */
+export function polygonsBlockRoad(doc: CityDoc, polys: readonly Vec2[][], segments: readonly RoadSegment[] = Object.values(doc.segments)): boolean {
   const box = bounds(polys.flat());
-  for (const seg of Object.values(doc.segments)) {
+  for (const seg of segments) {
     const rt = doc.roadTypes[seg.roadTypeId];
     const a = doc.nodes[seg.a];
     const z = doc.nodes[seg.b];

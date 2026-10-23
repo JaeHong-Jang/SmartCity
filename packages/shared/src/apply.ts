@@ -4,6 +4,7 @@
 import type { Command } from './commands.js';
 import type { CityDoc, RoadFeature, RoadSegment } from './model.js';
 import { LIMITS } from './apply/limits.js';
+import { roadHalfWidth } from './roads.js';
 import { ApplyError, Tx, fail, policy } from './apply/tx.js';
 import {
   checkBuildingClear,
@@ -29,7 +30,8 @@ import {
   validateStop,
   validateVehicleType,
 } from './apply/validate.js';
-import { dropCrosswalks, pruneFeatures, removeSegment, removeStop, splitSegment } from './apply/roads.js';
+import { buildingOverlapsBuildings } from './editing/buildings.js';
+import { dropCrosswalks, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment } from './apply/roads.js';
 
 export { LIMITS } from './apply/limits.js';
 export { segmentLength, segmentsAtNode } from './apply/validate.js';
@@ -101,6 +103,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       checkNoNewCrossings(doc, n.id);
       // Moving a node stretches its roads: features that no longer fit are removed with the move.
       for (const s of segmentsAtNode(doc, n.id)) pruneFeatures(doc, s.id, tx);
+      pruneAutoLots(doc, segmentsAtNode(doc, n.id).map((s) => s.id), tx);
       return;
     }
     case 'segment.add': {
@@ -121,6 +124,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (s.schoolZone) seg.schoolZone = true;
       checkSegmentShape(doc, seg);
       tx.set(doc.segments, seg.id, seg);
+      pruneAutoLots(doc, [seg.id], tx);
       return;
     }
     case 'segment.remove': {
@@ -137,7 +141,9 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!s) fail('unknown segment');
       const rt = get(doc.roadTypes, cmd.roadTypeId);
       if (!rt) fail('unknown road type');
+      const wider = roadHalfWidth(rt) > roadHalfWidth(doc.roadTypes[s.roadTypeId]!);
       tx.set(doc.segments, s.id, { ...s, roadTypeId: rt.id });
+      if (wider) pruneAutoLots(doc, [s.id], tx);
       if (!rt.sidewalk) dropCrosswalks(doc, (f) => f.segmentId === s.id, tx);
       for (const stop of Object.values(doc.busStops)) {
         if (stop.segmentId === s.id && stop.dir === 'backward' && rt.lanesBackward === 0) removeStop(doc, stop.id, tx);
@@ -156,6 +162,8 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       validateRoadType(cmd.roadType);
       checkCapacity(doc.roadTypes, cmd.roadType.id, LIMITS.roadTypes, 'road types');
       const rt = cmd.roadType;
+      const old = get(doc.roadTypes, rt.id);
+      const wider = !!old && roadHalfWidth(rt) > roadHalfWidth(old);
       if (!rt.sidewalk) dropCrosswalks(doc, (f) => doc.segments[f.segmentId]?.roadTypeId === rt.id, tx);
       tx.set(doc.roadTypes, rt.id, {
         id: rt.id,
@@ -167,6 +175,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
         sidewalk: rt.sidewalk,
         busOnlyRightLane: rt.busOnlyRightLane,
       });
+      if (wider) pruneAutoLots(doc, Object.values(doc.segments).filter((s) => s.roadTypeId === rt.id).map((s) => s.id), tx);
       return;
     }
     case 'building.place': {
@@ -178,7 +187,10 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       checkPos(doc, b.pos, 'building.pos');
       checkNum(b.rotation, -Math.PI * 4, Math.PI * 4, 'rotation');
       checkBuildingClear(doc, b.typeId, b.pos, b.rotation);
-      tx.set(doc.buildings, b.id, { id: b.id, typeId: b.typeId, pos: { x: b.pos.x, z: b.pos.z }, rotation: b.rotation });
+      if (b.auto !== undefined && b.auto !== true) fail('invalid auto flag');
+      if (cmd.ifClear !== undefined && cmd.ifClear !== true) fail('invalid ifClear flag');
+      if (cmd.ifClear && buildingOverlapsBuildings(doc, b, doc.buildingTypes[b.typeId]!)) fail('overlaps another building');
+      tx.set(doc.buildings, b.id, { id: b.id, typeId: b.typeId, pos: { x: b.pos.x, z: b.pos.z }, rotation: b.rotation, ...(b.auto ? { auto: true as const } : {}) });
       return;
     }
     case 'building.remove':
@@ -191,10 +203,13 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       checkPos(doc, cmd.pos, 'pos');
       checkNum(cmd.rotation, -Math.PI * 4, Math.PI * 4, 'rotation');
       checkBuildingClear(doc, b.typeId, cmd.pos, cmd.rotation);
+      // A user move takes the building out of automatic management (auto is dropped).
       tx.set(doc.buildings, b.id, { id: b.id, typeId: b.typeId, pos: { x: cmd.pos.x, z: cmd.pos.z }, rotation: cmd.rotation });
       return;
     }
     case 'parcel.upsert': {
+      if (cmd.ifAbsent !== undefined && cmd.ifAbsent !== true) fail('invalid ifAbsent flag');
+      if (cmd.ifAbsent && has(doc.parcels, cmd.parcel?.id)) fail('parcel exists');
       validateParcel(doc, cmd.parcel);
       checkCapacity(doc.parcels, cmd.parcel.id, LIMITS.parcels, 'parcels');
       const pc = cmd.parcel;
@@ -203,6 +218,8 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
         polygon: pc.polygon.map((v) => ({ x: v.x, z: v.z })),
         zone: pc.zone,
         regulation: { coverage: pc.regulation.coverage, far: pc.regulation.far, maxHeight: pc.regulation.maxHeight, setback: pc.regulation.setback },
+        ...(pc.auto ? { auto: true as const } : {}),
+        ...(pc.frontage ? { frontage: { segmentId: pc.frontage.segmentId, side: pc.frontage.side } } : {}),
       });
       return;
     }
@@ -262,6 +279,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
               })),
             }
           : {}),
+        ...(bt.growth ? { growth: { level: bt.growth.level } } : {}),
       });
       return;
     }
@@ -344,6 +362,10 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (cmd.trafficDensity !== undefined) {
         checkNum(cmd.trafficDensity, 0, 3, 'trafficDensity');
         tx.field(doc.meta, 'trafficDensity', cmd.trafficDensity);
+      }
+      if (cmd.growth !== undefined) {
+        if (typeof cmd.growth !== 'boolean') fail('invalid growth flag');
+        tx.field(doc.meta, 'growth', cmd.growth);
       }
       return;
     default:

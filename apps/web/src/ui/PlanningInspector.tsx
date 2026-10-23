@@ -1,9 +1,10 @@
 // Urban-design inspector parts: the parcel inspector (zone, regulation, compliance, violations) and
 // the planning block of the building inspector (parcel, metrics, smart features).
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   buildingMetrics,
+  buildingsInParcel,
   DEFAULT_REGULATIONS,
   parcelCompliance,
   pointInPolygon,
@@ -15,6 +16,8 @@ import {
   type Violation,
   type Zone,
 } from '@smartcity/shared';
+import { growthBlockers } from '../app/growthInfo';
+import { growthDemand } from '../app/growthDemand';
 import { closedRing } from '../app/ring';
 import { ZONE_COLORS } from '../app/zoneColors';
 import { PARCEL_ZONES } from '../tools/parcelTool';
@@ -107,6 +110,36 @@ function Gauge({ label, value, limit, unit }: { label: string; value: number; li
   );
 }
 
+/** Automatic lot: whether it is waiting to grow or why nothing grows there. */
+function AutoLotInfo({ id }: { id: string }) {
+  const { doc, version } = useDoc();
+  const pc = doc.parcels[id]!;
+  // docVersion is the change counter of the in-place doc; the trial placements are not cheap.
+  const reasons = useMemo(() => growthBlockers(doc, pc, growthDemand(doc)), [doc, pc, version]); // eslint-disable-line react-hooks/exhaustive-deps
+  const built = Object.keys(doc.buildings).length > 0 && buildingsInParcel(doc, pc).length > 0;
+  return (
+    <div data-auto-lot>
+      <b>자동 조닝 필지</b>
+      {built ? (
+        <div className="muted">건물이 있어 더 성장하지 않습니다</div>
+      ) : reasons.length === 0 ? (
+        <div className="muted">조건이 맞아 곧 건물이 자랍니다</div>
+      ) : (
+        <>
+          <div className="muted">건물이 자라지 않는 이유</div>
+          <ul className="violations" data-growth-reasons>
+            {reasons.map((r) => (
+              <li key={r}>
+                <span>{r}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function ParcelInspector({ id }: { id: string }) {
   const { dispatcher } = useServices();
   const { doc } = useDoc();
@@ -143,6 +176,7 @@ export function ParcelInspector({ id }: { id: string }) {
       </dl>
       <Gauge label="건폐율" value={c.coverage} limit={pc.regulation.coverage} unit="pct" />
       <Gauge label="용적률" value={c.far} limit={pc.regulation.far} unit="pct" />
+      {pc.auto && <AutoLotInfo id={id} />}
       <h3>규제 위반 {c.violations.length > 0 && `(${c.violations.length})`}</h3>
       <Violations doc={doc} parcel={pc} violations={c.violations} />
       <hr />

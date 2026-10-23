@@ -3,7 +3,9 @@
 // green phase in which L's entry lanes are red and no green straight connector passes L's zone, then
 // CLEARANCE for ⌈length / 1.0 m/s⌉ s, then RED. Phase greens are stretched to max(green, 7 + clearance −
 // yellow). Signalized mid-block crossings run their own cycle: vehicles green 30 s, yellow 3 s, WALK 7 s +
-// CLEARANCE.
+// CLEARANCE. Pedestrian-only phase (ADR 0009 §3, `scramble` on a signal of degree 3–4 with ≥ 2 crosswalk
+// legs, else ignored): appended after the vehicle phases, every vehicle lane red, no yellow, every crosswalk
+// of the junction WALK 7 s then CLEARANCE ⌈longest crossing / 1.0⌉ s; vehicle phases then have no WALK.
 
 import { pointAtLength, tangentAtLength, type CityDoc, type SegmentId, type SignalPhase } from '@smartcity/shared';
 import type { ZoneIndex } from '../network/crossings.js';
@@ -54,6 +56,8 @@ export interface SignalPlan {
   /** Per phase: cycle tick where its green starts. */
   phaseStart: number[];
   peds: PedHead[];
+  /** A pedestrian-only phase (the last one) is part of the cycle. */
+  scramble: boolean;
   /** Current state, updated by updateSignals. */
   cur: number;
   remaining: number;
@@ -156,9 +160,19 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
     if (phases.length === 0) phases = autoPhases(apps).map((a) => ({ approaches: a, green: DEFAULT_GREEN }));
     const yellow = ctrl ? ctrl.yellow : DEFAULT_YELLOW;
     const allRed = ctrl ? ctrl.allRed : DEFAULT_ALL_RED;
-    // Pedestrian heads: walk with a phase where the leg is red and no green straight movement crosses it.
+    const cross = crossingsAt.get(nodeId) ?? [];
+    const degree = g.nodes.get(nodeId)!.segments.length;
+    const scramble = ctrl?.kind === 'signal' && ctrl.scramble === true && degree >= 3 && degree <= 4 && new Set(cross.map((ci) => g.crossings[ci]!.segmentId)).size >= 2;
+    // Pedestrian-only phase: every crosswalk walks at once, only there.
+    const scrambleClr = scramble ? Math.max(...cross.map(clearanceOf)) : 0;
     const peds: PedHead[] = [];
-    for (const ci of crossingsAt.get(nodeId) ?? []) {
+    if (scramble) {
+      const nVeh = phases.length;
+      phases.push({ approaches: [], green: PED_WALK + scrambleClr });
+      for (const ci of cross) peds.push({ ci, walks: phases.map((_, k) => k === nVeh), walk: ticks(PED_WALK), clearance: ticks(scrambleClr) });
+    }
+    // Pedestrian heads: walk with a phase where the leg is red and no green straight movement crosses it.
+    for (const ci of scramble ? [] : cross) {
       const leg = g.crossings[ci]!.segmentId;
       const passes = (k: number): boolean => {
         const green = phases[k]!.approaches;
@@ -180,11 +194,15 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
       let green = ph.green;
       for (const p of peds) if (p.walks[i]) green = Math.max(green, PED_WALK + clearanceOf(p.ci) - yellow);
       phaseStart.push(t);
-      const parts: [Interval['color'], number][] = [
-        ['green', Math.max(1, ticks(green))],
-        ['yellow', ticks(yellow)],
-        ['allRed', ticks(allRed)],
-      ];
+      // The pedestrian-only phase: vehicles red throughout (an all-red interval), no yellow.
+      const parts: [Interval['color'], number][] =
+        scramble && i === phases.length - 1
+          ? [['allRed', ticks(ph.green)]]
+          : [
+              ['green', Math.max(1, ticks(green))],
+              ['yellow', ticks(yellow)],
+              ['allRed', ticks(allRed)],
+            ];
       for (const [color, d] of parts) {
         if (d <= 0) continue;
         intervals.push({ phase: i, color, start: t, end: t + d });
@@ -201,7 +219,7 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
         heads.push({ lane: l, x: end.x, z: end.z, heading: Math.atan2(end.z - prev.z, end.x - prev.x) });
         headSeg.push(ap.seg);
       }
-    plans.push({ nodeId, phases, intervals, cycle: t, offset: ticks(ctrl?.offset ?? 0), heads, headSeg, phaseStart, peds, cur: 0, remaining: 0 });
+    plans.push({ nodeId, phases, intervals, cycle: t, offset: ticks(ctrl?.offset ?? 0), heads, headSeg, phaseStart, peds, scramble, cur: 0, remaining: 0 });
   }
   const mids: MidSignal[] = [];
   for (const cr of g.crossings) {
@@ -270,5 +288,7 @@ export function signalView(p: SignalPlan, tickRate: number): SignalView {
     color: iv.color === 'allRed' ? 'red' : iv.color,
     remaining: p.remaining / tickRate,
     greenApproaches: iv.color === 'green' ? p.phases[iv.phase]!.approaches.slice() : [],
+    cycle: p.cycle / tickRate,
+    scramble: p.scramble,
   };
 }
