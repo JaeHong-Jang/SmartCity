@@ -1,4 +1,4 @@
-// Bootstrap: store → transport (server, or offline solo fallback) → sim worker → renderer → tools → React HUD.
+// Bootstrap: store → transport (server, or offline solo mode when asked for) → sim worker → renderer → tools → React HUD.
 
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three';
@@ -9,7 +9,7 @@ import { sameDisplayedStats } from './app/simStats';
 import { watchProposal } from './app/proposalWatch';
 import { sameTransit, summarizeTransit } from './app/transit';
 import { ClientStore } from './app/store';
-import { LocalTransport } from './net/localTransport';
+import { LocalTransport, offlineSeenKey, readOfflineSave } from './net/localTransport';
 import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsTransport';
 import { CityRenderer } from './render/CityRenderer';
@@ -109,15 +109,43 @@ function attach(t: Transport): void {
   store.onResyncNeeded = () => t.reconnect();
 }
 
+// Offline solo mode only when asked for (?offline=1, or the overlay's button). A server room that
+// cannot be reached waits behind the connect overlay instead: opening the browser's own city under
+// the same room name looked like the server city had vanished (ADR 0011).
 function goOffline(): void {
-  transport?.close();
   const local = new LocalTransport(room, storage, () => store.getState().name);
+  if (local.unreadable) {
+    // Never open an empty city over a save we could not read: the first edit would replace it.
+    store.set({ connection: 'offline', offlineError: local.unreadable.reason });
+    return;
+  }
   transport = local;
   store.set({ connection: 'offline' });
   attach(local);
   local.connect();
-  store.toast('서버에 연결할 수 없어 오프라인(단독 모드)으로 시작합니다', 'info');
   window.addEventListener('beforeunload', () => local.close());
+}
+
+/** After joining the server room: point out a different offline city saved here under the same name. */
+function noticeOfflineCity(): void {
+  const local = readOfflineSave(storage, room);
+  if (local.status === 'none') return;
+  if (local.status === 'unreadable') {
+    store.set({ offlineCity: { buildings: 0, roads: 0, savedAt: null, seen: '', unreadable: local.reason } });
+    return;
+  }
+  const d = local.doc;
+  const roads = Object.keys(d.segments).length;
+  const buildings = Object.keys(d.buildings).length;
+  if (!roads && !buildings && !Object.keys(d.nodes).length && !Object.keys(d.parcels).length) return;
+  if (JSON.stringify(d) === JSON.stringify(store.getState().doc)) return;
+  const seen = `${local.seq}:${local.savedAt ?? ''}`;
+  try {
+    if (sessionStorage.getItem(offlineSeenKey(room)) === seen) return;
+  } catch {
+    // No session storage: show it.
+  }
+  store.set({ offlineCity: { buildings, roads, savedAt: local.savedAt, seen, unreadable: null } });
 }
 
 const ws = new WsTransport(WsTransport.defaultUrl(), room, () => store.getState().name);
@@ -127,26 +155,40 @@ if (params.get('offline') === '1') {
   transport = ws;
   attach(ws);
   let opened = false;
+  const showWait = (): void => {
+    const s = store.getState();
+    if (s.ready) return;
+    store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: s.connectWait?.error ?? null } });
+  };
+  let noticed = false;
+  ws.onMessage((m) => {
+    if (m.t === 'welcome' && !noticed) {
+      noticed = true;
+      noticeOfflineCity();
+    }
+    // A refusal before welcome (e.g. unreadable city file) is shown on the overlay; the transport keeps retrying.
+    if (m.t === 'error' && !store.getState().ready) store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: m.error } });
+  });
   ws.onStatus((st) => {
     const s = store.getState();
-    if (transport !== ws) return;
     if (st === 'open') opened = true;
-    // Never reached the server: solo mode right away. A socket that did open proves the server
-    // is up (e.g. it closed us for a late hello while the page was busy), so let the transport retry.
-    if (st === 'closed' && !s.ready && !opened) goOffline();
-    else if (st === 'closed' && s.ready) store.connectionLost('reconnecting');
-    else if (st === 'connecting' && s.ready) store.set({ connection: 'reconnecting' });
+    // Before the first welcome: keep retrying behind the overlay. After it: reconnect, never go offline.
+    if (!s.ready) {
+      if (st === 'closed' || s.connectWait) showWait();
+    } else if (st === 'closed') store.connectionLost('reconnecting');
+    else if (st === 'connecting') store.set({ connection: 'reconnecting' });
   });
   ws.connect();
-  // No socket within the window (or an open socket that never sends welcome): go solo.
-  // A timer that fires late means the page was busy (first shader compile), not that the
-  // server is unreachable, so the window is re-armed instead.
+  // No socket within the window (or an open socket that never sends welcome): show the overlay.
+  // (Retrying a hung attempt is the transport's own welcome deadline.) A timer that fires late
+  // means the page was busy (first shader compile), not that the server is unreachable, so the
+  // window is re-armed instead.
   const armTimer = (ms: number, waiting: () => boolean): void => {
     const due = performance.now() + ms;
     setTimeout(() => {
-      if (transport !== ws || store.getState().ready || !waiting()) return;
+      if (store.getState().ready || !waiting()) return;
       if (performance.now() - due > 250) armTimer(ms, waiting);
-      else goOffline();
+      else showWait();
     }, ms);
   };
   armTimer(CONNECT_TIMEOUT_MS, () => !opened);
@@ -225,6 +267,7 @@ const services: AppServices = {
     if (transport === ws && store.getState().connection === 'online') transport.reconnect();
     store.toast(`이름을 '${v}'(으)로 바꿨습니다`, 'success');
   },
+  retryConnect: () => ws.retryNow(),
 };
 
 if (import.meta.env.DEV) {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,7 +32,8 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-const { appendLog, loadRoom, LogCorruptedError } = await import('./persistence.js');
+const { appendLog, backupCheckpoint, backupDir, loadRoom, LogCorruptedError, pruneBackups, RoomLoadError, writeCheckpoint } = await import('./persistence.js');
+const { cloneJson, createEmptyDoc, DOC_VERSION, FACILITY_PRESETS, GROWTH_PRESETS, BASE_GROWTH_PRESET_IDS, LIMITS } = await import('@smartcity/shared');
 const { Client, Room } = await import('./room.js');
 
 function fakeClient() {
@@ -126,4 +127,264 @@ describe('room write fencing under compound storage faults (Sol re-check 2)', ()
     const { doc } = loadRoom(dir, 'r');
     expect(Object.keys(doc.nodes)).toEqual(['c']);
   });
+});
+
+describe('checkpoint safety (P0 data safety)', () => {
+  const cpFile = () => join(dir, 'r.json');
+  const city = (n: number) => {
+    const doc = createEmptyDoc();
+    for (let i = 0; i < n; i++) doc.nodes[`n${i}`] = { id: `n${i}`, pos: { x: i * 40, z: 0 } };
+    return doc;
+  };
+
+  it('refuses a room whose checkpoint does not parse, keeping the original and a copy', () => {
+    const body = '{"schema":1,"seq":114,"doc":{"version":6,"nodes":{';
+    writeFileSync(cpFile(), body);
+    writeFileSync(log, `${record(115, 'late', 0)}\n`);
+    expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
+    expect(readFileSync(cpFile(), 'utf8')).toBe(body);
+    expect(readFileSync(log, 'utf8')).toBe(`${record(115, 'late', 0)}\n`);
+    const copies = readdirSync(dir).filter((f) => /^r\.corrupt-.+\.json$/.test(f));
+    expect(copies).toHaveLength(1);
+    expect(readFileSync(join(dir, copies[0]!), 'utf8')).toBe(body);
+    // Retried joins neither start empty nor pile up copies of the same file.
+    expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
+    expect(readdirSync(dir).filter((f) => f.includes('.corrupt-'))).toHaveLength(1);
+  });
+
+  it('refuses valid JSON that is not a checkpoint', () => {
+    writeFileSync(cpFile(), JSON.stringify({ seq: 3, doc: city(1) }));
+    expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
+    writeFileSync(cpFile(), JSON.stringify({ schema: 1, seq: 3, doc: { version: DOC_VERSION } }));
+    expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
+  });
+
+  it('refuses a checkpoint from a newer doc version without touching it', () => {
+    const body = JSON.stringify({ schema: 1, seq: 9, doc: { ...city(2), version: DOC_VERSION + 1 } });
+    writeFileSync(cpFile(), body);
+    expect(() => loadRoom(dir, 'r')).toThrow(/새로운 버전/);
+    expect(readFileSync(cpFile(), 'utf8')).toBe(body);
+  });
+
+  it('backs up the replaced checkpoint, once per distinct content', () => {
+    writeCheckpoint(dir, 'r', 1, city(1));
+    expect(existsSync(backupDir(dir, 'r'))).toBe(false); // nothing to back up yet
+    writeCheckpoint(dir, 'r', 2, city(2));
+    writeCheckpoint(dir, 'r', 2, city(2)); // replaces the seq 1 file: backed up
+    writeCheckpoint(dir, 'r', 2, city(2)); // replaces an identical file: skipped
+    const files = readdirSync(backupDir(dir, 'r'));
+    expect(files).toHaveLength(2);
+    expect(files.every((f) => /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z(-\d+)?\.json$/.test(f))).toBe(true);
+    const seqs = files.map((f) => JSON.parse(readFileSync(join(backupDir(dir, 'r'), f), 'utf8')).seq);
+    expect(seqs.sort()).toEqual([1, 2]);
+    expect(loadRoom(dir, 'r').seq).toBe(2);
+  });
+
+  it('never blocks the checkpoint when the backup fails', () => {
+    writeCheckpoint(dir, 'r', 1, city(1));
+    mkdirSync(join(dir, 'backups'));
+    writeFileSync(backupDir(dir, 'r'), 'not a directory');
+    writeCheckpoint(dir, 'r', 2, city(2));
+    expect(loadRoom(dir, 'r').seq).toBe(2);
+  });
+
+  it('keeps the newest 30 plus one per day for 14 days', () => {
+    const bdir = join(dir, 'b');
+    mkdirSync(bdir);
+    const now = new Date('2026-10-25T12:00:00.000Z');
+    const stamp = (ms: number) => new Date(ms).toISOString().replace(/:/g, '-');
+    const names: string[] = [];
+    // 40 backups a minute apart today, then 4 per day for the 20 days before.
+    for (let i = 0; i < 40; i++) names.push(`${stamp(now.getTime() - i * 60_000)}.json`);
+    for (let d = 1; d <= 20; d++) for (let h = 0; h < 4; h++) names.push(`${stamp(now.getTime() - d * 86_400_000 - h * 3_600_000)}.json`);
+    names.push(`${stamp(now.getTime() - 3 * 86_400_000 - 30 * 60_000)}.prewipe.json`);
+    names.push(`${stamp(now.getTime() - 15 * 86_400_000)}.prewipe.json`);
+    names.push('notes.txt');
+    for (const n of names) writeFileSync(join(bdir, n), '{}');
+    pruneBackups(bdir, now);
+    const left = readdirSync(bdir).sort().reverse();
+    const recent = names.slice(0, 30);
+    for (const n of recent) expect(left).toContain(n);
+    expect(left).not.toContain(names[30]);
+    // Days 1..14 keep their newest backup (00:00 of that day relative to now); older days nothing.
+    for (let d = 1; d <= 14; d++) expect(left).toContain(`${stamp(now.getTime() - d * 86_400_000)}.json`);
+    expect(left).not.toContain(`${stamp(now.getTime() - 15 * 86_400_000)}.json`);
+    expect(left).toContain(names.at(-3));
+    expect(left).not.toContain(names.at(-2));
+    expect(left).toContain('notes.txt');
+    // 30 recent + 14 daily (today's newest is already among the recent) + 1 prewipe + the foreign file.
+    expect(left).toHaveLength(30 + 14 + 1 + 1);
+  });
+
+  it('warns and keeps a protected backup when a checkpoint empties a big city', () => {
+    const doc = city(0);
+    for (let i = 0; i < 10; i++) doc.segments[`s${i}`] = {} as never;
+    writeCheckpoint(dir, 'r', 5, doc);
+    const room = new Room('r', dir, doc, 5);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    room.doc.segments = {};
+    room.checkpoint();
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/empties the city/));
+    warn.mockRestore();
+    room.dispose();
+    const pre = readdirSync(backupDir(dir, 'r')).filter((f) => f.endsWith('.prewipe.json'));
+    expect(pre).toHaveLength(1);
+    expect(Object.keys(JSON.parse(readFileSync(join(backupDir(dir, 'r'), pre[0]!), 'utf8')).doc.segments)).toHaveLength(10);
+    expect(Object.keys(loadRoom(dir, 'r').doc.segments)).toHaveLength(0);
+  });
+});
+
+describe('Sol review of the data-safety change', () => {
+  const cpFile = () => join(dir, 'r.json');
+  const checkpointWith = (mutate: (doc: Record<string, unknown>) => void, seq = 1) => {
+    const doc = createEmptyDoc() as unknown as Record<string, unknown>;
+    (doc.nodes as Record<string, unknown>).n0 = { id: 'n0', pos: { x: 0, z: 0 } };
+    mutate(doc);
+    const body = JSON.stringify({ schema: 1, seq, doc });
+    writeFileSync(cpFile(), body);
+    return body;
+  };
+
+  it('#1 refuses a checkpoint whose collections are arrays or missing, or whose entities are malformed', () => {
+    // Sol: `nodes: []` loaded, node.add succeeded, and the node was gone after checkpoint + reload.
+    const cases: [string, (d: Record<string, unknown>) => void][] = [
+      ['nodes is an array', (d) => (d.nodes = [])],
+      ['buildings is an array', (d) => (d.buildings = [])],
+      ['vehicleTypes missing', (d) => delete d.vehicleTypes],
+      ['closures is a string', (d) => (d.closures = 'x')],
+      ['node id differs from its key', (d) => ((d.nodes as Record<string, unknown>).n0 = { id: 'other', pos: { x: 0, z: 0 } })],
+      ['node without a position', (d) => ((d.nodes as Record<string, unknown>).n0 = { id: 'n0' })],
+      ['segment to a missing node', (d) => ((d.segments as Record<string, unknown>).s1 = { id: 's1', a: 'n0', b: 'gone', roadTypeId: 'road-2' })],
+      ['building of an unknown type', (d) => ((d.buildings as Record<string, unknown>).b1 = { id: 'b1', typeId: 'nope', pos: { x: 0, z: 0 }, rotation: 0 })],
+      ['meta missing', (d) => delete d.meta],
+    ];
+    for (const [what, mutate] of cases) {
+      const body = checkpointWith(mutate);
+      expect(() => loadRoom(dir, 'r'), what).toThrow(RoomLoadError);
+      expect(readFileSync(cpFile(), 'utf8'), what).toBe(body);
+    }
+    expect(readdirSync(dir).filter((f) => f.startsWith('r.corrupt-')).length).toBeGreaterThanOrEqual(1);
+    // The same doc without the damage loads.
+    checkpointWith(() => {});
+    expect(Object.keys(loadRoom(dir, 'r').doc.nodes)).toEqual(['n0']);
+  });
+
+  it('#2 refuses a log whose middle record does not replay, and keeps the log', () => {
+    const body = `${record(1, 'n1', 0)}\n{"seq":2,"cmd":{"type":"unknown"}}\n${record(3, 'n3', 80)}\n`;
+    writeFileSync(log, body);
+    expect(() => loadRoom(dir, 'r')).toThrow(LogCorruptedError);
+    expect(readFileSync(log, 'utf8')).toBe(body);
+  });
+
+  it('#2 refuses out-of-order, duplicate, skipped and malformed records, and damage that kept its newline', () => {
+    const bodies = {
+      duplicate: `${record(1, 'n1', 0)}\n${record(1, 'n2', 40)}\n`,
+      backwards: `${record(1, 'n1', 0)}\n${record(3, 'n3', 80)}\n${record(2, 'n2', 40)}\n`,
+      gap: `${record(1, 'n1', 0)}\n${record(3, 'n3', 80)}\n`,
+      notARecord: `${record(1, 'n1', 0)}\n{"seq":"2","cmd":{}}\n`,
+      array: `[1,2]\n`,
+      blankLine: `${record(1, 'n1', 0)}\n\n${record(2, 'n2', 40)}\n`,
+      damagedLastLine: `${record(1, 'n1', 0)}\n{"seq":2,"cmd":{"ty\n`,
+    };
+    for (const [what, body] of Object.entries(bodies)) {
+      writeFileSync(log, body);
+      expect(() => loadRoom(dir, 'r'), what).toThrow(LogCorruptedError);
+      expect(readFileSync(log, 'utf8'), what).toBe(body);
+    }
+  });
+
+  it('#2 still repairs only an unterminated final record, and skips records the checkpoint already holds', () => {
+    writeFileSync(log, `${record(1, 'n1', 0)}\n${record(2, 'n2', 40)}\n{"seq":3,"cmd":{"type":"node.a`);
+    expect(loadRoom(dir, 'r').seq).toBe(2);
+    expect(readFileSync(log, 'utf8')).toBe(`${record(1, 'n1', 0)}\n${record(2, 'n2', 40)}\n`);
+    // A checkpoint at seq 2 whose log clear failed, then appends 3 and 4.
+    const doc = createEmptyDoc();
+    doc.nodes.n1 = { id: 'n1', pos: { x: 0, z: 0 } };
+    doc.nodes.n2 = { id: 'n2', pos: { x: 40, z: 0 } };
+    writeFileSync(cpFile(), JSON.stringify({ schema: 1, seq: 2, doc }));
+    writeFileSync(log, `${record(1, 'n1', 0)}\n${record(2, 'n2', 40)}\n${record(3, 'n3', 80)}\n${record(4, 'n4', 120)}\n`);
+    const r = loadRoom(dir, 'r');
+    expect(r.seq).toBe(4);
+    expect(Object.keys(r.doc.nodes).sort()).toEqual(['n1', 'n2', 'n3', 'n4']);
+  });
+
+  it('#5 never overwrites a backup made in the same millisecond', () => {
+    const now = new Date('2026-10-25T12:00:00.000Z');
+    const contents = ['A', 'B', 'C'].map((v, i) => JSON.stringify({ schema: 1, seq: i, doc: v }));
+    for (const c of contents) {
+      writeFileSync(cpFile(), c);
+      backupCheckpoint(dir, 'r', now);
+    }
+    writeFileSync(cpFile(), contents[2]!);
+    backupCheckpoint(dir, 'r', now, true);
+    const bdir = backupDir(dir, 'r');
+    const files = readdirSync(bdir).sort();
+    expect(files).toEqual([
+      '2026-10-25T12-00-00.000Z-1.json',
+      '2026-10-25T12-00-00.000Z-2.json',
+      '2026-10-25T12-00-00.000Z.json',
+      '2026-10-25T12-00-00.000Z.prewipe.json',
+    ]);
+    const byName = (f: string) => readFileSync(join(bdir, f), 'utf8');
+    expect(byName('2026-10-25T12-00-00.000Z.json')).toBe(contents[0]);
+    expect(byName('2026-10-25T12-00-00.000Z-1.json')).toBe(contents[1]);
+    expect(byName('2026-10-25T12-00-00.000Z-2.json')).toBe(contents[2]);
+  });
+
+  it('#5 rotation orders same-millisecond names by their suffix', () => {
+    const bdir = join(dir, 'b');
+    mkdirSync(bdir);
+    const now = new Date('2026-10-25T12:00:00.000Z');
+    const stamp = (ms: number) => new Date(ms).toISOString().replace(/:/g, '-');
+    const old = stamp(now.getTime() - 3 * 86_400_000);
+    for (const n of ['', '-1', '-2', '-10']) writeFileSync(join(bdir, `${old}${n}.json`), '{}');
+    for (let i = 0; i < 30; i++) writeFileSync(join(bdir, `${stamp(now.getTime() - i * 60_000)}.json`), '{}');
+    // The newest 30 (n0..n29 of today) are kept regardless; of the old day only its newest, `-10`.
+    pruneBackups(bdir, now);
+    const left = readdirSync(bdir);
+    expect(left.filter((f) => f.startsWith(old))).toEqual([`${old}-10.json`]);
+    expect(left).toHaveLength(31);
+    // Today's newest is the one with the highest suffix in the same millisecond.
+    writeFileSync(join(bdir, `${stamp(now.getTime())}-1.json`), '{}');
+    pruneBackups(bdir, now);
+    expect(readdirSync(bdir)).toContain(`${stamp(now.getTime())}-1.json`);
+    expect(readdirSync(bdir)).not.toContain(`${stamp(now.getTime() - 29 * 60_000)}.json`);
+  });
+});
+
+describe('Sol recheck #6: logs written before a migration still replay', () => {
+  // Presets each migration adds; a doc of that version never had them.
+  const addedBy = (version: number) => [
+    ...GROWTH_PRESETS.filter((t) => version < 4 && BASE_GROWTH_PRESET_IDS.includes(t.id)),
+    ...GROWTH_PRESETS.filter((t) => version < 5 && !BASE_GROWTH_PRESET_IDS.includes(t.id)),
+    ...FACILITY_PRESETS.filter(() => version < 6),
+  ];
+  const design = (id: string, parts: unknown = undefined) => {
+    const t = cloneJson(createEmptyDoc().buildingTypes.house!) as unknown as Record<string, unknown>;
+    return { ...t, id, name: id, ...(parts === undefined ? {} : { parts }) };
+  };
+
+  for (const version of [3, 4, 5]) {
+    it(`v${version}: a design added one below the limit replays after the migration pushes past it`, () => {
+      const doc = createEmptyDoc() as unknown as { version: number; buildingTypes: Record<string, unknown> };
+      for (const t of addedBy(version)) delete doc.buildingTypes[t.id];
+      doc.version = version;
+      for (let i = 0; Object.keys(doc.buildingTypes).length < LIMITS.buildingTypes - 1; i++) doc.buildingTypes[`d${i}`] = design(`d${i}`);
+      writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 5, doc }));
+      // Accepted by the server of that version: 1999 designs, one more fits.
+      const upsert = (seq: number, id: string, parts?: unknown) => `${JSON.stringify({ seq, cmd: { type: 'buildingType.upsert', buildingType: design(id, parts) } })}\n`;
+      writeFileSync(log, upsert(6, 'mine') + `${JSON.stringify({ seq: 7, cmd: { type: 'buildingType.remove', id: 'd0' } })}\n`);
+      const r = loadRoom(dir, 'r');
+      expect(r.seq).toBe(7);
+      expect(r.doc.version).toBe(DOC_VERSION);
+      expect(r.doc.buildingTypes.mine).toBeDefined();
+      expect(r.doc.buildingTypes.d0).toBeUndefined();
+      expect(Object.keys(r.doc.buildingTypes).length).toBeGreaterThan(LIMITS.buildingTypes);
+      for (const t of addedBy(version)) expect(r.doc.buildingTypes[t.id]).toBeDefined();
+
+      // Trusted replay still validates structure: a malformed design in the same position refuses.
+      writeFileSync(log, upsert(6, 'broken', 'not parts'));
+      expect(() => loadRoom(dir, 'r')).toThrow(LogCorruptedError);
+    });
+  }
 });

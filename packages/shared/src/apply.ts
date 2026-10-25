@@ -44,7 +44,8 @@ export interface ApplyOptions {
   /**
    * The command was already accepted by the authoritative server (live `applied` messages, log
    * replay). Skips design-policy checks (road clearance, overlaps, crossings, footprint map bounds,
-   * revisions), which may have been different when it was accepted. Structural validation still runs.
+   * revisions) and collection capacity limits, which may have been different when it was accepted
+   * (a migration can add presets past a limit). Structural validation still runs.
    */
   trusted?: boolean;
 }

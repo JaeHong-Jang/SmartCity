@@ -6,6 +6,7 @@ import { formatClock } from '../render/dayNight';
 import { AiPanel } from './AiPanel';
 import { BuildingEditor } from './BuildingEditor';
 import { BusLinePanel } from './BusLinePanel';
+import { ConnectionBanner, ConnectOverlay, OfflineCityNotice, OfflineSaveError } from './Connection';
 import { useDoc, useServices, useStore } from './context';
 import { Dashboard } from './Dashboard';
 import { GrowthHud } from './GrowthHud';
@@ -329,6 +330,10 @@ export function App() {
       <ToolHint />
       <Toasts />
       <StatusBar />
+      <OfflineCityNotice />
+      <ConnectionBanner />
+      <ConnectOverlay />
+      <OfflineSaveError />
     </>
   );
 }

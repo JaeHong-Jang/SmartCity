@@ -156,6 +156,37 @@ describe('server', () => {
     c.close();
   });
 
+  it('refuses a room with an unreadable checkpoint and never overwrites it; other rooms work', async () => {
+    const body = '{"schema":1,"seq":114,"doc":{"version":6,"nod';
+    writeFileSync(join(dir, 'broken.json'), body);
+    const a = await TestClient.open(srv.port);
+    a.send({ t: 'hello', protocol: PROTOCOL_VERSION, room: 'broken', name: 'x' });
+    expect((await a.next('error')).error).toBe('도시 파일을 읽을 수 없습니다 — 관리자 확인 필요');
+    expect(await a.closed).toBe(1011);
+    const b = await TestClient.join(srv.port, 'fine');
+    b.send({ t: 'cmd', ref: 1, cmd: addNode('n1') });
+    await b.next('applied');
+    b.close();
+    await srv.close(); // checkpoints every loaded room
+    expect(readFileSync(join(dir, 'broken.json'), 'utf8')).toBe(body);
+    expect(existsSync(join(dir, 'fine.json'))).toBe(true);
+    srv = await startServer({ port: 0, dataDir: dir });
+  });
+
+  it('refuses a room whose log does not replay and keeps the log (Sol review #2)', async () => {
+    const rec = (seq: number, cmd: unknown) => `${JSON.stringify({ seq, cmd })}\n`;
+    const body = rec(1, addNode('n1')) + rec(2, { type: 'unknown' }) + rec(3, addNode('n3', 80));
+    writeFileSync(join(dir, 'badlog.log.jsonl'), body);
+    const a = await TestClient.open(srv.port);
+    a.send({ t: 'hello', protocol: PROTOCOL_VERSION, room: 'badlog', name: 'x' });
+    expect((await a.next('error')).error).toBe('도시 파일을 읽을 수 없습니다 — 관리자 확인 필요');
+    expect(await a.closed).toBe(1011);
+    await srv.close();
+    expect(readFileSync(join(dir, 'badlog.log.jsonl'), 'utf8')).toBe(body);
+    expect(existsSync(join(dir, 'badlog.json'))).toBe(false);
+    srv = await startServer({ port: 0, dataDir: dir });
+  });
+
   it('recovers from the log alone (no checkpoint), ignoring a truncated last line', async () => {
     const a = await TestClient.join(srv.port, 'crash-room');
     a.send({ t: 'cmd', ref: 1, cmd: addNode('n1') });

@@ -15,6 +15,8 @@ export interface AppServices {
   /** Ground point the camera looks at. */
   cameraTarget(): Vec2;
   setName(name: string): void;
+  /** Try the server again right now (connect overlay). */
+  retryConnect(): void;
 }
 
 export const ServicesContext = createContext<AppServices | null>(null);

@@ -18,3 +18,4 @@ export * from './growthPresets.js';
 export * from './facilityPresets.js';
 export * from './editing/zoning.js';
 export * from './growth.js';
+export * from './docCheck.js';

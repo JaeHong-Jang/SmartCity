@@ -13,6 +13,8 @@ export const SYSTEM_ID = 'system';
 export type CommitResult = { ok: true; seq: number } | { ok: false; error: string };
 const CHECKPOINT_EVERY = 200;
 const PRESENCE_MIN_INTERVAL_MS = 50; // 20Hz
+/** A checkpoint that drops every building and road of a city at least this big logs a warning. */
+const WIPE_WARN_MIN = 10;
 const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#f032e6', '#bfef45', '#469990', '#9a6324'];
 
 // Tags prefix client-generated entity ids. The per-boot prefix keeps them unique across
@@ -20,6 +22,8 @@ const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4'
 const BOOT_ID = randomBytes(3).toString('hex');
 let tagCounter = 0;
 let colorCounter = 0;
+
+const citySize = (doc: CityDoc): number => Object.keys(doc.buildings).length + Object.keys(doc.segments).length;
 
 export class Client {
   readonly id = randomUUID();
@@ -48,6 +52,8 @@ export class Room {
   private timer: NodeJS.Timeout;
   unloadTimer: NodeJS.Timeout | null = null;
   private readonly growth: GrowthDirector;
+  /** Buildings + roads in the last checkpoint (or the loaded doc), for the wipe warning. */
+  private savedSize: number;
 
   constructor(
     readonly id: string,
@@ -60,6 +66,7 @@ export class Room {
     this.timer.unref();
     this.growth = new GrowthDirector(this, growth);
     this.growth.start();
+    this.savedSize = citySize(doc);
   }
 
   private send(c: Client, msg: ServerMessage): void {
@@ -183,8 +190,13 @@ export class Room {
   }
 
   checkpoint(): void {
+    const size = citySize(this.doc);
+    // Possibly a real teardown, so the write goes ahead; the city it replaces is kept as a protected backup.
+    const wipe = this.savedSize >= WIPE_WARN_MIN && size === 0;
+    if (wipe) console.warn(`[room ${this.id}] checkpoint empties the city (was ${this.savedSize} buildings + roads); previous file kept as a .prewipe backup`);
     try {
-      writeCheckpoint(this.dataDir, this.id, this.seq, this.doc);
+      writeCheckpoint(this.dataDir, this.id, this.seq, this.doc, wipe);
+      this.savedSize = size;
       this.sinceCheckpoint = 0;
       this.writable = true;
     } catch (e) {

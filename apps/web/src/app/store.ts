@@ -83,6 +83,27 @@ export interface Overlays {
   violations: boolean;
 }
 
+/** Waiting for the server before the first welcome (drives the full-screen connect overlay). */
+export interface ConnectWait {
+  /** Attempt number of the transport (1 = first). */
+  attempt: number;
+  /** Epoch ms of the next automatic attempt, null while one is running. */
+  retryAt: number | null;
+  /** Refusal the server sent for this room (e.g. its city file cannot be read). */
+  error: string | null;
+}
+
+/** A city this browser saved in offline solo mode under the same room name, differing from the server's. */
+export interface OfflineCityNote {
+  buildings: number;
+  roads: number;
+  savedAt: number | null;
+  /** `seq:savedAt` of that save; closing the notice remembers it for this tab. */
+  seen: string;
+  /** Why the save cannot be read (null = readable); it can still be exported raw. */
+  unreadable: string | null;
+}
+
 export interface RenderStats {
   fps: number;
   drawCalls: number;
@@ -102,6 +123,12 @@ export interface ClientState {
   connection: Connection;
   /** True once the first welcome arrived. */
   ready: boolean;
+  /** Non-null while the server has not answered in time: the connect overlay is shown (cleared by welcome). */
+  connectWait: ConnectWait | null;
+  /** Shown as a dismissible notice after joining a server room (null = none). */
+  offlineCity: OfflineCityNote | null;
+  /** Offline solo mode was asked for but the stored city cannot be read: it is not opened (reason). */
+  offlineError: string | null;
   tool: ToolId;
   toolOptions: ToolOptions;
   /** Short status text from the active tool (length, angle, errors). */
@@ -209,6 +236,9 @@ export function initialState(room: string, name: string): ClientState {
     color: '#38bdf8',
     connection: 'connecting',
     ready: false,
+    connectWait: null,
+    offlineCity: null,
+    offlineError: null,
     tool: 'select',
     toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
     toolHint: '',
@@ -332,6 +362,7 @@ export class ClientStore {
           selection: null,
           connection: s.connection === 'offline' ? 'offline' : 'online',
           ready: true,
+          connectWait: null,
           session: s.session + 1,
         });
         for (const l of this.resetListeners) l(doc);

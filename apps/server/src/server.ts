@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws';
 import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ROOM_ID_RE, parseClientMessage } from '@smartcity/shared';
 import type { ServerMessage } from '@smartcity/shared';
 import { createHttpHandler } from './http.js';
+import { ROOM_UNREADABLE, RoomLoadError } from './persistence.js';
 import { Client, MAX_CLIENTS_PER_ROOM } from './room.js';
 import type { Room } from './room.js';
 import { RoomManager } from './roomManager.js';
@@ -87,7 +88,16 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
             ws.close(1008, 'invalid room');
             return;
           }
-          const r = rooms.get(msg.room);
+          let r: Room;
+          try {
+            r = rooms.get(msg.room);
+          } catch (e) {
+            // This room's files need an admin; other rooms keep working.
+            console.error(`[ws] room ${msg.room} refused: ${(e as Error).message}`);
+            send(ws, { t: 'error', error: e instanceof RoomLoadError ? e.message : ROOM_UNREADABLE });
+            ws.close(1011, 'room unavailable');
+            return;
+          }
           if (r.clients.size >= MAX_CLIENTS_PER_ROOM) {
             send(ws, { t: 'error', error: 'room full' });
             ws.close(1013, 'room full');

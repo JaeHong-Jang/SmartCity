@@ -68,8 +68,12 @@ export function checkPos(doc: CityDoc, p: unknown, what: string): asserts p is V
   checkNum(v.z, -h, h, `${what}.z`);
 }
 
+/**
+ * Capacity is admission control for new edits. A trusted (already sequenced) command passed it when
+ * it was accepted; replaying it must not fail because a doc migration since added presets (ADR 0011).
+ */
 export function checkCapacity(rec: Record<string, unknown>, id: string, max: number, what: string): void {
-  if (!(id in rec) && Object.keys(rec).length >= max) fail(`too many ${what}`);
+  if (policy.enforce && !(id in rec) && Object.keys(rec).length >= max) fail(`too many ${what}`);
 }
 
 /** Own-property lookup for ids that come from commands (never trusts the prototype or non-strings). */
