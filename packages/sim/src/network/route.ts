@@ -17,6 +17,13 @@ export interface RouteResult {
 
 const HEURISTIC_SPEED = 40;
 const QUEUE_COST = 2;
+/**
+ * Scenario accident lanes (ADR 0010 §3): a fixed penalty, not a ban. The lane stays physically open and the
+ * model has no lane changes, so a ban would leave goals on that lane (bus stops, single-lane roads) without
+ * any route although vehicles can queue and pass once the accident clears; with the penalty every detour
+ * cheaper than 10 min wins, which is the same choice as a ban whenever a detour exists.
+ */
+export const ACCIDENT_PENALTY = 600;
 
 export class MinHeap {
   private f = new Float64Array(256);
@@ -93,6 +100,9 @@ export class Router {
   private readonly goalS: Float64Array;
   private readonly heap = new MinHeap();
   private stamp = 0;
+  /** Scenario overrides (scenario/state.ts compose): edges closed to new entry, and per-lane obstacle rear (Infinity = none). */
+  ban: Uint8Array | null = null;
+  obsRear: Float64Array | null = null;
 
   constructor(private readonly net: Net) {
     const n = net.nEdges;
@@ -155,10 +165,13 @@ export class Router {
     const net = this.net;
     if (this.done[n] === stamp) return;
     if (net.closed[n] || (!bus && net.busOnly[n])) return;
+    if (this.ban !== null && this.ban[n]) return;
     const isGoal = n < net.nLanes && this.goalMark[n] === stamp;
     let cost: number;
     if (n < net.nLanes) cost = (isGoal ? this.goalS[n]! / net.speed[n]! : net.baseCost[n]!) + stopped[n]! * QUEUE_COST;
     else cost = net.baseCost[n]!;
+    // Only when the vehicle has to pass the obstacle (a destination before it is fine).
+    if (this.obsRear !== null && n < net.nLanes && this.obsRear[n]! < Infinity && (!isGoal || this.goalS[n]! > this.obsRear[n]!)) cost += ACCIDENT_PENALTY;
     const ng = gPrev + cost;
     if (this.seen[n] === stamp && ng >= this.g[n]!) return;
     this.seen[n] = stamp;

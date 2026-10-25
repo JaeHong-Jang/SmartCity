@@ -1,7 +1,7 @@
 // City document: the single editable, synchronized state of a city.
 // World units are meters on the XZ plane (Y is up). Traffic drives on the right.
 
-import { GROWTH_PRESETS } from './growthPresets.js';
+import { BASE_GROWTH_PRESET_IDS, GROWTH_PRESETS } from './growthPresets.js';
 import type { Vec2 } from './geometry.js';
 
 export type NodeId = string;
@@ -133,6 +133,8 @@ export interface BuildingType {
   rev?: number;
   /** Candidate for automatic growth on zoned lots (ADR 0009 §4). Only level 1 for now. */
   growth?: { level: 1 };
+  /** Made by the AI assistant (shown with an "AI" badge). Optional: documents without it load unchanged. */
+  origin?: 'ai';
 }
 
 export interface Building {
@@ -289,7 +291,7 @@ export interface CityMeta {
 }
 
 /** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
-export const DOC_VERSION = 4;
+export const DOC_VERSION = 5;
 
 export interface CityDoc {
   version: number;
@@ -312,7 +314,7 @@ export interface CityDoc {
  * Migrate a doc saved by an older version (in place). v1 → v2: parcels collection, design
  * revisions, and the v1 city-hall preset whose wings overlapped by 1 m (v2 forbids overlapping volumes).
  * v2 → v3: road features collection. v3 → v4: growth presets (only added by this migration, so a
- * user who deletes one does not get it back).
+ * user who deletes one does not get it back). v4 → v5: the growth preset variants (same rule; existing ids are never touched).
  */
 export function normalizeDoc(doc: CityDoc): CityDoc {
   // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
@@ -329,8 +331,12 @@ export function normalizeDoc(doc: CityDoc): CityDoc {
   }
   if (doc.version < 3) doc.version = 3;
   if (doc.version < 4) {
-    for (const t of GROWTH_PRESETS) if (!doc.buildingTypes[t.id]) doc.buildingTypes[t.id] = { ...cloneJson(t), rev: 1 };
+    for (const t of GROWTH_PRESETS) if (BASE_GROWTH_PRESET_IDS.includes(t.id) && !doc.buildingTypes[t.id]) doc.buildingTypes[t.id] = { ...cloneJson(t), rev: 1 };
     doc.version = 4;
+  }
+  if (doc.version < 5) {
+    for (const t of GROWTH_PRESETS) if (!BASE_GROWTH_PRESET_IDS.includes(t.id) && !doc.buildingTypes[t.id]) doc.buildingTypes[t.id] = { ...cloneJson(t), rev: 1 };
+    doc.version = 5;
   }
   return doc;
 }

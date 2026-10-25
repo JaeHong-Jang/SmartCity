@@ -117,14 +117,14 @@ test('offline solo: draw roads, place buildings, transit and closures', async ({
   await page.keyboard.press('3');
   await clickWorld(page, 40, 20);
   await clickWorld(page, -40, 22);
-  await page.locator('.tool-options button', { hasText: '아파트' }).click();
+  await page.locator('.tool-options button', { hasText: /^아파트/ }).click();
   await clickWorld(page, 45, 50);
-  await page.locator('.tool-options button', { hasText: '오피스 타워' }).click();
+  await page.locator('.tool-options button', { hasText: /^오피스 타워/ }).click();
   await clickWorld(page, -60, -40);
-  await page.locator('.tool-options button', { hasText: '근린상가' }).click();
+  await page.locator('.tool-options button', { hasText: /^근린상가/ }).click();
   await clickWorld(page, 130, 30);
   await expect.poll(async () => (await counts(page)).buildings, { timeout: 5000 }).toBeGreaterThanOrEqual(4);
-  await page.locator('.tool-options button', { hasText: '시청' }).click();
+  await page.locator('.tool-options button', { hasText: /^시청/ }).click();
   const ghostAt = await screen(page, -60, 40);
   await page.mouse.move(ghostAt.x, ghostAt.y, { steps: 5 });
   await page.waitForTimeout(500);
@@ -217,10 +217,10 @@ test('phase 2a: parcels, moving and rotating buildings, ground pan, junction dra
 
   // Buildings placed freely (Shift) inside the parcel: a shop, and a factory that breaks the zone's uses.
   await page.keyboard.press('3');
-  await page.locator('.tool-options button', { hasText: '근린상가' }).click();
+  await page.locator('.tool-options button', { hasText: /^근린상가/ }).click();
   await page.keyboard.down('Shift');
   await clickWorld(page, 48, 48);
-  await page.locator('.tool-options button', { hasText: '공장' }).click();
+  await page.locator('.tool-options button', { hasText: /^공장/ }).click();
   await clickWorld(page, 64, 32);
   await page.keyboard.up('Shift');
   await expect.poll(async () => (await counts(page)).buildings, { timeout: 5000 }).toBe(2);
@@ -358,9 +358,9 @@ test('real traffic on a road grid', async ({ page }) => {
   // A few buildings so demand has origins and destinations.
   await page.keyboard.press('3');
   for (const [x, z] of [[-96, -125], [0, -125], [96, -30], [-96, 70], [0, 125]] as const) await clickWorld(page, x, z);
-  await page.locator('.tool-options button', { hasText: '아파트' }).click();
+  await page.locator('.tool-options button', { hasText: /^아파트/ }).click();
   for (const [x, z] of [[-96, 30], [96, 125], [0, 30]] as const) await clickWorld(page, x, z);
-  await page.locator('.tool-options button', { hasText: '오피스 타워' }).click();
+  await page.locator('.tool-options button', { hasText: /^오피스 타워/ }).click();
   await clickWorld(page, 96, -100);
   await page.keyboard.press('1');
   await page.locator('.speed button', { hasText: '4×' }).click();
@@ -415,12 +415,12 @@ test('phase 2b: street features, citizens walking out of homes, building studio'
 
   // Homes first, workplaces after (citizens must still find jobs), all next to the roads.
   await page.keyboard.press('3');
-  await page.locator('.tool-options button', { hasText: '아파트' }).click();
+  await page.locator('.tool-options button', { hasText: /^아파트/ }).click();
   await clickWorld(page, -60, 30);
   await clickWorld(page, 60, -30);
-  await page.locator('.tool-options button', { hasText: '오피스 타워' }).click();
+  await page.locator('.tool-options button', { hasText: /^오피스 타워/ }).click();
   await clickWorld(page, 60, 34);
-  await page.locator('.tool-options button', { hasText: '근린상가' }).click();
+  await page.locator('.tool-options button', { hasText: /^근린상가/ }).click();
   await clickWorld(page, -60, -26);
   await expect.poll(async () => (await counts(page)).buildings, { timeout: 5000 }).toBe(4);
 

@@ -358,3 +358,16 @@ describe('opening and checking designs', () => {
     expect(ms).toBeLessThan(250);
   });
 });
+
+describe('origin survives a studio save', () => {
+  it('keeps origin ai from the opened design and gives new designs none', () => {
+    const roll = rollDesign(11, 'ecoTower', 'M');
+    const stored = toBuildingType(roll.doc, { id: 'a1', name: 'AI 설계', zone: 'office', origin: 'ai' });
+    expect(stored.origin).toBe('ai');
+    // Open -> edit nothing -> save with the meta the overlay derives from the opened design.
+    const o = fromBuildingType(stored);
+    const saved = toBuildingType(o.doc, { id: stored.id, name: stored.name, zone: stored.zone, ...(stored.origin ? { origin: stored.origin } : {}) });
+    expect(saved.origin).toBe('ai');
+    expect('origin' in toBuildingType(roll.doc, { id: 'n1', name: '새 설계', zone: 'office' })).toBe(false);
+  });
+});

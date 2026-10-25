@@ -28,12 +28,12 @@ import {
 export type StudioTool = 'stack' | 'erase' | 'paint' | 'eyedropper' | 'select' | 'prop';
 
 export const TOOL_INFO: { id: StudioTool; label: string; key: string; hint: string }[] = [
-  { id: 'stack', label: '쌓기', key: '1', hint: '면을 클릭하면 그 방향에 블록 추가 · 드래그 = 사각 채우기 · 우클릭/Shift+클릭 = 지우기' },
+  { id: 'stack', label: '쌓기', key: '1', hint: '면을 클릭하면 그 방향에 블록 추가 · 드래그 = 사각 채우기 · 지우기 = Shift+클릭 / 우클릭(짧게) · 회전 = 우클릭 드래그' },
   { id: 'erase', label: '지우개', key: '2', hint: '블록·장식을 클릭해 지우기 · 드래그 = 사각 지우기' },
   { id: 'paint', label: '칠하기', key: '3', hint: '블록을 클릭해 칠하기 · 드래그 = 사각 칠하기' },
   { id: 'eyedropper', label: '스포이드', key: '4', hint: '블록을 클릭해 그 색·재질·용도를 집기' },
   { id: 'select', label: '선택', key: '5', hint: '덩어리를 클릭해 선택 · 위 화살표를 끌어 층 추가/제거 · 지붕 형태 바꾸기' },
-  { id: 'prop', label: '장식', key: '6', hint: '벽면이나 옥상을 클릭해 장식 붙이기 · R 회전 · [ ] 크기 · 우클릭 = 장식 지우기' },
+  { id: 'prop', label: '장식', key: '6', hint: '벽면이나 옥상을 클릭해 장식 붙이기 · R 회전 · [ ] 크기 · 지우기 = Shift+클릭 / 우클릭(짧게)' },
 ];
 
 export type RectMode = 'add' | 'erase' | 'paint';

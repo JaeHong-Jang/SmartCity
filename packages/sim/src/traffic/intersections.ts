@@ -4,6 +4,7 @@
 // eligible to enter) and reserves those zones with it. allStop approaches (and school-zone crossings at
 // unsignalized junctions) first need a full stop; they are served in stop-completion order.
 
+import { bannedRequest } from '../scenario/reroute.js';
 import { requestDistance } from './vehicles.js';
 import { pedBlocks, reservePassage, updateStop } from './zones.js';
 import type { Vehicle, World } from './world.js';
@@ -34,12 +35,17 @@ export function exitNeed(w: World, v: Vehicle, lane: number): number {
   return Math.min(v.len + EXIT_MARGIN, w.net.len[lane]!);
 }
 
-/** Free length at the start of a lane, up to the tail of its last vehicle. */
+/** Free length at the start of a lane, up to the tail of its last vehicle (or a scenario obstacle). */
 function freeSpace(w: World, lane: number): number {
   const list = w.onEdge[lane]!;
-  if (list.length === 0) return w.net.len[lane]!;
-  const last = list[list.length - 1]!;
-  return last.s - last.len;
+  let free = w.net.len[lane]!;
+  if (list.length > 0) {
+    const last = list[list.length - 1]!;
+    free = last.s - last.len;
+  }
+  const obs = w.sc !== null ? w.sc.obs : null;
+  if (obs !== null && obs[lane]!.length > 0) free = Math.min(free, obs[lane]![0]!.rear);
+  return free;
 }
 
 export function processRequests(w: World): void {
@@ -56,6 +62,7 @@ function grantRequests(w: World): void {
   const net = w.net;
   const nLanes = net.nLanes;
   const conns = w.graph.connectors;
+  const ban = w.sc !== null ? w.sc.ban : null;
   let n = 0;
   for (let l = 0; l < nLanes; l++) {
     const list = w.onEdge[l]!;
@@ -66,6 +73,15 @@ function grantRequests(w: World): void {
     if (nxt === undefined || nxt < nLanes) continue;
     const d = net.len[l]! - v.s;
     if (d > requestDistance(v)) continue;
+    // Scenario closure (ADR 0010 §3, §6): no new entry; the vehicle asks for a recovery route.
+    if (ban !== null) {
+      if (ban[nxt]) {
+        bannedRequest(w, v);
+        continue;
+      }
+      // Its route was fixed meanwhile (stuck re-route, or that connector reopened): no longer waiting.
+      if (v.scWait === 2) v.scWait = 0;
+    }
     if (v.reqTick < 0) v.reqTick = w.tick;
     const stopReq = w.laneStopReq[l] === 1;
     if (stopReq) {

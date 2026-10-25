@@ -8,7 +8,7 @@ import { canPlace, type Goal, type World } from './world.js';
 const ACCESS_RADIUS = 80;
 const SPAWN_CLEARANCE = 5;
 
-interface Access {
+export interface Access {
   segId: string;
   dir: TravelDir;
   /** Fraction of the segment from node a. */
@@ -18,6 +18,10 @@ interface Access {
 export interface DemandModel {
   homes: Access[];
   homeW: number[];
+  /** Building id of each `homes` entry. */
+  homeIds: string[];
+  /** Access of every building that has one (scenario surges target buildings by id). */
+  access: Map<string, Access>;
   works: Access[];
   workW: number[];
   /** Lanes usable as random origins/destinations when the city has no buildings. */
@@ -29,7 +33,7 @@ export interface DemandModel {
 
 export function buildDemand(doc: CityDoc, net: Net): DemandModel {
   const g = net.graph;
-  const m: DemandModel = { homes: [], homeW: [], works: [], workW: [], lanes: [], totalLen: 0, typeIds: [], typeW: [] };
+  const m: DemandModel = { homes: [], homeW: [], homeIds: [], access: new Map(), works: [], workW: [], lanes: [], totalLen: 0, typeIds: [], typeW: [] };
   for (const l of g.lanes) {
     m.totalLen += l.length;
     if (!net.closed[l.index] && !l.busOnly && l.length >= 10) m.lanes.push(l.index);
@@ -56,6 +60,7 @@ export function buildDemand(doc: CityDoc, net: Net): DemandModel {
     const cs = g.segments.get(best.segId)!;
     const dir: TravelDir = best.side < 0 && cs.roadType.lanesBackward > 0 ? 'backward' : 'forward';
     const acc: Access = { segId: best.segId, dir, t: best.len > 0 ? best.s / best.len : 0.5 };
+    m.access.set(id, acc);
     // Mixed-use buildings are both an origin (homes) and a destination (workplaces, shops).
     const byUse = buildingMetrics(type).areaByUse;
     const home = byUse.residential;
@@ -63,6 +68,7 @@ export function buildDemand(doc: CityDoc, net: Net): DemandModel {
     if (home > 0) {
       m.homes.push(acc);
       m.homeW.push(home);
+      m.homeIds.push(id);
     }
     if (work > 0) {
       m.works.push(acc);
@@ -80,7 +86,7 @@ export function laneSAtT(net: Net, lane: number, t: number): number {
 }
 
 /** Rightmost lane of a segment direction that the vehicle may use. */
-function originLane(net: Net, segId: string, dir: TravelDir): number {
+export function originLane(net: Net, segId: string, dir: TravelDir): number {
   const lanes = net.groups.get(groupKey(segId, dir));
   if (!lanes) return -1;
   for (let i = lanes.length - 1; i >= 0; i--) if (!net.busOnly[lanes[i]!]) return lanes[i]!;
@@ -99,7 +105,10 @@ export function generateTrips(w: World): void {
   const n = base + (w.rng.next() < lam - base ? 1 : 0);
   const useBuildings = !citizens && m.homes.length > 0 && m.works.length > 0;
   for (let i = 0; i < n; i++) {
-    if (w.vehicles.length + w.queue.length >= w.maxVehicles) return;
+    // At the vehicle cap: main mode stops drawing; simulator mode (ADR 0010 §5) still draws the trip so the
+    // demand RNG sequence does not depend on the cap, and counts it as dropped.
+    const capped = w.vehicles.length + w.queue.length >= w.maxVehicles;
+    if (capped && w.sc === null) return;
     const typeId = m.typeIds[w.rng.weighted(m.typeW)]!;
     const len = w.types.get(typeId)!.length;
     let lane: number;
@@ -119,6 +128,10 @@ export function generateTrips(w: World): void {
       s = w.rng.next() * w.net.len[lane]!;
       const dl = w.graph.lanes[m.lanes[w.rng.int(m.lanes.length)]!]!;
       goal = { segId: dl.segmentId, dir: dl.dir, anyDir: true, laneIndex: -1, mode: 't', t: w.rng.next() };
+    }
+    if (capped) {
+      w.sc!.dropped++;
+      continue;
     }
     const L = w.net.len[lane]!;
     if (L < len + 3) continue;

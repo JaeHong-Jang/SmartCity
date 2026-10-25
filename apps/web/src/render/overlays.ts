@@ -251,7 +251,7 @@ export class OverlayLayer {
     if (p.selection !== s.selection || p.hoverParcelId !== s.hoverParcelId || d & (D_PARCELS | D_BUILDINGS)) {
       this.parcels.setFocus([s.selection?.kind === 'parcel' ? s.selection.id : null, s.hoverParcelId]);
     }
-    if (p.ai?.proposal !== s.ai.proposal || p.proposalStatus !== s.proposalStatus) this.proposal.set(s.doc, s.ai.proposal, s.proposalStatus?.invalid ?? {});
+    if (p.ai?.proposal !== s.ai.proposal || p.proposalStatus !== s.proposalStatus || (s.ai.proposal && p.docVersion !== s.docVersion)) this.proposal.set(s.doc, s.ai.proposal, s.proposalStatus?.invalid ?? {}, s.docVersion);
     if (p.pending !== s.pending) this.buildPending(s);
     if (p.flashes !== s.flashes) this.buildFlash(s);
     if (selStale || p.selection !== s.selection) this.buildSelection(s);

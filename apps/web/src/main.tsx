@@ -14,6 +14,13 @@ import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsTransport';
 import { CityRenderer } from './render/CityRenderer';
 import { WorkerSimStream } from './sim/simStream';
+import { SimModeController } from './simmode/controller';
+import { setSimModeController } from './simmode/instance';
+import { installSimModeInput } from './simmode/input';
+import { createFrozenView } from './simmode/frozenStore';
+import { guardedSend } from './simmode/sendGuard';
+import { simModeStore } from './simmode/store';
+import { SwitchableStream } from './simmode/switchableStream';
 import { ToolController } from './tools/controller';
 import { App } from './ui/App';
 import { ServicesContext, type AppServices } from './ui/context';
@@ -40,7 +47,7 @@ storage?.setItem(NAME_KEY, name);
 
 const store = new ClientStore(room, name);
 let transport: Transport | null = null;
-const dispatcher = createDispatcher(store, () => transport);
+const dispatcher = createDispatcher(store, () => transport, undefined, () => simMode.active);
 
 // Simulation worker follows the same applied command stream as the main doc.
 const sim = new WorkerSimStream();
@@ -50,13 +57,37 @@ store.onReset((doc) => {
   sim.init(doc);
 });
 store.onApplied((cmd) => sim.command(cmd));
+// Simulator mode (ADR 0010): the renderer reads through `view`, which points at a private copy while active.
+const view = new SwitchableStream(sim);
+const frozen = createFrozenView(store);
+let savedTool = store.getState().tool;
+const simMode = new SimModeController({
+  getDoc: () => store.getState().doc,
+  getSeq: () => store.getState().seq,
+  getDayTime: () => store.getState().simStats?.clock?.dayTime ?? null,
+  getSpeed: () => store.getState().simSpeed,
+  setMainSpeed: (speed) => sim.setSpeed(speed),
+  setEditLock(locked) {
+    if (locked) {
+      savedTool = store.getState().tool;
+      store.set({ tool: 'select' });
+    } else {
+      store.set({ tool: savedTool });
+    }
+  },
+  setViewDoc: (doc) => (doc ? frozen.freeze(doc) : frozen.thaw()),
+  createStream: () => new WorkerSimStream(),
+  proxy: view,
+  main: sim,
+});
+setSimModeController(simMode);
 let lastSpeed = store.getState().simSpeed;
 sim.setSpeed(lastSpeed);
 store.subscribe(() => {
   const s = store.getState().simSpeed;
   if (s !== lastSpeed) {
     lastSpeed = s;
-    sim.setSpeed(s);
+    simMode.routeSpeed(s);
   }
 });
 let lastStatsAt = 0;
@@ -125,7 +156,20 @@ if (params.get('offline') === '1') {
 // Renderer + tools.
 const viewport = document.getElementById('viewport')!;
 const labels = document.getElementById('labels')!;
-const renderer = new CityRenderer(viewport, labels, store, sim);
+const renderer = new CityRenderer(viewport, labels, frozen.view, view);
+renderer.scenario.setSource({
+  graph: () => simMode.roadGraph(),
+  surges(tick) {
+    const doc = simMode.copyCityDoc();
+    if (!doc) return [];
+    return simModeStore
+      .getState()
+      .events.filter((e) => e.kind === 'surge' && e.status === 'ok' && tick >= e.startTick && (e.endTick === null || tick < e.endTick))
+      .flatMap((e) => (e.buildingId && doc.buildings[e.buildingId] ? [doc.buildings[e.buildingId]!.pos] : []));
+  },
+});
+// Before the ToolController: while simulator mode is active the shared editing tools never see the left button.
+installSimModeInput(renderer.renderer.domElement, simMode, renderer.pickGround, renderer.groundPan);
 new ToolController(
   store,
   dispatcher,
@@ -137,12 +181,16 @@ new ToolController(
 );
 
 watchProposal(store);
+store.onAiHighlight = (h) => {
+  if (h.bbox) renderer.fitBox(h.bbox);
+};
 
 const services: AppServices = {
   store,
   dispatcher,
   focus: (p) => renderer.focus(p),
-  send: (msg) => transport?.send(msg),
+  fit: (box) => renderer.fitBox(box),
+  send: (msg) => guardedSend(msg, () => simMode.active, (m) => transport?.send(m), (text) => store.toast(text, 'error', 'simlock')),
   cameraTarget() {
     const t = renderer.cam.controls.getTarget(new THREE.Vector3());
     return { x: t.x, z: t.z };
@@ -164,6 +212,15 @@ if (import.meta.env.DEV) {
   (window as unknown as { __smartcity: unknown }).__smartcity = {
     store,
     renderer,
+    simmode: {
+      controller: simMode,
+      store: simModeStore,
+      workers: () => simMode.liveWorkers(),
+      /** Building count of the doc the renderer draws (frozen copy in simulator mode) and of the live doc. */
+      drawnBuildings: () => Object.keys(frozen.view.getState().doc.buildings).length,
+      liveBuildings: () => Object.keys(store.getState().doc.buildings).length,
+      scene: () => renderer.scenario.stats(),
+    },
     worldToScreen(x: number, z: number) {
       const rect = renderer.renderer.domElement.getBoundingClientRect();
       v.set(x, 0, z).project(renderer.cam.camera);

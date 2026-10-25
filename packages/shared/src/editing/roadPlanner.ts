@@ -2,7 +2,7 @@
 // snap endpoints to nodes or existing roads, split roads where the new one connects or crosses,
 // then add the new segments between all those points.
 
-import { LIMITS, segmentLength } from '../apply.js';
+import { LIMITS, segmentLength, tryApplyCommand } from '../apply.js';
 import type { Command } from '../commands.js';
 import {
   closestPointOnPolyline,
@@ -16,7 +16,7 @@ import {
   type Vec2,
 } from '../geometry.js';
 import type { IdGen } from '../ids.js';
-import type { CityDoc, NodeId, RoadSegment, SegmentId } from '../model.js';
+import { cloneJson, type CityDoc, type NodeId, type RoadSegment, type SegmentId } from '../model.js';
 
 export const GRID_SIZE = 8;
 export const NODE_SNAP_RADIUS = 7;
@@ -209,4 +209,35 @@ export function planRoad(doc: CityDoc, input: RoadPlanInput, ids: IdGen): RoadPl
   }
 
   return { command: { type: 'batch', commands }, junctions: points.map((p) => p.pos) };
+}
+
+export interface RoadBatchInfo {
+  /** Total length of the segments the batch adds, meters. */
+  lengthM: number;
+  /** Existing nodes the new segments attach to. */
+  connected: number;
+  /** Existing segments the batch splits. */
+  splits: number;
+  /** The new segments' center lines (for previews). */
+  pieces: { points: Vec2[]; roadTypeId: string }[];
+}
+
+/** What a road batch (as made by planRoad) would build on `doc`; null when it does not apply. `doc` is not touched. */
+export function describeRoadBatch(doc: CityDoc, cmd: Command): RoadBatchInfo | null {
+  if (cmd.type !== 'batch') return null;
+  const work = cloneJson(doc);
+  if (!tryApplyCommand(work, cmd).ok) return null;
+  const info: RoadBatchInfo = { lengthM: 0, connected: 0, splits: 0, pieces: [] };
+  const connected = new Set<NodeId>();
+  for (const c of cmd.commands) {
+    if (c.type === 'segment.split') info.splits++;
+    if (c.type !== 'segment.add') continue;
+    const s = work.segments[c.segment.id];
+    if (!s) continue;
+    info.lengthM += segmentLength(work, s);
+    info.pieces.push({ points: segmentCurve(work, s), roadTypeId: s.roadTypeId });
+    for (const n of [s.a, s.b]) if (doc.nodes[n]) connected.add(n);
+  }
+  info.connected = connected.size;
+  return info;
 }

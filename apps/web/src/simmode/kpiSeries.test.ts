@@ -1,0 +1,76 @@
+import { describe, expect, it } from 'vitest';
+import type { ScenarioKpi } from '@smartcity/sim';
+import { alignKpiSeries, KPI_EVERY, KPI_METRICS, KpiCollector, rebaseSeries, sinceBase } from './kpiSeries';
+
+const kpi = (tick: number, over: Partial<ScenarioKpi> = {}): ScenarioKpi => ({
+  tick, since: 0, completed: tick / 10, avgTravelTime: 60, inProgress: 3, noRoute: 1, droppedTrips: 0, waitingToDepart: 2, removed: 0, congestionLength: 100, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0, ...over,
+});
+
+describe('KpiCollector', () => {
+  it('keeps exactly the multiples of 60 ticks', () => {
+    expect(KPI_EVERY).toBe(60);
+    const c = new KpiCollector();
+    for (let t = 0; t <= 200; t += 2) c.offer(kpi(t));
+    expect(c.points.map((p) => p.tick)).toEqual([0, 60, 120, 180]);
+  });
+  it('ignores off-grid ticks and repeats, and adopts a fast-forward run', () => {
+    const c = new KpiCollector();
+    c.seed([kpi(0), kpi(60), kpi(120)]);
+    for (const t of [121, 150, 180, 180, 240]) c.offer(kpi(t));
+    expect(c.points.map((p) => p.tick)).toEqual([0, 60, 120, 180, 240]);
+  });
+});
+
+describe('alignKpiSeries', () => {
+  it('puts both policies on the same grid of sim ticks', () => {
+    const on = [0, 60, 120, 180].map((t) => kpi(t, { rerouted: t }));
+    const off = [0, 60, 120, 180].map((t) => kpi(t, { rerouted: 0 }));
+    const rows = alignKpiSeries(on, off, 180);
+    expect(rows.map((r) => r.tick)).toEqual([0, 60, 120, 180]);
+    expect(rows.map((r) => r.off?.tick)).toEqual([0, 60, 120, 180]);
+    expect(rows.map((r) => r.on?.tick)).toEqual([0, 60, 120, 180]);
+  });
+  it('carries the latest point forward and leaves a side empty before its first point', () => {
+    const rows = alignKpiSeries([kpi(120)], [kpi(0), kpi(60)], 180);
+    expect(rows.map((r) => r.on?.tick)).toEqual([undefined, undefined, 120, 120]);
+    expect(rows.map((r) => r.off?.tick)).toEqual([0, 60, 60, 60]);
+  });
+  it('metrics read the five compared quantities, stuck = no route + waiting to depart', () => {
+    expect(KPI_METRICS.map((m) => m.id)).toEqual(['completed', 'avgTravelTime', 'congestionLength', 'stuck', 'rerouted']);
+    const stuck = KPI_METRICS.find((m) => m.id === 'stuck')!;
+    expect(stuck.get(kpi(0, { noRoute: 4, waitingToDepart: 5 }))).toBe(9);
+    // 60 sim seconds = 10 game minutes
+    expect(KPI_METRICS.find((m) => m.id === 'avgTravelTime')!.get(kpi(0, { avgTravelTime: 60 }))).toBe(10);
+  });
+});
+
+describe('counters since the end of warm-up', () => {
+  const base = kpi(1200, { completed: 10, avgTravelTime: 40, droppedTrips: 1, removed: 2, rerouted: 3, detoured: 1, recovered: 1 });
+
+  it('counts become differences and the mean uses (sum − base sum) / (n − base n)', () => {
+    // 10 trips averaging 40 s (sum 400), then 4 more taking 100 s each: 14 trips, sum 800, avg 800/14
+    const k = kpi(1800, { completed: 14, avgTravelTime: 800 / 14, droppedTrips: 4, removed: 2, rerouted: 8, detoured: 5, recovered: 1, inProgress: 7, noRoute: 2, waitingToDepart: 3, congestionLength: 55 });
+    const d = sinceBase(k, base);
+    expect(d.completed).toBe(4);
+    expect(d.avgTravelTime).toBeCloseTo(100, 9);
+    expect([d.droppedTrips, d.removed, d.rerouted, d.detoured, d.recovered]).toEqual([3, 0, 5, 4, 0]);
+    // instantaneous values untouched
+    expect([d.inProgress, d.noRoute, d.waitingToDepart, d.congestionLength]).toEqual([7, 2, 3, 55]);
+  });
+
+  it('no completed trip since the base gives mean 0 (n = 0), never NaN', () => {
+    const d = sinceBase(kpi(1260, { completed: 10, avgTravelTime: 40 }), base);
+    expect(d.completed).toBe(0);
+    expect(d.avgTravelTime).toBe(0);
+  });
+
+  it('rebaseSeries starts at the base tick with zeros and is empty without it', () => {
+    const pts = [kpi(1140, { completed: 9 }), base, kpi(1260, { completed: 12, avgTravelTime: 50 })];
+    const r = rebaseSeries(pts, 1200);
+    expect(r.map((p) => p.tick)).toEqual([1200, 1260]);
+    expect(r[0]!.completed).toBe(0);
+    expect(r[1]!.completed).toBe(2);
+    expect(r[1]!.avgTravelTime).toBeCloseTo((50 * 12 - 40 * 10) / 2, 9);
+    expect(rebaseSeries([kpi(60)], 1200)).toEqual([]);
+  });
+});

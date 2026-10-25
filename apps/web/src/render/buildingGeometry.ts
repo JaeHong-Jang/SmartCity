@@ -20,6 +20,7 @@ import {
   type SmartFeatures,
   type Vec2,
 } from '@smartcity/shared';
+import { TONE_GLSL } from './buildingTone';
 
 export const FACADE_STYLE_ID: Record<FacadeStyle, number> = { grid: 0, ribbon: 1, curtain: 2, none: 3 };
 export const GROUND_ID: Record<GroundFloor, number> = { none: 0, shop: 1, lobby: 2, pilotis: 3 };
@@ -555,7 +556,7 @@ export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' 
 /** Shared material for baked building geometry: vertex colors plus the facade shader. */
 export function createBuildingMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.02 });
-  mat.customProgramCacheKey = () => 'smartcity-building-v3';
+  mat.customProgramCacheKey = () => 'smartcity-building-v5';
   // uNight (0..1) is shared by reference; set `material.userData.uNight.value` each frame.
   const uNight = { value: 0 };
   mat.userData.uNight = uNight;
@@ -568,6 +569,8 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         attribute vec3 aWall;
         attribute vec4 aFacade;
         attribute float aOccupancy;
+        attribute vec3 aTone;
+        varying vec3 vTone;
         varying vec3 vWall;
         varying vec4 vFacade;
         varying float vOcc;`,
@@ -577,7 +580,8 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         `#include <begin_vertex>
         vWall = aWall;
         vFacade = aFacade;
-        vOcc = aOccupancy;`,
+        vOcc = aOccupancy;
+        vTone = aTone;`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -586,7 +590,9 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         varying vec3 vWall;
         varying vec4 vFacade;
         varying float vOcc;
+        varying vec3 vTone;
         uniform float uNight;
+        ${TONE_GLSL}
         float bHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }`,
       )
       .replace(
@@ -613,7 +619,7 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
           float bw = bayW;
           float bayIdx = floor(u / bw);
           float inBay = fract(u / bw);
-          vec3 wallC = diffuseColor.rgb;
+          vec3 wallC = toneWall(diffuseColor.rgb, vTone);
           float rnd = bHash(vec2(floorIdx, bayIdx + L));
           vec3 glassC = vec3(0.10, 0.15, 0.21) + 0.07 * rnd + vec3(0.0, 0.02, 0.05) * inFloor;
           float win = 0.0;

@@ -2,6 +2,7 @@
 // simulation later (Phase 3). Change only with the Lead's approval (see AGENTS.md).
 
 import type { NodeId, RoadType, SegmentId, TravelDir, Vec2 } from '@smartcity/shared';
+import type { ScenarioView } from './scenario/types.js';
 
 // ---------- compiled road network (derived from CityDoc, never edited directly) ----------
 
@@ -204,6 +205,8 @@ export interface SimSnapshot {
   stopWaiting: Uint16Array;
   busStopIds: string[];
   stats: SimStats;
+  /** Simulator mode (ADR 0010): obstacles, closed lanes and KPIs; absent unless the scenario API was used. */
+  scenario?: ScenarioView;
 }
 
 /** Buffers handed back by the consumer so the next snapshot can reuse them (no per-tick allocation). */
@@ -232,6 +235,12 @@ export interface SimOptions {
   citizens?: boolean;
   /** Hard cap on citizen agents. Default 8000. */
   maxCitizens?: number;
+  /**
+   * Simulator mode from tick 0 (ADR 0010): the scenario state exists from construction, so warm-up and
+   * experiment both run with scenario rules (citizen decision hashes, cap draws) and replays match. Default false
+   * (activated by the first scenarioInput / setPolicy / kpi call instead).
+   */
+  scenario?: boolean;
 }
 
 /** Read-only view of a vehicle, for tests and the inspector. */

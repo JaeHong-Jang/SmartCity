@@ -28,6 +28,8 @@ export function computeAccelerations(w: World): void {
   const net = w.net;
   const nLanes = net.nLanes;
   const zl = w.zones.lane;
+  // Scenario accident obstacles (ADR 0010 §3): stationary leaders, never counted as vehicles.
+  const obs = w.sc !== null ? w.sc.obs : null;
   for (let e = 0; e < net.nEdges; e++) {
     const list = w.onEdge[e]!;
     const L = net.len[e]!;
@@ -83,6 +85,14 @@ export function computeAccelerations(w: World): void {
               blocked = true;
             }
           }
+          if (obs !== null && nxt < nLanes && obs[nxt]!.length > 0) {
+            const g = d + obs[nxt]![0]!.rear;
+            if (g < ob.gap) {
+              ob.gap = g;
+              ob.v = 0;
+            }
+            blocked = true;
+          }
           const l2 = w.onEdge[nxt]!;
           if (l2.length > 0) {
             const last = l2[l2.length - 1]!;
@@ -97,6 +107,17 @@ export function computeAccelerations(w: World): void {
           d += net.len[nxt]!;
           cur = nxt;
           j++;
+        }
+      }
+      if (obs !== null && stops !== null && obs[e]!.length > 0) {
+        for (const o of obs[e]!) {
+          if (o.rear < v.s - 1e-6) continue;
+          const g = o.rear - v.s;
+          if (g < ob.gap) {
+            ob.gap = g;
+            ob.v = 0;
+          }
+          break;
         }
       }
       if (gate) {

@@ -19,8 +19,14 @@ import { reprojectPeds, retargetWalkers, routeCrossers, walkerGoal } from './cit
 import { capacityOf, clearTransitCaches, newTransit } from './citizens/transit.js';
 import { compileNetwork, newCompileCache } from './network/compile.js';
 import { buildPedGraph, type PedGraph } from './network/pedGraph.js';
-import { buildNet } from './network/net.js';
+import { buildNet, writePose } from './network/net.js';
 import { Router } from './network/route.js';
+import { applyDueInputs, ensureScenario, queuePolicy, queueScenarioInput, relocateObstacles } from './scenario/apply.js';
+import { inactiveKpi, scenarioKpi } from './scenario/kpi.js';
+import { processReroutes } from './scenario/reroute.js';
+import { scenarioHolds } from './scenario/state.js';
+import { processSurge } from './scenario/surge.js';
+import { policyError, RECENT_LOG_SIZE, type ResponsePolicy, type ScenarioOutcome, type ScenarioInput, type ScenarioKpi, type ScenarioResult, type ScenarioView } from './scenario/types.js';
 import { newSnapshotScratch, writeSnapshot } from './snapshot.js';
 import { maintainBuses, syncBusLines, updateBus } from './traffic/buses.js';
 import { buildDemand, generateTrips } from './traffic/demand.js';
@@ -73,6 +79,7 @@ export class Simulation {
   private readonly snapScratch = newSnapshotScratch();
   /** Building layout and served bus stops: the pedestrian graph (doors, stop nodes) is rebuilt when it changes. */
   private buildingSig = '';
+  private boundary: { tick: number; fn: () => void } | null = null;
 
   constructor(doc: CityDoc, opts: SimOptions = {}) {
     const d = normalizeDoc(cloneJson(doc));
@@ -124,6 +131,7 @@ export class Simulation {
       spawned: 0,
       arrived: 0,
       removed: 0,
+      sc: null,
     };
     installStreet(this.w);
     this.w.ped = newPedWorld(buildPedGraph(d, graph));
@@ -131,6 +139,8 @@ export class Simulation {
     this.buildingSig = this.buildingSignature();
     this.refreshDerived();
     reconcileCitizens(this.w);
+    // Simulator mode from tick 0 (ADR 0010): the whole experiment, warm-up included, runs in scenario mode.
+    if (opts.scenario) ensureScenario(this.w);
   }
 
   applyCommand(cmd: Command): ApplyResult {
@@ -143,14 +153,37 @@ export class Simulation {
     return res;
   }
 
+  /**
+   * @internal Replay (scenario/record.ts): run `fn` at the boundary before the step of `tick` — after pending
+   * edits are flushed, where a live `setPolicy` / `scenarioInput` call between steps would have activated.
+   */
+  atTickBoundary(tick: number, fn: () => void): void {
+    this.boundary = { tick, fn };
+    this.reachBoundary();
+  }
+
+  /** Run a scheduled boundary as soon as the sim stands on it, so it is observable at that tick. */
+  private reachBoundary(): void {
+    if (this.boundary === null || this.boundary.tick !== this.w.tick) return;
+    const fn = this.boundary.fn;
+    this.boundary = null;
+    this.flush();
+    fn();
+  }
+
   step(): void {
     const w = this.w;
     this.flush();
+    if (w.sc !== null) applyDueInputs(w);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
     processCitizenEvents(w);
     if (w.demandOn) generateTrips(w);
     maintainBuses(w);
     this.processQueue();
+    if (w.sc !== null) {
+      processReroutes(w);
+      processSurge(w);
+    }
     processPedQueue(w);
     updateGates(w);
     w.zs.elig.fill(0);
@@ -167,10 +200,76 @@ export class Simulation {
     w.lostDrivers.length = 0;
     w.arrivedDrivers.length = 0;
     w.tick++;
+    if (this.boundary !== null) this.reachBoundary();
   }
 
   snapshot(reuse?: SnapshotBuffers): SimSnapshot {
-    return writeSnapshot(this.w, this.snapScratch, this.stats(), reuse);
+    const snap = writeSnapshot(this.w, this.snapScratch, this.stats(), reuse);
+    if (this.w.sc !== null) snap.scenario = this.scenarioView();
+    return snap;
+  }
+
+  // ---------- simulator mode (ADR 0010) ----------
+
+  /**
+   * Queue an experiment input. Validated now (existing segment/lane/building, not a past tick, unique
+   * eventId); applied at the start of the step whose tick it names, in (tick, order, eventId) order.
+   */
+  scenarioInput(input: ScenarioInput): ScenarioResult {
+    if (this.boundary !== null) return { ok: false, error: this.replayGuard() };
+    this.flush();
+    return queueScenarioInput(this.w, input);
+  }
+
+  /** A record replay activates only at its recorded boundary: nothing may activate (or queue) before it. */
+  private replayGuard(): string {
+    return `기록 재생: 시나리오는 tick ${this.boundary!.tick}에 활성화됩니다 (현재 ${this.w.tick})`;
+  }
+
+  /**
+   * Response policy for events from now on (re-route of informed vehicles). Recorded as a `policy.set` input
+   * at the current tick boundary (applied first in the next step) and returned, for the ScenarioRecord.
+   */
+  setPolicy(policy: ResponsePolicy): ScenarioInput {
+    const bad = policyError(policy);
+    if (bad) throw new RangeError(bad);
+    if (this.boundary !== null) throw new RangeError(this.replayGuard());
+    this.flush();
+    return queuePolicy(this.w, policy);
+  }
+
+  /**
+   * Every apply-time scenario outcome since the last drain, in apply order — applied inputs and no-ops,
+   * automatic ends, obstacle moves/removals after edits — then clears the stream. Lossless (unlike
+   * `snapshot.scenario.recentLog`); reading it changes no simulation state and never activates.
+   */
+  drainScenarioOutcomes(): ScenarioOutcome[] {
+    const sc = this.w.sc;
+    if (sc === null || sc.outcomes.length === 0) return [];
+    const out = sc.outcomes.map((e) => ({ eventId: e.eventId, tick: e.tick, kind: e.kind, applied: e.applied, ...(e.note !== undefined ? { reason: e.note } : {}) }));
+    sc.outcomes = [];
+    return out;
+  }
+
+  /** Every accepted scenario input so far (policy changes included), in acceptance order: ScenarioRecord.inputs. */
+  scenarioInputs(): ScenarioInput[] {
+    return (this.w.sc?.accepted ?? []).map((i) => ({ ...i, target: { ...i.target }, params: { ...i.params } }));
+  }
+
+  /**
+   * Tick the scenario state was created at (SimOptions.scenario → 0; else the first scenarioInput / setPolicy
+   * call; a record replay at its `activatedAtTick`), null while inactive. Put it in ScenarioRecord.activatedAtTick.
+   */
+  scenarioActivatedAt(): number | null {
+    return this.w.sc !== null ? this.w.sc.since : null;
+  }
+
+  /**
+   * Read-only: never creates or activates the scenario state. Before activation the event counters are 0 and
+   * `since` is −1 (inactive); the live quantities (in progress, congestion, waiting) are still reported.
+   */
+  kpi(): ScenarioKpi {
+    return this.w.sc !== null ? scenarioKpi(this.w) : inactiveKpi(this.w);
   }
 
   stats(): SimStats {
@@ -253,6 +352,31 @@ export class Simulation {
   }
 
   // ---------- internals ----------
+
+  private scenarioView(): ScenarioView {
+    const w = this.w;
+    const sc = w.sc!;
+    const obstacles: ScenarioView['obstacles'] = [];
+    const pose = new Float32Array(3);
+    if (sc.obs !== null) {
+      for (let l = 0; l < w.net.nLanes; l++) {
+        for (const o of sc.obs[l]!) {
+          writePose(w.net.pts[l]!, w.net.cum[l]!, o.rear + o.len / 2, false, 0, pose, 0);
+          obstacles.push({ eventId: o.eventId, lane: l, x: pose[0]!, z: pose[1]!, heading: pose[2]!, length: o.len });
+        }
+      }
+    }
+    const activeEvents: ScenarioView['activeEvents'] = sc.effects.map((e) => ({ eventId: e.eventId, kind: e.kind, startTick: e.startTick, endTick: e.endTick === Infinity ? null : e.endTick }));
+    const surges = new Set<string>();
+    for (const t of sc.surgeQueue) surges.add(t.eventId);
+    for (const id of surges) {
+      const s = sc.surges.get(id)!;
+      activeEvents.push({ eventId: id, kind: 'surge', startTick: s.startTick, endTick: s.endTick });
+    }
+    activeEvents.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
+    const recentLog = sc.log.slice(-RECENT_LOG_SIZE).map((e) => ({ eventId: e.eventId, tick: e.tick, kind: e.kind, applied: e.applied, ...(e.note !== undefined ? { reason: e.note } : {}) }));
+    return { graphRevision: w.graphRevision, obstacles, closedLanes: sc.closedLanes.slice(), kpi: scenarioKpi(w), activeEvents, recentLog };
+  }
 
   private flush(): void {
     if (this.netDirty) this.recompile();
@@ -361,6 +485,9 @@ export class Simulation {
     this.buildingSig = this.buildingSignature();
     this.rebuildPeds(oldPg, oldIds);
     this.refreshDerived();
+    // Scenario overrides are per lane index: re-place obstacles against the kept vehicles and recompose them
+    // on the new graph (records keep stable ids).
+    if (this.w.sc !== null) relocateObstacles(this.w);
   }
 
   private processQueue(): void {
@@ -375,7 +502,8 @@ export class Simulation {
         const type = w.types.get(typeId);
         // Re-check the cap at the actual spawn: buses may have taken slots since the trip was queued.
         if (type && w.vehicles.length < w.maxVehicles && canPlace(w, lane, s, type.length, 2.5)) {
-          createVehicle(w, typeId, lane, s, goal, null);
+          // Simulator mode counts trips that cannot start (no route, origin lane closed).
+          if (!createVehicle(w, typeId, lane, s, goal, null) && w.sc !== null) w.sc.dropped++;
         }
         continue;
       }
@@ -403,6 +531,10 @@ export class Simulation {
         v.person = -1;
         despawn(w, v);
         w.arrived++;
+        if (w.sc !== null) {
+          w.sc.completed++;
+          w.sc.ttTicks += w.tick + 1 - v.t0;
+        }
       }
       if (!v.alive) {
         dead = true;
@@ -414,6 +546,9 @@ export class Simulation {
         v.rerouted = false;
       }
       if (!v.bus) {
+        // Held by a scenario event (closure ahead, no route, behind an accident): not stuck; the stop
+        // clock restarts at the reroute mark so the vehicle gets a full window once released.
+        if (v.stopTime >= STUCK_REMOVE && w.sc !== null && scenarioHolds(w, v)) v.stopTime = STUCK_REROUTE;
         if (v.stopTime >= STUCK_REMOVE) {
           despawn(w, v);
           w.removed++;

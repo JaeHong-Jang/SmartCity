@@ -7,13 +7,23 @@ import type { CityDoc, VehiclePart, VehicleType } from '@smartcity/shared';
 import { VEHICLE_STRIDE, type SimSnapshot } from '@smartcity/sim';
 import type { SimulationStream } from '../sim/simStream';
 import { TICK_MS } from '../sim/protocol';
+import { CAR_CLASSES, carClassLength, carBodyParts, carClassOf, carFixedParts, carColorOf, usesVarietyPath } from './vehicleModels';
 
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _p = new THREE.Vector3();
 const _s = new THREE.Vector3(1, 1, 1);
+const _s1 = new THREE.Vector3(1, 1, 1);
 const _up = new THREE.Vector3(0, 1, 0);
 const _col = new THREE.Color();
+
+/** THREE.Color per hex string, cached so per-frame coloring never allocates. */
+const colorCache = new Map<string, THREE.Color>();
+function paletteColor(hex: string): THREE.Color {
+  let c = colorCache.get(hex);
+  if (!c) colorCache.set(hex, (c = new THREE.Color(hex)));
+  return c;
+}
 
 /** Bake vehicle parts (x forward, y up, z right) into one geometry with vertex colors. */
 export function bakeVehicleGeometry(parts: VehiclePart[]): THREE.BufferGeometry {
@@ -69,24 +79,61 @@ export class VehicleLayer {
   private indexedSnapshot: SimSnapshot | null = null;
   private typeSlots: (TypeMesh | undefined)[] = [];
   private typeCounts: number[] = [];
+  /** Unchanged default sedan/suv are drawn by appearance class (hash of vehicle id) instead of by their own mesh. */
+  private carTypes: boolean[] = [];
+  private typeLen: number[] = [];
+  private classMeshes: TypeMesh[] = [];
+  /** Glass/wheels per class: same matrices as the body mesh, fixed vertex colors, no instanceColor. */
+  private classFixed: TypeMesh[] = [];
+  private classCounts: number[] = [];
+  private readonly classLen = CAR_CLASSES.map((_, i) => carClassLength(i));
   visibleCount = 0;
 
   constructor(private readonly stream: SimulationStream) {
     this.group.name = 'vehicles';
+    CAR_CLASSES.forEach((name, i) => {
+      this.classMeshes.push(this.makeMesh(`vehicles-car-${name}`, bakeVehicleGeometry(carBodyParts(i)), 16));
+      this.classFixed.push(this.makeMesh(`vehicles-car-${name}-fixed`, bakeVehicleGeometry(carFixedParts(i)), 16));
+    });
+  }
+
+  private makeMesh(name: string, geo: THREE.BufferGeometry, capacity: number): TypeMesh {
+    const mesh = new THREE.InstancedMesh(geo, this.mat, capacity);
+    mesh.count = 0;
+    mesh.castShadow = true;
+    mesh.frustumCulled = false;
+    mesh.name = name;
+    this.group.add(mesh);
+    return { sig: '', mesh, capacity, count: 0 };
+  }
+
+  private growClass(c: number, need: number): void {
+    const tm = this.classMeshes[c]!;
+    let cap = tm.capacity;
+    while (cap < need) cap *= 2;
+    this.group.remove(tm.mesh);
+    const geo = tm.mesh.geometry;
+    tm.mesh.dispose();
+    this.classMeshes[c] = this.makeMesh(tm.mesh.name, geo, cap);
+    const fx = this.classFixed[c]!;
+    this.group.remove(fx.mesh);
+    const fgeo = fx.mesh.geometry;
+    fx.mesh.dispose();
+    this.classFixed[c] = this.makeMesh(fx.mesh.name, fgeo, cap);
   }
 
   /** Rebake geometry for types whose parts changed. */
   syncTypes(doc: CityDoc): void {
     for (const [id, tm] of this.types) {
       const vt = doc.vehicleTypes[id];
-      if (!vt || JSON.stringify(vt.parts) !== tm.sig) {
+      if (!vt || usesVarietyPath(vt) || JSON.stringify(vt.parts) !== tm.sig) {
         this.group.remove(tm.mesh);
         tm.mesh.geometry.dispose();
         tm.mesh.dispose();
         this.types.delete(id);
       }
     }
-    for (const vt of Object.values(doc.vehicleTypes)) if (!this.types.has(vt.id)) this.types.set(vt.id, this.createType(vt, 16));
+    for (const vt of Object.values(doc.vehicleTypes)) if (!usesVarietyPath(vt) && !this.types.has(vt.id)) this.types.set(vt.id, this.createType(vt, 16));
   }
 
   private createType(vt: VehicleType, capacity: number, geo?: THREE.BufferGeometry): TypeMesh {
@@ -115,6 +162,8 @@ export class VehicleLayer {
   update(now: number, doc: CityDoc): void {
     const cur = this.stream.latest();
     for (const tm of this.types.values()) tm.mesh.count = 0;
+    for (const tm of this.classMeshes) tm.mesh.count = 0;
+    for (const tm of this.classFixed) tm.mesh.count = 0;
     this.visibleCount = 0;
     if (!cur) return;
     const prev = this.stream.previous();
@@ -132,14 +181,25 @@ export class VehicleLayer {
     const ids = cur.vehicleTypeIds;
     this.typeSlots.length = ids.length;
     this.typeCounts.length = ids.length;
+    this.carTypes.length = ids.length;
+    this.typeLen.length = ids.length;
     for (let t = 0; t < ids.length; t++) {
+      const vt = doc.vehicleTypes[ids[t]!];
       this.typeSlots[t] = this.types.get(ids[t]!);
       this.typeCounts[t] = 0;
+      this.carTypes[t] = !!vt && usesVarietyPath(vt);
+      this.typeLen[t] = vt?.length ?? 0;
     }
+    for (let c = 0; c < CAR_CLASSES.length; c++) this.classCounts[c] = 0;
     const v = cur.vehicles;
     for (let i = 0; i < cur.vehicleCount; i++) {
       const t = v[i * VEHICLE_STRIDE + 3]!;
-      if (t >= 0 && t < ids.length) this.typeCounts[t]!++;
+      if (t < 0 || t >= ids.length) continue;
+      if (this.carTypes[t]) this.classCounts[carClassOf(v[i * VEHICLE_STRIDE + 5]!)]!++;
+      else this.typeCounts[t]!++;
+    }
+    for (let c = 0; c < CAR_CLASSES.length; c++) {
+      if (this.classCounts[c]! > this.classMeshes[c]!.capacity) this.growClass(c, this.classCounts[c]!);
     }
     for (let t = 0; t < ids.length; t++) {
       const tm = this.typeSlots[t];
@@ -151,7 +211,9 @@ export class VehicleLayer {
     for (let i = 0; i < cur.vehicleCount; i++) {
       const o = i * VEHICLE_STRIDE;
       const t = v[o + 3]!;
-      const tm = this.typeSlots[t];
+      const isCar = this.carTypes[t] === true;
+      const cls = isCar ? carClassOf(v[o + 5]!) : 0;
+      const tm = isCar ? this.classMeshes[cls] : this.typeSlots[t];
       if (!tm) continue;
       let x = v[o]!;
       let z = v[o + 1]!;
@@ -167,8 +229,26 @@ export class VehicleLayer {
       }
       _p.set(x, 0.06, z);
       _q.setFromAxisAngle(_up, -h);
-      _m.compose(_p, _q, _s);
+      if (isCar) {
+        // Never longer than the sim's collision length for this vehicle type.
+        const k = Math.min(1, this.typeLen[t]! / this.classLen[cls]!);
+        _s.set(k, k, k);
+        _m.compose(_p, _q, _s);
+        tm.mesh.setColorAt(tm.mesh.count, paletteColor(carColorOf(v[o + 5]!, cls)));
+        const fx = this.classFixed[cls]!.mesh;
+        fx.setMatrixAt(fx.count++, _m);
+      } else {
+        _m.compose(_p, _q, _s1);
+      }
       tm.mesh.setMatrixAt(tm.mesh.count++, _m);
+    }
+    for (const tm of this.classFixed) if (tm.mesh.count > 0) tm.mesh.instanceMatrix.needsUpdate = true;
+    for (const tm of this.classMeshes) {
+      if (tm.mesh.count > 0) {
+        tm.mesh.instanceMatrix.needsUpdate = true;
+        if (tm.mesh.instanceColor) tm.mesh.instanceColor.needsUpdate = true;
+      }
+      this.visibleCount += tm.mesh.count;
     }
     for (const tm of this.types.values()) {
       if (tm.mesh.count > 0) tm.mesh.instanceMatrix.needsUpdate = true;
@@ -182,6 +262,10 @@ export class VehicleLayer {
       tm.mesh.dispose();
     }
     this.types.clear();
+    for (const tm of [...this.classMeshes, ...this.classFixed]) {
+      tm.mesh.geometry.dispose();
+      tm.mesh.dispose();
+    }
     this.mat.dispose();
   }
 }

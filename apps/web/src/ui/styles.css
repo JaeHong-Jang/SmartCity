@@ -1016,3 +1016,308 @@ b.ok {
 .ai-items li.bad {
   color: #fdba74;
 }
+
+/* ---- AI assistant: applied-location list, image attachments, AI badge (task 4a-2) ---- */
+.ai-badge {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 15px;
+  color: #1e1b4b;
+  background: #c4b5fd;
+  vertical-align: middle;
+}
+
+.ai-panel.drag {
+  outline: 2px dashed #c4b5fd;
+  outline-offset: 2px;
+}
+
+.ai-recent {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.ai-recent ul {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-recent li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-recent-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-panel [data-ai-attach] {
+  flex: none;
+  white-space: nowrap;
+}
+
+.ai-thumbs {
+  display: flex;
+  gap: 6px;
+}
+
+.ai-thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+}
+
+.ai-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ai-thumb button {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 16px;
+  border-radius: 50%;
+}
+
+/* ---------- simulator mode ---------- */
+body[data-simmode] .toolbar,
+body[data-simmode] .city-name,
+body[data-simmode] .density,
+body[data-simmode] .topbar > button:not([data-dashboard]):not([data-simmode-enter]) {
+  pointer-events: none;
+  opacity: 0.4;
+}
+
+body[data-simmode] .tool-options,
+body[data-simmode] .side,
+body[data-simmode] .growth-hud,
+body[data-simmode] .hint {
+  display: none;
+}
+
+.sim-banner {
+  position: absolute;
+  top: 62px;
+  left: 84px;
+  right: 12px;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 4px 12px;
+  border-color: var(--warn);
+  background: var(--panel-solid);
+  font-size: 12px;
+  z-index: 4;
+}
+
+.sim-banner b {
+  color: var(--warn);
+}
+
+.sim-banner .ok-text {
+  color: var(--ok);
+}
+
+.sim-error {
+  color: var(--danger);
+}
+
+.sim-progress-wrap progress,
+.sim-compare progress {
+  width: 160px;
+  height: 8px;
+  vertical-align: middle;
+}
+
+.sim-panel {
+  position: absolute;
+  top: 112px;
+  left: 84px;
+  width: 290px;
+  max-height: calc(100% - 112px - 60px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sim-panel h3,
+.sim-compare h3 {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sim-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sim-num {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sim-num input[type='number'] {
+  width: 80px;
+}
+
+.sim-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sim-events li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.sim-ev-label {
+  flex: 1 1 100%;
+  font-weight: 600;
+}
+
+.sim-compare {
+  position: absolute;
+  top: 112px;
+  right: 12px;
+  width: 560px;
+  max-width: calc(100% - 400px);
+  max-height: calc(100% - 112px - 60px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--panel-solid);
+}
+
+.sim-charts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.sim-chart {
+  margin: 0;
+}
+
+.sim-chart figcaption {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sim-chart svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.sim-chart .grid {
+  stroke: var(--panel-border);
+  stroke-width: 1;
+}
+
+.sim-chart .warmup {
+  stroke: var(--text-dim);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.sim-chart .axis {
+  fill: var(--text-dim);
+  font-size: 9px;
+}
+
+.sim-chart .line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+}
+
+.sim-chart .line.on {
+  stroke: var(--accent);
+}
+
+.sim-chart .line.off {
+  stroke: var(--warn);
+  stroke-dasharray: 5 3;
+}
+
+.sim-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.swatch-on,
+.swatch-off {
+  display: inline-block;
+  width: 18px;
+  height: 0;
+  border-top: 3px solid var(--accent);
+}
+
+.swatch-off {
+  border-top: 3px dashed var(--warn);
+}
+
+.sim-table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.sim-table th,
+.sim-table td {
+  padding: 3px 6px;
+  text-align: right;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.sim-table th:first-child {
+  text-align: left;
+}
+
+.sim-lock-note {
+  position: absolute;
+  left: 84px;
+  bottom: 62px;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+}

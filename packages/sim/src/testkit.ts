@@ -268,3 +268,26 @@ export function cityDoc(spacing = 150, seed = 7): CityDoc {
     place('shop2', 'shop', -15, 15),
   ]);
 }
+
+/** Overlaps between scenario obstacles and vehicle bodies (bodies walked back along the route, as in checkInvariants). */
+export function checkObstacleOverlaps(sim: Simulation): string[] {
+  const w = internals(sim);
+  const obs = w.sc?.obs;
+  if (!obs) return [];
+  const problems: string[] = [];
+  const check = (id: number, e: number, a: number, b: number): void => {
+    if (e >= w.net.nLanes) return;
+    for (const o of obs[e]!) if (a < o.rear + o.len - 1e-6 && b > o.rear + 1e-6) problems.push(`vehicle ${id} [${a.toFixed(2)},${b.toFixed(2)}] overlaps obstacle ${o.eventId} on lane ${e}`);
+  };
+  for (const v of w.vehicles) {
+    check(v.id, v.edge, Math.max(0, v.s - v.len), v.s);
+    let over = v.len - v.s;
+    for (let j = v.ri - 1; j >= 0 && over > 1e-6; j--) {
+      const e = v.route[j]!;
+      const L = w.net.len[e]!;
+      check(v.id, e, Math.max(0, L - over), L);
+      over -= L;
+    }
+  }
+  return problems;
+}

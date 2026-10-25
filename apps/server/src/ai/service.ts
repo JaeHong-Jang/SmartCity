@@ -2,7 +2,7 @@
 // cancellation on request / disconnect, and replies only to the asker (ADR 0009 §5).
 
 import { randomBytes } from 'node:crypto';
-import { lotsAlongSegment, lotsToCommand, type CityDoc, type Command, type ServerMessage, type Vec2 } from '@smartcity/shared';
+import { lotsAlongSegment, lotsToCommand, type AiImage, type CityDoc, type Command, type ServerMessage, type Vec2 } from '@smartcity/shared';
 import { AgentError, DEFAULT_LIMITS, runAgent, type AgentLimits } from './agent.js';
 import { AiGate, DEFAULT_GATE } from './gate.js';
 import { claudeModel, DEFAULT_MODEL, scriptedModel, type AiModel } from './model.js';
@@ -52,7 +52,7 @@ export class AiService {
     return { t: 'ai.status', enabled: this.model !== null, model: this.model?.name ?? null };
   }
 
-  ask(room: AiRoom, client: AiClient, ip: string, reqId: number, text: string, focus: Vec2 | null): void {
+  ask(room: AiRoom, client: AiClient, ip: string, reqId: number, text: string, focus: Vec2 | null, images?: AiImage[]): void {
     if (!this.model) return client.send({ t: 'ai.error', reqId, error: 'AI가 꺼져 있습니다(서버에 API 키가 없음)' });
     if (this.jobs.has(client.id)) return client.send({ t: 'ai.error', reqId, error: '이전 요청이 아직 처리 중입니다' });
     const admission = this.gate.admit(ip, room.id);
@@ -79,6 +79,7 @@ export class AiService {
       doc: room.doc,
       text,
       focus,
+      ...(images?.length ? { images } : {}),
       tag: randomBytes(3).toString('hex'),
       zoneLots,
       signal: abort.signal,
@@ -88,7 +89,7 @@ export class AiService {
       .then((res) => {
         if (abort.signal.aborted) return;
         // Only the request length and usage are logged, never the text.
-        console.log(`[ai] room=${room.id} chars=${text.length} model=${this.model!.name} turns=${res.usage.turns} in=${res.usage.input} out=${res.usage.output} cmds=${res.commands.length} ms=${Date.now() - started}`);
+        console.log(`[ai] room=${room.id} chars=${text.length} images=${images?.length ?? 0} model=${this.model!.name} turns=${res.usage.turns} in=${res.usage.input} out=${res.usage.output} cmds=${res.commands.length} ms=${Date.now() - started}`);
         const commands: Command[] = res.commands;
         client.send({ t: 'ai.proposal', reqId, commands, summary: res.summary });
       })

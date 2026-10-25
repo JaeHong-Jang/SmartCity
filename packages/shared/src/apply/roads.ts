@@ -1,7 +1,7 @@
 // Road-network cascades: segment split/removal, bus stop removal, feature pruning.
 
 import { closestPointOnPolyline, sampleSegmentCurve, splitQuadBezier, type Vec2 } from '../geometry.js';
-import { polygonsBlockRoad } from '../editing/buildings.js';
+import { buildingFootprints, polygonsBlockRoad } from '../editing/buildings.js';
 import type { BusStop, CityDoc, RoadFeature, RoadSegment, SegmentId } from '../model.js';
 import { buildingsInParcel } from '../planning.js';
 import { fail, type Tx } from './tx.js';
@@ -42,6 +42,15 @@ export function pruneFeatures(doc: CityDoc, segId: SegmentId, tx: Tx): void {
     }
     last = s;
   }
+}
+
+/** `ifClear` of segment.add: refuse a road that crosses any building or automatic lot instead of pruning them. */
+export function checkRoadClear(doc: CityDoc, seg: RoadSegment): void {
+  for (const b of Object.values(doc.buildings)) {
+    const t = doc.buildingTypes[b.typeId];
+    if (t && polygonsBlockRoad(doc, buildingFootprints(b, t), [seg])) fail('road would cross a building');
+  }
+  for (const p of Object.values(doc.parcels)) if (p.auto && polygonsBlockRoad(doc, [p.polygon], [seg])) fail('road would cross a zoned lot');
 }
 
 /**

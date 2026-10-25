@@ -12,6 +12,7 @@ import {
 } from '@smartcity/shared';
 import { bearing } from '../tools/roadTool';
 import { segmentFeatures } from '../tools/streetTool';
+import { AiBadge } from './AiBadge';
 import { useDoc, useServices, useStore } from './context';
 import { BuildingPlanning, ParcelInspector } from './PlanningInspector';
 import { clampNum } from './RoadTypeEditor';
@@ -326,7 +327,9 @@ function BuildingInspector({ id }: { id: string }) {
       <h3>건물</h3>
       <dl className="kv">
         <dt>타입</dt>
-        <dd>{type?.name ?? b.typeId}</dd>
+        <dd>
+          {type?.name ?? b.typeId} <AiBadge type={type} />
+        </dd>
         <dt>위치</dt>
         <dd>
           {b.pos.x.toFixed(1)}, {b.pos.z.toFixed(1)}

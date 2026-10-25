@@ -11,6 +11,15 @@ export const ROOM_ID_RE = /^[a-z0-9-]{1,32}$/;
 export const MAX_GHOST_POINTS = 64;
 /** Longest request text the AI building assistant accepts. */
 export const MAX_AI_TEXT = 1000;
+/** Pictures that can accompany an AI request, and the largest decoded size of one (bytes). */
+export const MAX_AI_IMAGES = 2;
+export const MAX_AI_IMAGE_BYTES = 300_000;
+export const AI_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
+export interface AiImage {
+  mediaType: (typeof AI_IMAGE_TYPES)[number];
+  /** Base64 (no data: prefix). */
+  data: string;
+}
 
 /** Ephemeral per-user state shown to collaborators (not persisted, not part of the doc). */
 export interface Presence {
@@ -35,7 +44,7 @@ export type ClientMessage =
   | { t: 'presence'; presence: Presence }
   | { t: 'ping'; at: number }
   /** Ask the AI building assistant (ADR 0009 §5). `focus` = the point the user looks at or selected. */
-  | { t: 'ai.ask'; reqId: number; text: string; focus: Vec2 | null }
+  | { t: 'ai.ask'; reqId: number; text: string; focus: Vec2 | null; images?: AiImage[] }
   | { t: 'ai.cancel'; reqId: number };
 
 export type ServerMessage =
@@ -55,6 +64,26 @@ export type ServerMessage =
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isFiniteNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/** Decoded size of a base64 string, or null when it is not canonical base64. */
+function base64Bytes(data: string): number | null {
+  if (data.length === 0 || data.length % 4 !== 0 || !BASE64_RE.test(data)) return null;
+  const pad = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
+  return (data.length / 4) * 3 - pad;
+}
+
+function parseImages(v: unknown): AiImage[] | null {
+  if (!Array.isArray(v) || v.length === 0 || v.length > MAX_AI_IMAGES) return null;
+  const out: AiImage[] = [];
+  for (const raw of v) {
+    if (!isObj(raw) || typeof raw.data !== 'string' || !(AI_IMAGE_TYPES as readonly unknown[]).includes(raw.mediaType)) return null;
+    const bytes = base64Bytes(raw.data);
+    if (bytes === null || bytes > MAX_AI_IMAGE_BYTES) return null;
+    out.push({ mediaType: raw.mediaType as AiImage['mediaType'], data: raw.data });
+  }
+  return out;
+}
 
 /**
  * Shape-check an untrusted client frame. Command contents are validated later by applyCommand.
@@ -104,7 +133,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
         if (!isObj(m.focus) || !isFiniteNum(m.focus.x) || !isFiniteNum(m.focus.z)) return null;
         focus = { x: m.focus.x, z: m.focus.z };
       }
-      return { t: 'ai.ask', reqId: m.reqId as number, text, focus };
+      if (m.images === undefined) return { t: 'ai.ask', reqId: m.reqId as number, text, focus };
+      const images = parseImages(m.images);
+      return images ? { t: 'ai.ask', reqId: m.reqId as number, text, focus, images } : null;
     }
     case 'ai.cancel':
       return Number.isInteger(m.reqId) ? { t: 'ai.cancel', reqId: m.reqId as number } : null;

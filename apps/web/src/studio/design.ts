@@ -23,11 +23,14 @@ export interface StudioMeta {
   id: string;
   name: string;
   zone: Zone;
+  /** Kept from the opened design (AI designs stay marked after an edit); new designs have none. */
+  origin?: 'ai';
 }
 
 /** The design as it would be stored (parts from cells, props as placed). */
 export function toBuildingType(doc: StudioDoc, meta: StudioMeta, conv: VoxelPartsResult = voxelsToParts(doc.model)): BuildingType {
   const t: BuildingType = { id: meta.id, name: meta.name, zone: meta.zone, parts: conv.parts };
+  if (meta.origin) t.origin = meta.origin;
   if (doc.smart) t.smart = { ...doc.smart };
   if (doc.props.length) t.props = doc.props.map((p) => ({ ...p, pos: { ...p.pos } }));
   return t;

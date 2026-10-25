@@ -20,8 +20,11 @@ export function resolveGoal(w: World, goal: Goal, bus: boolean): RouteGoal[] {
   return out;
 }
 
-/** Replace the route from the current position (or from the granted connector). Keeps a little history. */
-export function routeVehicle(w: World, v: Vehicle): boolean {
+/**
+ * Replace the route from the current position (or from the granted connector). Keeps a little history.
+ * `stopped` = queue costs (default: the ones observed now; scenario re-routes pass zeros = free flow).
+ */
+export function routeVehicle(w: World, v: Vehicle, stopped: Int32Array = w.stopped): boolean {
   const nLanes = w.net.nLanes;
   const prefix = v.route.slice(Math.max(0, v.ri - HISTORY), v.ri);
   let start = v.edge;
@@ -32,7 +35,7 @@ export function routeVehicle(w: World, v: Vehicle): boolean {
     start = nLanes + v.grant;
     s = 0;
   }
-  const res = w.router.find(start, s, resolveGoal(w, v.goal, v.kind === 'bus'), v.kind === 'bus', w.stopped);
+  const res = w.router.find(start, s, resolveGoal(w, v.goal, v.kind === 'bus'), v.kind === 'bus', stopped);
   if (!res) return false;
   v.ri = granted ? prefix.length - 1 : prefix.length;
   v.route = prefix.concat(res.path);
@@ -45,6 +48,8 @@ export function createVehicle(w: World, typeId: string, lane: number, s: number,
   const type = w.types.get(typeId);
   if (!type) return null;
   const isBus = type.kind === 'bus';
+  // A lane closed by a scenario event takes no new vehicles (ADR 0010 §3).
+  if (w.sc !== null && w.sc.ban !== null && w.sc.ban[lane]) return null;
   const res = w.router.find(lane, s, resolveGoal(w, goal, isBus), isBus, w.stopped);
   if (!res) return null;
   const p = idmParams(type.kind);
@@ -83,6 +88,10 @@ export function createVehicle(w: World, typeId: string, lane: number, s: number,
     queued: false,
     alive: true,
     bus,
+    t0: w.tick,
+    scWait: 0,
+    scQueued: false,
+    scRerouted: false,
   };
   w.vehicles.push(v);
   insertOnEdge(w.onEdge[lane]!, v);

@@ -126,6 +126,7 @@ export function validateBuildingType(bt: BuildingType): void {
   checkName(bt.name, 'building type');
   if (!ZONES.includes(bt.zone)) fail('invalid zone');
   if (bt.growth !== undefined && bt.growth?.level !== 1) fail('invalid growth level');
+  if (bt.origin !== undefined && bt.origin !== 'ai') fail('invalid origin');
   if (!Array.isArray(bt.parts) || bt.parts.length < 1 || bt.parts.length > LIMITS.buildingParts) fail('invalid building parts');
   for (const p of bt.parts) {
     checkNum(p.offset?.x, -200, 200, 'part.offset.x');

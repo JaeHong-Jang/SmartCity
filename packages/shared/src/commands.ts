@@ -22,7 +22,8 @@ import type {
 export type Command =
   | { type: 'node.add'; node: RoadNode }
   | { type: 'node.move'; id: NodeId; pos: Vec2 }
-  | { type: 'segment.add'; segment: RoadSegment }
+  /** `ifClear`: refused when the road would cross a building or an automatic lot (it would otherwise remove auto lots; AI roads, ADR 0010 §9). */
+  | { type: 'segment.add'; segment: RoadSegment; ifClear?: true }
   /** Removes the segment, anything attached to it, and nodes left without segments. */
   | { type: 'segment.remove'; id: SegmentId }
   /** Inserts node `nodeId` at parameter t; `segmentIds` = [a→node, node→b]. */

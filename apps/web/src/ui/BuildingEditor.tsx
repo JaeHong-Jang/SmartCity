@@ -12,6 +12,7 @@ import { VolumeFields } from './building/VolumeFields';
 import { applyPaint, besideParts, CONFLICT_KO, newPart, partTop, preflight, stackOn, type PaintResult } from './building/designDraft';
 import './building/building.css';
 import { translateError } from '../app/store';
+import { AiBadge } from './AiBadge';
 import { useDoc, useServices, useStore } from './context';
 import { PartPreview } from './PartPreview';
 import { TOO_LARGE_KO } from '../studio/design';
@@ -172,6 +173,7 @@ export function BuildingEditor() {
           <button key={t.id} className={bt?.id === t.id ? 'active' : ''} onClick={() => select(t.id)}>
             <span className="swatch" style={{ background: t.parts[0]?.color }} />
             <span style={{ flex: 1 }}>{t.name}</span>
+            <AiBadge type={t} />
             <span className="muted bp-meta">
               {ZONE_KO[t.zone]} · r{t.rev ?? 0} · {counts.get(t.id) ?? 0}동
             </span>
@@ -210,6 +212,7 @@ export function BuildingEditor() {
           <div className="row">
             <label>이름</label>
             <input type="text" value={bt.name} maxLength={80} onChange={(e) => edit((t) => void (t.name = e.target.value))} style={{ flex: 1 }} />
+            <AiBadge type={bt} />
           </div>
           <div className="row">
             <label>존</label>

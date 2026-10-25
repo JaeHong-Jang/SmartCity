@@ -3,6 +3,7 @@
 
 import * as THREE from 'three';
 import type { Vec2 } from '@smartcity/shared';
+import { fitDistance, type Box } from '../app/highlights';
 import type { ClientStore } from '../app/store';
 import type { SimulationStream } from '../sim/simStream';
 import type { GroundPan, ToolPreview } from '../tools/types';
@@ -11,10 +12,12 @@ import { createCityCamera, type CityCamera } from './camera';
 import { commandDomains, D_BUILDINGS, D_ROADS, D_VEHICLE_TYPES } from './dirty';
 import { computeDayNight, createDayNightState, NOON } from './dayNight';
 import { createGround, type Ground } from './ground';
+import { HighlightLayer, type HighlightStats } from './highlight';
 import { OverlayLayer } from './overlays';
 import { PedestrianLayer } from './pedestrians';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer, Y_WALK } from './roads';
+import { ScenarioLayer } from './scenario';
 import { configureRenderer, createSun } from './sceneKit';
 import { PedSignalLayer, SignalLayer } from './signals';
 import { VehicleLayer } from './vehicles';
@@ -42,6 +45,8 @@ export class CityRenderer {
   private pedestrians: PedestrianLayer;
   private pedSignals: PedSignalLayer;
   private overlays: OverlayLayer;
+  private highlights = new HighlightLayer();
+  readonly scenario: ScenarioLayer;
   private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
   private dirty = { roads: true, buildings: true, vehicleTypes: true };
   private raf = 0;
@@ -89,7 +94,8 @@ export class CityRenderer {
     this.pedestrians = new PedestrianLayer(stream);
     this.pedSignals = new PedSignalLayer(stream);
     this.overlays = new OverlayLayer(store, stream, labelRoot, () => this.network);
-    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group);
+    this.scenario = new ScenarioLayer(stream);
+    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group);
 
     this.unsubs.push(
       store.onApplied((cmd) => {
@@ -250,6 +256,8 @@ export class CityRenderer {
     this.buildings.setOccupancy(this.stream.latest());
     this.signals.update();
     this.pedSignals.update(now, Y_WALK);
+    this.highlights.update(Date.now(), s.doc, s.highlights, s.docVersion);
+    this.scenario.update(now);
     this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.renderer.render(this.scene, this.cam.camera);
@@ -268,6 +276,17 @@ export class CityRenderer {
     void this.cam.controls.moveTo(p.x, 0, p.z, true);
   }
 
+  /** Fly the camera to frame a box (what the AI just built), keeping the viewing angle. */
+  fitBox(box: Box): void {
+    void this.cam.controls.moveTo((box.minX + box.maxX) / 2, 0, (box.minZ + box.maxZ) / 2, true);
+    void this.cam.controls.dollyTo(fitDistance(box), true);
+  }
+
+  /** Test/debug: highlight things currently drawn. */
+  highlightStats(): HighlightStats {
+    return this.highlights.stats();
+  }
+
   dispose(): void {
     cancelAnimationFrame(this.raf);
     for (const u of this.unsubs) u();
@@ -280,6 +299,8 @@ export class CityRenderer {
     this.signals.dispose();
     this.pedSignals.dispose();
     this.overlays.dispose();
+    this.highlights.dispose();
+    this.scenario.dispose();
     this.ground.dispose();
     this.renderer.dispose();
   }

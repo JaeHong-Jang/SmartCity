@@ -4,10 +4,10 @@
 // Items that no longer work against the live doc are tinted orange.
 
 import * as THREE from 'three';
-import type { BuildingType, CityDoc } from '@smartcity/shared';
+import { roadHalfWidth, type BuildingType, type CityDoc } from '@smartcity/shared';
 import { closedRing } from '../app/ring';
 import { ZONE_COLORS } from '../app/zoneColors';
-import { proposalCatalog, proposalItems, proposalParcels, type ProposalItem } from '../app/proposal';
+import { proposalCatalog, proposalItems, proposalParcels, proposalRoads, type ProposalItem } from '../app/proposal';
 import type { AiProposal } from '../app/aiChat';
 import { bakeBuildingGeometry } from './buildingGeometry';
 import { MeshBuilder } from './meshBuilder';
@@ -15,6 +15,8 @@ import { MeshBuilder } from './meshBuilder';
 const _m = new THREE.Matrix4();
 const _c = new THREE.Color();
 const ORANGE = '#fb923c';
+const ROAD_COLOR = '#60a5fa';
+const Y_ROAD = 0.3;
 const Y_FILL = 0.25;
 
 export class ProposalLayer {
@@ -25,6 +27,7 @@ export class ProposalLayer {
   private lines = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false }));
   private proposal: AiProposal | null = null;
   private invalidKey = '';
+  private version = 0;
   private items: ProposalItem[] = [];
 
   constructor() {
@@ -37,9 +40,10 @@ export class ProposalLayer {
   }
 
   /** Draw `proposal` (null = hide) with the given failing item indices. Rebuilds only on change. */
-  set(doc: CityDoc, proposal: AiProposal | null, invalid: Record<number, string>): void {
+  set(doc: CityDoc, proposal: AiProposal | null, invalid: Record<number, string>, version = 0): void {
     const key = Object.keys(invalid).sort().join(',');
-    if (proposal === this.proposal && key === this.invalidKey) return;
+    if (proposal === this.proposal && key === this.invalidKey && version === this.version) return;
+    this.version = version;
     if (proposal !== this.proposal) this.items = proposal ? proposalItems(proposal.commands) : [];
     this.proposal = proposal;
     this.invalidKey = key;
@@ -81,6 +85,14 @@ export class ProposalLayer {
       _c.set(index in invalid ? ORANGE : ZONE_COLORS[parcel.zone]);
       fill.polygon(parcel.polygon, Y_FILL, _c);
       lines.band(closedRing(parcel.polygon), -0.35, 0.35, Y_FILL + 0.02, _c);
+    }
+    // New roads: a translucent band as wide as the road (all pieces of one road share the item's color).
+    for (const { index, pieces } of proposalRoads(doc, this.items, this.version)) {
+      _c.set(index in invalid ? ORANGE : ROAD_COLOR);
+      for (const piece of pieces) {
+        const rt = doc.roadTypes[piece.roadTypeId];
+        if (rt) fill.band(piece.points, -roadHalfWidth(rt), roadHalfWidth(rt), Y_ROAD, _c);
+      }
     }
     this.setGeometry(this.fill, fill);
     this.setGeometry(this.lines, lines);

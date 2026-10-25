@@ -11,6 +11,8 @@ import { Dashboard } from './Dashboard';
 import { GrowthHud } from './GrowthHud';
 import { IconChart, IconCity, IconDownload, IconPause, IconUpload } from './Icons';
 import { Inspector } from './Inspector';
+import { SimModeEnterButton, SimModeRoot } from './sim/SimMode';
+import { useSimMode } from '../simmode/store';
 import { RoadTypeEditor } from './RoadTypeEditor';
 import { StudioOverlay } from './studio/StudioOverlay';
 import { useStudioRequest } from './studio/studioHost';
@@ -49,6 +51,7 @@ function TopBar() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [nameDraft, setNameDraft] = useState<string | null>(null);
   const [dashboard, setDashboard] = useState(false);
+  const simActive = useSimMode((s) => s.phase !== 'off');
   const c = CONNECTION_KO[connection];
 
   const onImport = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -72,6 +75,7 @@ function TopBar() {
         key={version}
         className="city-name"
         aria-label="도시 이름"
+        disabled={simActive}
         defaultValue={doc.meta.name}
         onBlur={(e) => {
           const v = e.target.value.trim();
@@ -92,6 +96,7 @@ function TopBar() {
         </span>
       </button>
       {dashboard && <Dashboard onClose={() => setDashboard(false)} />}
+      <SimModeEnterButton />
       <GameClock />
       <div className="spacer" />
       <div className="peers" aria-label="접속자">
@@ -133,7 +138,7 @@ function TopBar() {
           <IconDownload /> 내보내기
         </span>
       </button>
-      <button title="JSON 파일을 새 방으로 가져오기" onClick={() => fileRef.current?.click()}>
+      <button title="JSON 파일을 새 방으로 가져오기" disabled={simActive} onClick={() => fileRef.current?.click()}>
         <span className="row" style={{ gap: 5 }}>
           <IconUpload /> 가져오기
         </span>
@@ -160,6 +165,7 @@ function StatusBar() {
   const density = useStore((s) => s.doc.meta.trafficDensity);
   const snapStep = useStore((s) => s.toolOptions.snapStep);
   const [densityDraft, setDensityDraft] = useState<number | null>(null);
+  const simActive = useSimMode((s) => s.phase !== 'off');
   const simText = simStatus === 'ready' ? null : simStatus === 'starting' ? '시뮬레이션 준비 중' : '시뮬레이션 준비 중 (교통 엔진 대기)';
 
   return (
@@ -214,6 +220,7 @@ function StatusBar() {
         <span className="muted">교통 밀도</span>
         <input
           className="density"
+          disabled={simActive}
           type="range"
           min={0}
           max={3}
@@ -317,6 +324,7 @@ export function App() {
       <Toolbar />
       <ToolOptions />
       <GrowthHud />
+      <SimModeRoot />
       <SidePanel />
       <ToolHint />
       <Toasts />

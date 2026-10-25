@@ -12,6 +12,7 @@ import { ZONE_KO } from '../Toolbar';
 import { budget, BUDGET_MAX, checkDesign, fromBuildingType, toBuildingType, translateStudioError, type StudioCheck } from '../../studio/design';
 import { StudioEditor, TOOL_INFO } from '../../studio/StudioEditor';
 import { StudioScene } from '../../studio/StudioScene';
+import { VIEW_LABEL, type ViewName } from '../../studio/viewNav';
 import { newStudioDoc, type StudioDoc } from '../../studio/voxelEdit';
 import { StudioPanel, type LoadInfo } from './StudioPanel';
 import { closeStudio, type StudioRequest } from './studioHost';
@@ -21,6 +22,27 @@ interface Meta {
   id: string;
   name: string;
   zone: Zone;
+  origin?: 'ai';
+}
+
+const GUIDE_KEY = 'smartcity.studio.guideDismissed';
+const VIEW_BUTTONS: ViewName[] = ['front', 'right', 'back', 'left', 'top', 'home'];
+
+/** localStorage can throw or be missing (private mode, blocked data): the guide then just shows each time. */
+function guideDismissed(): boolean {
+  try {
+    return localStorage.getItem(GUIDE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function rememberGuideDismissed(): void {
+  try {
+    localStorage.setItem(GUIDE_KEY, '1');
+  } catch {
+    // Not persisted; the guide shows again next time.
+  }
 }
 
 function Gauge({ label, n, max }: { label: string; n: number; max: number }) {
@@ -48,8 +70,8 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
   const init = useMemo(() => {
     if (!req.type) return { doc: newStudioDoc(), lossy: false, meta: { id: dispatcher.ids().next('bt'), name: '새 스튜디오 설계', zone: 'residential' as Zone }, baseRev: 0 };
     const o = fromBuildingType(req.type);
-    if (o.lossy) return { doc: o.doc, lossy: true, meta: { id: dispatcher.ids().next('bt'), name: `${req.type.name} 사본`.slice(0, 80), zone: req.type.zone }, baseRev: 0 };
-    return { doc: o.doc, lossy: false, meta: { id: req.type.id, name: req.type.name, zone: req.type.zone }, baseRev: req.baseRev };
+    if (o.lossy) return { doc: o.doc, lossy: true, meta: { id: dispatcher.ids().next('bt'), name: `${req.type.name} 사본`.slice(0, 80), zone: req.type.zone, ...(req.type.origin ? { origin: req.type.origin } : {}) }, baseRev: 0 };
+    return { doc: o.doc, lossy: false, meta: { id: req.type.id, name: req.type.name, zone: req.type.zone, ...(req.type.origin ? { origin: req.type.origin } : {}) }, baseRev: req.baseRev };
     // Only on open.
   }, []);
   const editor = useMemo(() => new StudioEditor(init.doc), [init]);
@@ -69,11 +91,15 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
   /** Leaving with unsaved changes waits for confirmation; holds what to do once confirmed. */
   const [confirmLeave, setConfirmLeave] = useState<(() => void) | null>(null);
   const [check, setCheck] = useState<StudioCheck | null>(null);
+  const [collapsed, setCollapsed] = useState(false);
+  const [guide, setGuide] = useState(() => !guideDismissed());
+  const [guideSkip, setGuideSkip] = useState(false);
   const dirty = seq !== savedSeq;
 
   useEffect(() => {
     const sc = new StudioScene(canvasRef.current!, editor);
     sceneRef.current = sc;
+    sc.onTogglePanels = () => setCollapsed((c) => !c);
     if (import.meta.env.DEV) (window as unknown as { __studio?: unknown }).__studio = { editor, scene: sc };
     return () => {
       sc.dispose();
@@ -189,7 +215,7 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
   const status = baseRev ? `r${baseRev} 수정 중` : '새 설계';
 
   return (
-    <div className="studio" data-studio>
+    <div className={`studio${collapsed ? ' st-collapsed' : ''}`} data-studio>
       <canvas ref={canvasRef} className="studio-canvas" />
 
       <header className="panel st-top">
@@ -225,6 +251,42 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
           닫기
         </button>
       </header>
+
+      <div className="panel st-views" role="group" aria-label="시점">
+        {VIEW_BUTTONS.map((v) => (
+          <button key={v} data-view={v} title={`${VIEW_LABEL[v]} 보기`} onClick={() => sceneRef.current?.setView(v)}>
+            {VIEW_LABEL[v]}
+          </button>
+        ))}
+        <div className="sep" />
+        <button data-studio-panels className={collapsed ? 'active' : ''} title="좌우 패널 접기/펴기 (Tab)" onClick={() => setCollapsed((c) => !c)}>
+          패널 {collapsed ? '펴기' : '접기'}
+        </button>
+        <button data-studio-help title="조작법 보기" aria-label="조작법 보기" onClick={() => setGuide(true)}>
+          ?
+        </button>
+      </div>
+
+      {guide && (
+        <div className="panel st-guide" data-studio-guide role="note">
+          <b>시점 돌리기</b>
+          <div>회전: 우클릭 드래그 · 트랙패드는 Alt+드래그 · Q/E 키 (한 번에 15°)</div>
+          <div>이동: 휠 버튼 드래그 · Shift+우클릭 드래그 · 확대/축소: 휠</div>
+          <div>위의 앞·오른쪽·뒤·왼쪽·위 버튼이나 V 키로 건물 뒤쪽까지 바로 이동합니다. Tab = 패널 접기.</div>
+          <label>
+            <input type="checkbox" checked={guideSkip} onChange={(e) => setGuideSkip(e.target.checked)} /> 다시 보지 않기
+          </label>
+          <button
+            data-studio-guide-close
+            onClick={() => {
+              if (guideSkip) rememberGuideDismissed();
+              setGuide(false);
+            }}
+          >
+            닫기
+          </button>
+        </div>
+      )}
 
       <nav className="panel st-tools" aria-label="스튜디오 도구">
         {TOOL_INFO.map((t) => (
@@ -327,6 +389,9 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
           </div>
         )}
         <div className={`panel st-hint${editor.hint ? ' alert' : ''}`}>{editor.hint || tool.hint}</div>
+        <div className="st-nav-legend" data-studio-legend>
+          회전: 우클릭 드래그 · Alt+드래그 · Q/E &nbsp;|&nbsp; 이동: 휠 버튼 드래그 · Shift+우 드래그 &nbsp;|&nbsp; 확대: 휠
+        </div>
       </div>
 
       {bt.parts.length > 0 && (

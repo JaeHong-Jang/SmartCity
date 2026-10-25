@@ -12,15 +12,26 @@ export interface Dispatcher {
   ids(): IdGen;
 }
 
-export function createDispatcher(store: ClientStore, getTransport: () => Transport | null, now: () => number = () => Date.now()): Dispatcher {
+export function createDispatcher(
+  store: ClientStore,
+  getTransport: () => Transport | null,
+  now: () => number = () => Date.now(),
+  /** True while simulator mode is active: shared edits are refused before anything is queued or sent. */
+  isLocked: () => boolean = () => false,
+): Dispatcher {
   let ref = 1;
   let gen: IdGen | null = null;
   let genTag = '';
 
   const dispatch: Dispatch = (cmd, ghost = []) => {
+    if (isLocked()) {
+      console.warn('[simmode] 시뮬레이터 모드에서 공유 도시 명령을 차단했습니다:', cmd.type);
+      store.toast('시뮬레이터 모드에서는 공유 도시를 편집할 수 없습니다', 'error', 'simlock');
+      return null;
+    }
     const s = store.getState();
     const t = getTransport();
-    if (!t || !s.ready) {
+    if (!t || !s.ready || s.connection === 'reconnecting') {
       store.toast('아직 연결되지 않았습니다', 'error');
       return null;
     }

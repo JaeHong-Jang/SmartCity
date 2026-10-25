@@ -284,3 +284,63 @@
   border-right: 6px solid transparent;
   border-bottom: 9px solid #f59e0b;
 }
+
+/* Camera navigation: view buttons, first-visit guide, always-on legend, collapsible side panels. */
+.st-views {
+  position: absolute;
+  top: 62px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+
+.st-guide {
+  position: absolute;
+  top: 108px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 440px;
+  max-width: calc(100vw - 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.st-guide b {
+  color: var(--text);
+}
+
+.st-guide label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.st-guide button {
+  align-self: flex-end;
+}
+
+.st-nav-legend {
+  font-size: 11px;
+  color: #1f2937;
+  text-shadow: 0 0 3px rgba(255, 255, 255, 0.85);
+}
+
+.st-collapsed .st-tools,
+.st-collapsed .st-floor,
+.st-collapsed .st-side,
+.st-collapsed .st-metrics {
+  display: none;
+}
+
+.st-collapsed .st-bottom {
+  left: 12px;
+  right: 12px;
+}

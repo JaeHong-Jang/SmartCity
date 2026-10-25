@@ -22,8 +22,46 @@ class Simulation {
   signals(): SignalView[]
   /** 테스트/디버그: 지정 차선 위치에 차량 생성, 목적 차선까지 경로. 실패 시 null */
   spawnVehicle(typeId: string, fromLaneId: string, toLaneId: string, s?: number): number | null
+
+  // ---- 시뮬레이터 모드 (ADR 0010, 타입은 src/scenario/types.ts) ----
+  /** 실험 입력 검증 후 큐잉(없는 도로·차선·건물, 지난 tick, 중복 eventId 거부). 해당 tick의 step 시작에 (tick, order, eventId) 순으로 적용 */
+  scenarioInput(input: ScenarioInput): { ok: true } | { ok: false; error: string }
+  /** 대응 정책 변경. 현재 tick 경계의 `policy.set` 입력으로 기록되어(다음 step 맨 앞 적용) 그 입력을 반환. 잘못된 값은 RangeError */
+  setPolicy(policy: ResponsePolicy): ScenarioInput
+  /** 마지막 drain 이후 적용 시점 결과 전부(입력 적용·no-op, 자동 종료, 편집 후 장애물 이동·제거), 적용 순서. 읽어도 상태 불변 */
+  drainScenarioOutcomes(): ScenarioOutcome[]
+  /** 지금까지 받은 모든 입력(policy.set 포함, 받은 순) = ScenarioRecord.inputs. 허용 키만(SCENARIO_INPUT/TARGET/PARAM_KEYS) 저장 → 항상 JSON 왕복 가능 */
+  scenarioInputs(): ScenarioInput[]
+  /** 시나리오 상태가 생긴 tick(SimOptions.scenario면 0), 비활성이면 null = ScenarioRecord.activatedAtTick */
+  scenarioActivatedAt(): number | null
+  /** 활성화 tick(`since`)부터 누적한 KPI. 읽기 전용: 활성화하지 않는다(비활성이면 since = −1, 누적값 0) */
+  kpi(): ScenarioKpi
 }
+
+// SimOptions.scenario: true → 생성 시점(tick 0)부터 시뮬레이터 모드(실험은 이것을 쓴다: warm-up까지 같은 규칙, 재생 일치)
+simulationFromRecord(record, opts?, { warmup?: boolean = true, reroute?: boolean }): Simulation
+  // 문서 사본·seed·tickRate, activatedAtTick(생략 = 0) 경계에서 활성화 + 초기 정책 + 입력 큐잉, warm-up 실행.
+  // reroute = ON/OFF 비교용: 초기 정책과 모든 policy.set 입력의 reroute만 바꾼다.
+new KpiSeries(kpiEveryTicks(tickRate)).record(tick, sim)          // 게임 30초마다 KPI 시계열 포인트
 ```
+
+기록 형식 (ScenarioRecord, scenarioVersion 1):
+- 엄격하다: 입력은 허용 키(SCENARIO_INPUT/TARGET/PARAM_KEYS)만, 모르는 키·비유한 숫자·형식이 다른 정책은 거부한다(실시간과 재생이 같은 검증).
+- 아직 저장·내보내기가 없다. 기록은 세션 중 메모리에만 있으므로 추가 키를 가진 옛 v1 기록은 존재하지 않는다(Lead 결정, 정규화 코드 없음).
+- 내보내기/가져오기를 추가할 때는 scenarioVersion을 올리고 옛 버전용 정규화기를 함께 넣는다.
+
+워커 메시지 규칙 (apps/web/src/sim/sim.worker.ts):
+- 한 tick의 메시지는 동기적으로 순서대로 보낸다: outcomes → snapshot → runTo done. 재시도 큐는 없다.
+- 모든 송신은 하나의 `post()`를 거친다. postMessage는 직렬화 실패(DataCloneError, 버퍼 복사 중 할당 실패의 RangeError 등)에서 throw한다. 현재 메시지·버퍼 계약(평범한 데이터 + 검증된 버퍼)에서 송신 예외는 정상 복구 대상으로 취급하지 않고 즉시 치명 처리한다: 루프 정지, sim 제거, `{t:'status', status:'error', error:'메시지 전송 실패: …'}`를 한 번 시도, 이후 작업 무시(새 init / initRecord만 재시작). 그래서 실패한 메시지 뒤의 어떤 것도 전달되지 않는다.
+- 그 밖의 치명 오류: step 실패, step 밖의 스냅샷 생성 실패(`스냅샷 생성 실패: …`). 반환 버퍼는 도착 시 sanitizeBuffers로 거르므로 풀 때문에 스냅샷이 실패하지 않는다.
+- 비치명: 잘못된 메시지·입력·정책(`{t:'error'}` / 결과 응답), 메시지 처리기 예외, runTo 중 KPI 오류(`{t:'runTo', error}`).
+
+시뮬레이터 모드 규칙 (ADR 0010):
+- `w.sc`는 활성화(SimOptions.scenario, 첫 scenarioInput / setPolicy, 기록 재생의 activatedAtTick 경계 — 그 tick에 도달하는 즉시) 전까지 null이다. 기록 재생은 경계 전의 setPolicy·scenarioInput을 거부한다. `*.end`에 `target.eventId`를 주면 그 사건만 끝내고, 없으면 같은 도로·차선의 가장 먼저 시작한 사건을 끝낸다. 큐잉 시 검증은 정적(형식·종류·지난 tick·중복 id·대상 도로/차선/건물 존재)만 하고, 끝낼 사건이 없음(모름·아직 시작 전·이미 종료)은 적용 시점에 기록되는 no-op이다 — 실시간 수락과 기록 재생이 구조적으로 같다. null이면 기존 코드 경로 그대로(골든 해시 불변). `SimSnapshot.scenario`(장애물·통제 차선·KPI·`activeEvents`(eventId 순, endTick null = 종료 입력까지)·`recentLog`(최근 20건, applied·reason))도 그때부터만 붙는다. `stats`는 바뀌지 않는다.
+- 입력 종류: `closure.start/end`(차선과 그 차선으로 가는 커넥터 신규 진입 금지, 내부 차량 배출), `accident.start/end`(차선 위치 s에 비차량 정지 장애물, 기본 9 m·2400 tick, 겹치면 앞 빈 위치로 이동), `surge.start`(eventId 해시 RNG로 유입 N + 유출 N 자가용 통행 사전 생성), `policy.set`. `*.end`는 같은 segmentId·lane의 활성 사건 중 가장 먼저 시작한 것을 끝낸다.
+- 경로: 통제 차선은 모든 신규 탐색에서 제외, 사고 차선은 600 s 고정 패널티(목적지가 장애물 앞이면 없음). 정책 ON의 정보 차량(`hash01(id, seed) < informedShare`)은 사건 시작·종료 때 (등록 tick, 차량 id) 순 큐로 tick당 5대씩 자유류 비용 재탐색(먼저 등록된 요청은 추월당하지 않음). 금지 커넥터 앞 선두 차량은 정책과 무관하게 즉시 복구 탐색, 경로가 없으면 "경로 없음" 대기(정체 제거 예외).
+- 재컴파일: 장애물을 남은 차량·출구 예약·다른 장애물과 다시 검사해 겹치면 배치 규칙(앞 빈 자리 → 뒤 → 없으면 종료·로그)으로 옮기고, 차선이 사라지면 종료(`lane gone`). 재탐색 큐는 (등록 tick, 차량 id) 순(같은 tick 묶음은 id 순 병합, 중복 없음).
+- 공정성: 재탐색·정책은 수요 RNG를 쓰지 않는다. 시나리오 모드에서는 시민의 도착·출발 시점 결정(상점 선택, 퇴근 후 상점 여부, 상점 체류 시간, 차종, 일자리 배정)이 공유 스트림 대신 `hash01(시민 id, 게임 일·결정 종류, seed)`이고, 차량 상한에서도 수요 추첨을 계속한 뒤 `droppedTrips`로 센다.
 
 ## 모델 사양 (docs/architecture/overview.md D4 요약)
 - **틱**: 기본 20Hz, 모든 갱신은 틱 단위. 1틱 순서: (1) 문서 변경 시 재컴파일·차량/보행자 재배치 (2) 신호·보행 신호 갱신 (3) 시민 이벤트 (4) 수요 생성·버스 (5) 경로 큐 처리(차량 100 + 보행 150 /틱) (6) 비신호 게이트 갱신 → 보행 횡단 허가 → 교차로 진입 허가 → 구간 횡단보도 통과 허가 (7) IDM 가속 계산(모든 차량, 이전 상태 기준) (8) 위치 적분·엣지 이동·구역 해제 (9) 보행 이동 (10) 도착/정체 제거 + 버스 정류장 처리(차량 id 순: 도착 틱에 하차·승차·dwell 결정, dwell 끝 틱에 하차 승객 보행자 생성) (11) 시민 상태 갱신(도착·실패·하차·정류장 합류·탑승 버스 소멸 = 통행 실패, 수단 선택).

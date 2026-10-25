@@ -4,6 +4,8 @@ import type { StreetMode, ToolId } from '../app/store';
 import { ZONE_COLORS } from '../app/zoneColors';
 import { PARCEL_ZONES } from '../tools/parcelTool';
 import { TOOL_META } from '../tools/toolMeta';
+import { AiBadge } from './AiBadge';
+import { useSimMode } from '../simmode/store';
 import { useDoc, useServices, useStore } from './context';
 import { IconBuilding, IconBulldoze, IconBus, IconClosure, IconParcel, IconRoad, IconSelect } from './Icons';
 
@@ -47,6 +49,7 @@ export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[
 export function Toolbar() {
   const { store } = useServices();
   const tool = useStore((s) => s.tool);
+  const simActive = useSimMode((s) => s.phase !== 'off');
   return (
     <nav className="panel toolbar" aria-label="도구">
       {TOOLS.map((t) => (
@@ -55,6 +58,7 @@ export function Toolbar() {
           className={`tool-btn ${tool === t.id ? 'active' : ''}`}
           title={`${t.label} (${t.key})`}
           data-tool={t.id}
+          disabled={simActive}
           onClick={() => store.set({ tool: t.id })}
         >
           {t.icon}
@@ -102,6 +106,7 @@ export function ToolOptions() {
             <button key={bt.id} className={opts.buildingTypeId === bt.id ? 'active' : ''} onClick={() => store.setToolOptions({ buildingTypeId: bt.id })}>
               <span className="swatch" style={{ background: bt.parts[0]?.color }} />
               <span style={{ flex: 1 }}>{bt.name}</span>
+              <AiBadge type={bt} />
               <span className="muted">{ZONE_KO[bt.zone]}</span>
             </button>
           ))}

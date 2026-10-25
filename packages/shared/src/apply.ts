@@ -31,7 +31,7 @@ import {
   validateVehicleType,
 } from './apply/validate.js';
 import { buildingOverlapsBuildings } from './editing/buildings.js';
-import { dropCrosswalks, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment } from './apply/roads.js';
+import { checkRoadClear, dropCrosswalks, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment } from './apply/roads.js';
 
 export { LIMITS } from './apply/limits.js';
 export { segmentLength, segmentsAtNode } from './apply/validate.js';
@@ -123,6 +123,8 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (s.schoolZone !== undefined && typeof s.schoolZone !== 'boolean') fail('invalid schoolZone flag');
       if (s.schoolZone) seg.schoolZone = true;
       checkSegmentShape(doc, seg);
+      if (cmd.ifClear !== undefined && cmd.ifClear !== true) fail('invalid ifClear flag');
+      if (cmd.ifClear) checkRoadClear(doc, seg);
       tx.set(doc.segments, seg.id, seg);
       pruneAutoLots(doc, [seg.id], tx);
       return;
@@ -280,6 +282,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
             }
           : {}),
         ...(bt.growth ? { growth: { level: bt.growth.level } } : {}),
+        ...(bt.origin ? { origin: bt.origin } : {}),
       });
       return;
     }

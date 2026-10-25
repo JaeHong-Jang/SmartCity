@@ -29,7 +29,7 @@ export interface AiState {
 }
 
 export type AiEvent =
-  | { kind: 'ask'; text: string }
+  | { kind: 'ask'; text: string; /** Pictures sent with it. */ images?: number }
   | { kind: 'cancel' }
   | { kind: 'discard' }
   | { kind: 'server'; msg: ServerMessage };
@@ -53,7 +53,7 @@ export function reduceAi(s: AiState, ev: AiEvent): AiState {
     case 'ask': {
       if (s.running !== null) return s;
       const reqId = s.nextReq;
-      return push({ ...s, running: reqId, nextReq: reqId + 1, proposal: null }, 'user', ev.text, reqId);
+      return push({ ...s, running: reqId, nextReq: reqId + 1, proposal: null }, 'user', ev.images ? `${ev.text} [이미지 ${ev.images}장]` : ev.text, reqId);
     }
     case 'cancel': {
       if (s.running === null) return s;

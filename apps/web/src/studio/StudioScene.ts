@@ -1,7 +1,8 @@
 // 3D view of the building studio: its own WebGLRenderer and orbit camera (camera-controls), the
 // draft baked with the city's building geometry (props included), ghosts, selection handle and
 // pointer input. Picking walks the cell grid (picking.ts); ghosts are never picked.
-// Left click/drag = tool, right/middle drag = camera, right click = erase, Shift+click = erase.
+// Left click/drag = tool, right drag (or Alt+left drag) = rotate, Shift+right / middle drag = pan,
+// short right click = erase, Shift+click = erase. Keys: see viewNav.ts.
 
 import * as THREE from 'three';
 import CameraControls from 'camera-controls';
@@ -11,6 +12,7 @@ import { configureRenderer, createSun } from '../render/sceneKit';
 import { pickVoxel, planeCell, rayBox, type V3, type VoxelHit } from './picking';
 import { propBox } from './props';
 import { StudioEditor, TOOL_INFO, type RectMode } from './StudioEditor';
+import { isCameraOnlyPress, navAction, nextView, toolDigit, viewAngles, type ViewName } from './viewNav';
 import type { Cell } from './voxelEdit';
 
 CameraControls.install({ THREE });
@@ -49,6 +51,8 @@ export class StudioScene {
   readonly scene = new THREE.Scene();
   readonly camera = new THREE.PerspectiveCamera(45, 1, 0.5, 2000);
   readonly controls: CameraControls;
+  /** Set by the overlay: Tab hides/shows the side panels. */
+  onTogglePanels: (() => void) | null = null;
 
   private readonly material = createBuildingMaterial();
   private readonly building = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
@@ -76,6 +80,7 @@ export class StudioScene {
   private drag: Drag | null = null;
   private pointer: { x: number; y: number } | null = null;
   private problemProps: number[] = [];
+  private lastView: ViewName | null = null;
   private readonly unsub: () => void;
   /** Serialized prop the hover ghost geometry was baked from. */
   private propGhostKey = '';
@@ -161,21 +166,27 @@ export class StudioScene {
     this.handle.renderOrder = 5;
     this.handle.visible = false;
 
-    // Camera: right drag orbits, middle drag pans, wheel zooms. Left is the tool button.
+    // Camera: right drag (or Alt+left drag) orbits, Shift+right / middle drag pans, wheel zooms; left is
+    // the tool button. Touch: one finger = tool, two = rotate + zoom, three = pan.
     const c = new CameraControls(this.camera, canvas);
     c.mouseButtons.left = CameraControls.ACTION.NONE;
     c.mouseButtons.right = CameraControls.ACTION.ROTATE;
     c.mouseButtons.middle = CameraControls.ACTION.TRUCK;
     c.mouseButtons.wheel = CameraControls.ACTION.DOLLY;
-    c.touches.one = CameraControls.ACTION.TOUCH_ROTATE;
+    c.touches.one = CameraControls.ACTION.NONE;
+    c.touches.two = CameraControls.ACTION.TOUCH_DOLLY_ROTATE;
+    c.touches.three = CameraControls.ACTION.TOUCH_TRUCK;
     c.minDistance = 6;
     c.maxDistance = 320;
     c.maxPolarAngle = Math.PI / 2 - 0.04;
     c.smoothTime = 0.1;
     c.draggingSmoothTime = 0.04;
     this.controls = c;
+    c.addEventListener('controlstart', () => (this.lastView = null));
     this.frame(false);
 
+    // Registered after the controls' own listener but as capture, which runs first on the target.
+    canvas.addEventListener('pointerdown', this.setModifierButtons, true);
     canvas.addEventListener('pointerdown', this.onDown);
     canvas.addEventListener('pointermove', this.onMove);
     canvas.addEventListener('pointerup', this.onUp);
@@ -195,6 +206,7 @@ export class StudioScene {
     if (this.bakeTimer) clearTimeout(this.bakeTimer);
     this.unsub();
     const cv = this.canvas;
+    cv.removeEventListener('pointerdown', this.setModifierButtons, true);
     cv.removeEventListener('pointerdown', this.onDown);
     cv.removeEventListener('pointermove', this.onMove);
     cv.removeEventListener('pointerup', this.onUp);
@@ -215,18 +227,48 @@ export class StudioScene {
     this.renderer.forceContextLoss();
   }
 
-  /** Point the camera at the draft (or the empty plot). */
-  frame(smooth = true): void {
+  /** Bounding box centre and size of the draft (the empty plot when there is none). */
+  private bounds(): { cx: number; cz: number; r: number; h: number } {
     const m = this.editor.doc.model;
-    let r = 14;
+    let i0 = Infinity;
+    let i1 = -Infinity;
+    let j0 = Infinity;
+    let j1 = -Infinity;
     let h = 4;
     for (const key of m.cells.keys()) {
       const [i, j, k] = parseVoxel(key);
-      r = Math.max(r, Math.abs(i * m.cell) + m.cell, Math.abs(j * m.cell) + m.cell);
+      i0 = Math.min(i0, i);
+      i1 = Math.max(i1, i);
+      j0 = Math.min(j0, j);
+      j1 = Math.max(j1, j);
       h = Math.max(h, (k + 1) * m.floorHeight);
     }
+    if (i0 === Infinity) return { cx: 0, cz: 0, r: 14, h };
+    const cx = ((i0 + i1 + 1) / 2) * m.cell;
+    const cz = ((j0 + j1 + 1) / 2) * m.cell;
+    return { cx, cz, r: Math.max(14, ((i1 - i0 + 1) * m.cell) / 2 + m.cell, ((j1 - j0 + 1) * m.cell) / 2 + m.cell), h };
+  }
+
+  /** Point the camera at the draft (or the empty plot); the orbit centre is the draft's bounding box centre. */
+  frame(smooth = true): void {
+    const { cx, cz, r, h } = this.bounds();
     const d = Math.max(r * 2.4, h * 2);
-    void this.controls.setLookAt(d * 0.55, h * 0.45 + d * 0.4, d * 0.85, 0, h * 0.42, 0, smooth);
+    this.lastView = 'home';
+    void this.controls.setLookAt(cx + d * 0.55, h * 0.45 + d * 0.4, cz + d * 0.85, cx, h * 0.42, cz, smooth);
+    this.dirty = true;
+  }
+
+  /** Smoothly turn to a named view around the draft's centre (keeps the zoom distance). */
+  setView(view: ViewName): void {
+    if (view === 'home') {
+      this.frame();
+      return;
+    }
+    const { cx, cz, h } = this.bounds();
+    const a = viewAngles(view);
+    this.lastView = view;
+    void this.controls.setTarget(cx, h * 0.42, cz, true);
+    void this.controls.rotateTo(a.azimuth, a.polar, true);
     this.dirty = true;
   }
 
@@ -517,10 +559,27 @@ export class StudioScene {
 
   private noMenu = (e: Event): void => e.preventDefault();
 
+  /** Alt+left drag rotates, Shift+right drag pans (read by the controls on this same pointerdown). */
+  private setModifierButtons = (e: PointerEvent): void => {
+    const b = this.controls.mouseButtons;
+    b.left = e.altKey ? CameraControls.ACTION.ROTATE : CameraControls.ACTION.NONE;
+    b.right = e.shiftKey ? CameraControls.ACTION.TRUCK : CameraControls.ACTION.ROTATE;
+  };
+
   private onDown = (e: PointerEvent): void => {
+    if (!e.isPrimary) {
+      // A second finger turns the gesture into camera work: drop the tool press.
+      this.cancelDrag();
+      return;
+    }
+    if (isCameraOnlyPress(e.button, e.shiftKey, e.altKey) && e.button === 0) {
+      this.drag = null;
+      this.clearGhost();
+      return;
+    }
     if (e.button === 2) {
       this.drag = null;
-      this.rightDown = { x: e.clientX, y: e.clientY };
+      this.rightDown = { x: e.clientX, y: e.clientY, cameraOnly: isCameraOnlyPress(2, e.shiftKey, e.altKey) };
       return;
     }
     if (e.button !== 0) return;
@@ -543,7 +602,7 @@ export class StudioScene {
     this.drag = { kind: 'press', x: e.clientX, y: e.clientY, pick: this.pick(e.clientX, e.clientY), erase: e.shiftKey };
   };
 
-  private rightDown: { x: number; y: number } | null = null;
+  private rightDown: { x: number; y: number; cameraOnly: boolean } | null = null;
 
   private onMove = (e: PointerEvent): void => {
     this.pointer = { x: e.clientX, y: e.clientY };
@@ -591,7 +650,7 @@ export class StudioScene {
     if (e.button === 2) {
       const r = this.rightDown;
       this.rightDown = null;
-      if (r && Math.hypot(e.clientX - r.x, e.clientY - r.y) <= DRAG_PX) this.erase(this.pick(e.clientX, e.clientY));
+      if (r && !r.cameraOnly && Math.hypot(e.clientX - r.x, e.clientY - r.y) <= DRAG_PX) this.erase(this.pick(e.clientX, e.clientY));
       return;
     }
     if (e.button !== 0) return;
@@ -664,6 +723,17 @@ export class StudioScene {
     const ed = this.editor;
     const mod = e.ctrlKey || e.metaKey;
     const key = e.key.toLowerCase();
+    // Camera keys go by e.code (works with a Korean IME); numpad digits must not pick tools.
+    const nav = navAction(e.code, { shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey });
+    if (nav) {
+      e.preventDefault();
+      this.runNav(nav);
+      return;
+    }
+    if (e.code === 'KeyF' && !mod && !e.altKey) {
+      this.frame();
+      return;
+    }
     if (mod && key === 'z') {
       e.preventDefault();
       if (e.shiftKey) ed.redo();
@@ -681,7 +751,7 @@ export class StudioScene {
       else if (ed.selected) ed.select(null);
       return;
     }
-    const tool = TOOL_INFO.find((t) => t.key === e.key);
+    const tool = TOOL_INFO.find((t) => t.key === toolDigit(e.code));
     if (tool) {
       ed.set('tool', tool.id);
       return;
@@ -697,8 +767,26 @@ export class StudioScene {
       ed.set('propSize', sizes[Math.max(0, Math.min(sizes.length - 1, (i < 0 ? 2 : i) + (e.key === ']' ? 1 : -1)))]!);
       return;
     }
-    if (key === 'f') this.frame();
   };
+
+  private runNav(a: NonNullable<ReturnType<typeof navAction>>): void {
+    const rad = Math.PI / 180;
+    switch (a.type) {
+      case 'rotate':
+        this.lastView = null;
+        void this.controls.rotate(a.azimuthDeg * rad, a.polarDeg * rad, true);
+        break;
+      case 'view':
+        this.setView(a.view);
+        break;
+      case 'cycle':
+        this.setView(nextView(this.lastView));
+        break;
+      case 'panels':
+        this.onTogglePanels?.();
+        break;
+    }
+  }
 
   private onKeyUp = (e: KeyboardEvent): void => {
     if (!isTyping(e.target)) e.stopPropagation();

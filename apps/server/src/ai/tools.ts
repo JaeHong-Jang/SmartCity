@@ -1,7 +1,8 @@
 // Tools of the AI building assistant (ADR 0009 §5). They run on a sandbox copy of the room doc: every
 // change is a normal Command, validated by applyCommand exactly like a user edit, and collected into a
-// proposal. Proposals only add things (new designs, buildings, zoning lots), so a stale proposal can
-// never destroy something another user changed in the meantime.
+// proposal. Proposals extend the city (new designs, buildings, zoning lots, roads): the only change to
+// something that exists is splitting a road where a new road joins it (ADR 0010 §9), so a stale
+// proposal can never destroy something another user changed in the meantime.
 
 import type Anthropic from '@anthropic-ai/sdk';
 import {
@@ -11,11 +12,16 @@ import {
   buildingFootprints,
   cloneJson,
   cumulativeLengths,
+  describeRoadBatch,
   designStats,
   dist,
+  IdGen,
   internStyle,
+  parseVoxel,
+  planRoad,
   pointAtLength,
   polygonsOverlap,
+  resolvePoint,
   roadHalfWidth,
   sampleSegmentCurve,
   tangentAtLength,
@@ -25,6 +31,9 @@ import {
   type BuildingType,
   type CityDoc,
   type Command,
+  type Facade,
+  type FacadeStyle,
+  type GroundFloor,
   type RoofShape,
   type Vec2,
   type VoxelModel,
@@ -32,6 +41,8 @@ import {
 } from '@smartcity/shared';
 
 const ZONES: Zone[] = ['residential', 'commercial', 'office', 'industrial', 'public'];
+const FACADE_STYLES: FacadeStyle[] = ['grid', 'ribbon', 'curtain', 'none'];
+const GROUND_FLOORS: GroundFloor[] = ['none', 'shop', 'lobby', 'pilotis'];
 
 export const MAX_PROPOSAL_COMMANDS = 200;
 const MAX_RESULT_CHARS = 8000;
@@ -95,7 +106,7 @@ export const TOOLS: Anthropic.Beta.BetaTool[] = [
   {
     name: 'create_building_design',
     description:
-      'Create a new building design from blocks on a 2 m grid (x, z = cell offsets from the center, may be negative; y = floor index from 0; w, d = cells; h = floors). Blocks with the same color merge. The roof applies to the top of plain rectangular blocks. Returns the new design id to use with place_buildings.',
+      'Create a new building design from blocks on a 2 m grid (x, z = cell offsets from the center, may be negative; y = floor index from 0; w, d = cells; h = floors). Blocks with the same look (colors, facade) merge. Facade fields (nullable) set the wall style of that block; for a building seen in a picture use curtain/ribbon/grid with a matching window_ratio. The roof applies to the top of plain rectangular blocks. Returns the new design id to use with place_buildings.',
     strict: true,
     input_schema: {
       type: 'object',
@@ -115,9 +126,14 @@ export const TOOLS: Anthropic.Beta.BetaTool[] = [
               w: { type: 'integer' },
               d: { type: 'integer' },
               h: { type: 'integer' },
-              color: { type: 'string', description: '#rrggbb' },
+              color: { type: 'string', description: 'Wall color #rrggbb' },
+              roof_color: { type: ['string', 'null'], description: 'Roof color #rrggbb; null = default gray' },
+              // A nullable enum must be anyOf: the API rejects `enum` next to a `type` array.
+              facade_style: { anyOf: [{ type: 'string', enum: [...FACADE_STYLES] }, { type: 'null' }], description: 'Wall look: grid (punched windows), ribbon (window bands), curtain (glass wall), none; null = building default' },
+              window_ratio: { type: ['number', 'null'], description: 'Share of the wall that is glass, 0.1..0.95; null = default 0.4' },
+              ground: { anyOf: [{ type: 'string', enum: [...GROUND_FLOORS] }, { type: 'null' }], description: 'Use of the ground floor: none, shop, lobby, pilotis; null = none' },
             },
-            required: ['x', 'y', 'z', 'w', 'd', 'h', 'color'],
+            required: ['x', 'y', 'z', 'w', 'd', 'h', 'color', 'roof_color', 'facade_style', 'window_ratio', 'ground'],
             additionalProperties: false,
           },
         },
@@ -161,6 +177,26 @@ export const TOOLS: Anthropic.Beta.BetaTool[] = [
         depth: { type: 'integer', description: '1..4 cells of 8 m' },
       },
       required: ['segment_id', 'side', 'zone', 'depth'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'add_road',
+    description:
+      'Add one road along a polyline of 2..16 points (meters), planned exactly like a road the user draws: ends near an existing intersection or road connect to it, crossing an existing road splits it and makes a junction. Existing roads are never deleted or changed otherwise. road_type: a road type id, or null = same type as the nearest road. snap: true = ends snap to nearby nodes/roads and the 8 m grid, false = exact points. Returns the length, how many existing nodes it joins, how many roads it splits, and warnings (e.g. not connected to the road network). Only use when the user asked for a road.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        points: {
+          type: 'array',
+          description: '2..16 points, start to end',
+          items: { type: 'object', properties: { x: { type: 'number' }, z: { type: 'number' } }, required: ['x', 'z'], additionalProperties: false },
+        },
+        road_type: { type: ['string', 'null'] },
+        snap: { type: 'boolean' },
+      },
+      required: ['points', 'road_type', 'snap'],
       additionalProperties: false,
     },
   },
@@ -339,6 +375,47 @@ function findSpots(sb: Sandbox, input: Record<string, unknown>): unknown {
   return { spots: out, ...(out.length < count ? { note: 'fewer free spots than requested near this place' } : {}) };
 }
 
+/** Optional facade of a block: any given field switches it on, the others take the studio defaults. */
+function blockFacade(b: Record<string, unknown>, n: number): Facade | null {
+  const given = (v: unknown): boolean => v !== null && v !== undefined;
+  if (!given(b.facade_style) && !given(b.window_ratio) && !given(b.ground)) return null;
+  const style = given(b.facade_style) ? b.facade_style : 'grid';
+  if (!FACADE_STYLES.includes(style as FacadeStyle)) bad(`block ${n}.facade_style must be one of ${FACADE_STYLES.join(', ')}`);
+  const ground = given(b.ground) ? b.ground : 'none';
+  if (!GROUND_FLOORS.includes(ground as GroundFloor)) bad(`block ${n}.ground must be one of ${GROUND_FLOORS.join(', ')}`);
+  const windowRatio = given(b.window_ratio) ? num(b.window_ratio, 0.1, 0.95, `block ${n}.window_ratio`) : 0.4;
+  return { style: style as FacadeStyle, windowRatio, ground: ground as GroundFloor };
+}
+
+/**
+ * Shift the cells so the footprint is centered on the building origin. The model often draws blocks
+ * off-center (seen with a real call: x = 4..11), and placement treats the origin as the lot center.
+ * The shift is in whole cells so the design stays on the studio's 2 m grid (it reopens losslessly);
+ * an odd number of cells on an axis therefore leaves the center half a cell (1 m) off — accepted.
+ */
+function recenter(model: VoxelModel): void {
+  let minI = Infinity;
+  let maxI = -Infinity;
+  let minJ = Infinity;
+  let maxJ = -Infinity;
+  for (const key of model.cells.keys()) {
+    const [i, j] = parseVoxel(key);
+    minI = Math.min(minI, i);
+    maxI = Math.max(maxI, i);
+    minJ = Math.min(minJ, j);
+    maxJ = Math.max(maxJ, j);
+  }
+  const di = Math.floor((minI + maxI + 1) / 2);
+  const dj = Math.floor((minJ + maxJ + 1) / 2);
+  if (di === 0 && dj === 0) return;
+  const moved = new Map<string, number>();
+  for (const [key, style] of model.cells) {
+    const [i, j, k] = parseVoxel(key);
+    moved.set(voxelKey(i - di, j - dj, k), style);
+  }
+  model.cells = moved;
+}
+
 function createDesign(sb: Sandbox, input: Record<string, unknown>): unknown {
   const name = str(input.name, 'name', 40);
   const zone = input.zone as Zone;
@@ -365,12 +442,16 @@ function createDesign(sb: Sandbox, input: Record<string, unknown>): unknown {
     if (cells > VOXEL_LIMITS.cells) bad(`too many cells (max ${VOXEL_LIMITS.cells})`);
     const color = str(b.color, `block ${n}.color`, 7);
     if (!/^#[0-9a-fA-F]{6}$/.test(color)) bad(`block ${n}.color must be #rrggbb`);
-    const style = internStyle(model.styles, { color: color.toLowerCase(), roofColor: '#5f646b', roof, use: zone });
+    const roofColor = b.roof_color === null || b.roof_color === undefined ? '#5f646b' : str(b.roof_color, `block ${n}.roof_color`, 7);
+    if (!/^#[0-9a-fA-F]{6}$/.test(roofColor)) bad(`block ${n}.roof_color must be #rrggbb`);
+    const facade = blockFacade(b, n);
+    const style = internStyle(model.styles, { color: color.toLowerCase(), roofColor: roofColor.toLowerCase(), roof, use: zone, ...(facade ? { facade } : {}) });
     for (let i = x; i < x + w; i++) for (let j = z; j < z + d; j++) for (let k = y; k < y + h; k++) model.cells.set(voxelKey(i, j, k), style);
   }
+  recenter(model);
   const { parts } = voxelsToParts(model);
   const id = newId(sb, 'design');
-  const err = propose(sb, { type: 'buildingType.upsert', buildingType: { id, name, zone, parts }, expectedRev: 0 });
+  const err = propose(sb, { type: 'buildingType.upsert', buildingType: { id, name, zone, parts, origin: 'ai' }, expectedRev: 0 });
   if (err) bad(`design rejected: ${err}`);
   return { type_id: id, parts: parts.length, footprint: footprintOf(sb.doc.buildingTypes[id]!) };
 }
@@ -417,6 +498,91 @@ function zoneAlongRoad(sb: Sandbox, input: Record<string, unknown>): unknown {
   return { lots };
 }
 
+const MIN_JUNCTION_GAP = 40;
+
+/** Ids for a road: unique per request, in the proposal's `ai-<tag>-` namespace. */
+class AiRoadIds extends IdGen {
+  constructor(private readonly sb: Sandbox) {
+    super(sb.tag);
+  }
+  override next(prefix: string): string {
+    return newId(this.sb, prefix);
+  }
+}
+
+function addRoad(sb: Sandbox, input: Record<string, unknown>): unknown {
+  const raw = input.points;
+  if (!Array.isArray(raw) || raw.length < 2 || raw.length > 16) bad('points: 2..16');
+  const pts = (raw as unknown[]).map((p, n): Vec2 => {
+    if (!isObj(p)) bad(`point ${n}: not an object`);
+    const o = p as Record<string, unknown>;
+    return { x: num(o.x, -1e5, 1e5, `point ${n}.x`), z: num(o.z, -1e5, 1e5, `point ${n}.z`) };
+  });
+  if (typeof input.snap !== 'boolean') bad('snap must be a boolean');
+  const snap = input.snap;
+  const doc = sb.doc;
+  let roadTypeId: string;
+  if (input.road_type === null || input.road_type === undefined) {
+    const nearest = Object.values(doc.segments)
+      .map((s) => ({ s, d: dist(doc.nodes[s.a]!.pos, pts[0]!) }))
+      .sort((p, q) => p.d - q.d || (p.s.id < q.s.id ? -1 : 1))[0];
+    roadTypeId = nearest?.s.roadTypeId ?? (doc.roadTypes['road-2'] ? 'road-2' : (Object.keys(doc.roadTypes).sort()[0] ?? ''));
+  } else {
+    roadTypeId = str(input.road_type, 'road_type');
+  }
+  if (!doc.roadTypes[roadTypeId]) bad('unknown road type');
+
+  // Plan piece by piece on a scratch copy, so each piece sees the nodes the previous one made.
+  const existing = new Set(Object.keys(doc.nodes));
+  const work = cloneJson(doc);
+  const ids = new AiRoadIds(sb);
+  const leaves: Command[] = [];
+  const resolve = (p: Vec2): ReturnType<typeof resolvePoint> => (snap ? resolvePoint(work, p, true) : { kind: 'free', pos: p });
+  for (let i = 1; i < pts.length; i++) {
+    // The start of a later piece is the end node of the previous one (resolvePoint finds it at distance 0).
+    const start = i === 1 ? resolve(pts[0]!) : resolvePoint(work, pts[i - 1]!, false);
+    const plan = planRoad(work, { start, end: resolve(pts[i]!), roadTypeId }, ids);
+    if (!plan.command || plan.command.type !== 'batch') return bad(`road piece ${i}: ${plan.error ?? 'cannot be planned'}`);
+    const r = applyCommand(work, plan.command);
+    if (!r.ok) bad(`road piece ${i}: ${r.error}`);
+    leaves.push(...plan.command.commands);
+  }
+  // The road must never cross a building or remove an automatic lot, now or when applied later.
+  for (const [i, c] of leaves.entries()) if (c.type === 'segment.add') leaves[i] = { ...c, ifClear: true };
+  const cmd: Command = { type: 'batch', commands: leaves };
+  const probe = applyCommand(cloneJson(doc), cmd);
+  if (!probe.ok) bad(`road rejected: ${probe.error}`);
+  const info = describeRoadBatch(doc, cmd);
+  if (!info) bad('road rejected');
+  const err = propose(sb, cmd);
+  if (err) bad(`road rejected: ${err}`);
+
+  const warnings: string[] = [];
+  if (info!.connected === 0 && info!.splits === 0) warnings.push('기존 도로망과 연결되지 않은 고립 도로입니다. 기존 도로 끝점이나 도로 위에서 시작하도록 다시 계획하세요.');
+  const degree = new Map<string, number>();
+  for (const s of Object.values(sb.doc.segments)) for (const n of [s.a, s.b]) degree.set(n, (degree.get(n) ?? 0) + 1);
+  const junctions = new Set<string>();
+  for (const c of leaves) {
+    if (c.type === 'segment.split') junctions.add(c.nodeId);
+    if (c.type === 'segment.add') for (const n of [c.segment.a, c.segment.b]) if (existing.has(n) && (degree.get(n) ?? 0) >= 3) junctions.add(n);
+  }
+  for (const j of junctions) {
+    const jp = sb.doc.nodes[j]!.pos;
+    if (Object.values(sb.doc.nodes).some((o) => o.id !== j && (degree.get(o.id) ?? 0) >= 3 && dist(o.pos, jp) < MIN_JUNCTION_GAP)) {
+      warnings.push(`교차로 간격이 ${MIN_JUNCTION_GAP} m보다 짧은 곳이 있습니다(${Math.round(jp.x)}, ${Math.round(jp.z)}).`);
+      break;
+    }
+  }
+  return {
+    length_m: round(info!.lengthM),
+    connected_existing_nodes: info!.connected,
+    splits: info!.splits,
+    from: { x: round(pts[0]!.x), z: round(pts[0]!.z) },
+    to: { x: round(pts[pts.length - 1]!.x), z: round(pts[pts.length - 1]!.z) },
+    warnings,
+  };
+}
+
 export interface ToolOutcome {
   content: string;
   isError: boolean;
@@ -438,6 +604,8 @@ export function runTool(sb: Sandbox, name: string, input: unknown): ToolOutcome 
         return { content: clip(placeBuildings(sb, args as Record<string, unknown>)), isError: false, finished: false };
       case 'zone_along_road':
         return { content: clip(zoneAlongRoad(sb, args as Record<string, unknown>)), isError: false, finished: false };
+      case 'add_road':
+        return { content: clip(addRoad(sb, args as Record<string, unknown>)), isError: false, finished: false };
       case 'finish':
         sb.summary = str((args as Record<string, unknown>).summary, 'summary', 600);
         return { content: '{"ok":true}', isError: false, finished: true };

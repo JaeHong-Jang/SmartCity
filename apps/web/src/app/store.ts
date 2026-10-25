@@ -16,6 +16,7 @@ import {
 } from '@smartcity/shared';
 import type { SimStats } from '@smartcity/sim';
 import { initialAi, reduceAi, type AiEvent, type AiState } from './aiChat';
+import { addHighlight, highlightFromBatch, initialHighlights, type Highlight, type HighlightState } from './highlights';
 import type { ProposalStatus } from './proposal';
 import type { TransitSummary } from './transit';
 
@@ -127,6 +128,16 @@ export interface ClientState {
   ai: AiState;
   /** Dry-run result of the shown proposal against the current doc (null = no proposal). */
   proposalStatus: ProposalStatus | null;
+  /** Things the AI recently built: pulse, beacon and the "최근 적용" list (not part of the doc). */
+  highlights: HighlightState;
+  /** AI batches dispatched and not answered yet, by dispatch ref (resolved here so a panel switch cannot lose them). */
+  aiApplies: Record<number, { batch: Command; summary: string; reqId: number }>;
+  /** reqId of the AI proposal being applied right now (null = none); survives panel switches. */
+  aiApplying: number | null;
+  /** Per proposal reqId: commands sent whose answer is not known yet (apply stays blocked meanwhile). */
+  aiPending: Record<number, number>;
+  /** Bumped when the connection is lost or the doc is replaced: waiters of the old session give up. */
+  session: number;
   overlays: Overlays;
   panel: PanelId | null;
   render: RenderStats;
@@ -217,6 +228,11 @@ export function initialState(room: string, name: string): ClientState {
     hoverParcelId: null,
     ai: initialAi(),
     proposalStatus: null,
+    highlights: initialHighlights(),
+    aiApplies: {},
+    aiApplying: null,
+    aiPending: {},
+    session: 0,
     overlays: { flow: false, shadows: true, violations: true },
     panel: 'inspector',
     render: { fps: 0, drawCalls: 0, triangles: 0 },
@@ -231,6 +247,11 @@ export class ClientStore {
   private nextId = 1;
   /** Called when a seq gap is detected; the transport reconnects to get a fresh snapshot. */
   onResyncNeeded: (() => void) | null = null;
+  /** Called with the highlight of an AI batch that was just applied (the app flies the camera there). */
+  onAiHighlight: ((h: Highlight) => void) | null = null;
+  /** In-flight proposal applies by reqId: a second apply of the same proposal joins the first (see proposalApply). */
+  readonly aiApplyJobs = new Map<number, Promise<unknown>>();
+  private readonly aiPendingRefs = new Map<number, { cmd: Command; summary: string; reqId: number; late: boolean }>();
 
   constructor(room: string, name: string, private readonly now: () => number = () => Date.now()) {
     this.state = initialState(room, name);
@@ -285,7 +306,9 @@ export class ClientStore {
   /** Connection lost: pending commands have unknown outcome (ADR 0001). */
   connectionLost(next: Connection): void {
     const n = this.state.pending.length;
-    this.set({ connection: next, pending: [], peers: [], presence: {} });
+    const released = this.releaseAiPending();
+    this.set({ connection: next, pending: [], peers: [], presence: {}, session: this.state.session + 1 });
+    if (released > 0) this.toast(AI_UNKNOWN, 'error');
     if (n > 0) this.toast(`연결이 끊겨 전송 중이던 편집 ${n}건의 결과를 알 수 없습니다`, 'error');
   }
 
@@ -309,8 +332,10 @@ export class ClientStore {
           selection: null,
           connection: s.connection === 'offline' ? 'offline' : 'online',
           ready: true,
+          session: s.session + 1,
         });
         for (const l of this.resetListeners) l(doc);
+        if (this.releaseAiPending() > 0) this.toast(AI_UNKNOWN, 'error');
         if (resync) this.toast('서버와 다시 동기화했습니다', 'info');
         return;
       }
@@ -333,6 +358,10 @@ export class ClientStore {
         const selection = s.selection && !selectionExists(s.doc, s.selection) ? null : s.selection;
         this.set({ seq: msg.seq, docVersion: s.docVersion + 1, pending, results, selection });
         for (const l of this.appliedListeners) l(msg.cmd, msg.seq);
+        if (mine) {
+          this.settleAiPending(msg.ref!, 'ok');
+          this.resolveAiApply(msg.ref!, 'ok');
+        }
         return;
       }
       case 'rejected': {
@@ -340,6 +369,8 @@ export class ClientStore {
         const flashes = p && p.ghost.length ? [...s.flashes, { id: this.nextId++, ghost: p.ghost, until: this.now() + FLASH_MS }] : s.flashes;
         this.set({ pending: s.pending.filter((x) => x.ref !== msg.ref), results: withResult(s.results, msg.ref, msg.error), flashes });
         this.toast(`거부됨: ${translateError(msg.error)}`, 'error');
+        this.settleAiPending(msg.ref, msg.error);
+        this.resolveAiApply(msg.ref, msg.error);
         return;
       }
       case 'peers': {
@@ -367,10 +398,74 @@ export class ClientStore {
     }
   }
 
+  /** Remember an AI batch sent as `ref`; when it is applied the highlight is created even if no panel is open. */
+  trackAiApply(ref: number, batch: Command, summary: string, reqId: number): void {
+    this.set({ aiApplies: { ...this.state.aiApplies, [ref]: { batch, summary, reqId } } });
+    const done = this.state.results[ref];
+    if (done !== undefined) this.resolveAiApply(ref, done);
+  }
+
+  private resolveAiApply(ref: number, outcome: string): void {
+    const rec = this.state.aiApplies[ref];
+    if (!rec) return;
+    const { [ref]: _done, ...rest } = this.state.aiApplies;
+    this.set({ aiApplies: rest });
+    if (outcome !== 'ok') return;
+    this.recordAiApplied(rec.batch, rec.summary, rec.reqId);
+  }
+
+  /** A command of proposal `reqId` was sent as `ref`: until it is answered the proposal cannot be applied again. */
+  trackAiPending(ref: number, cmd: Command, reqId: number, summary: string): void {
+    // A synchronous transport may have answered before the ref was registered: nothing is pending then.
+    if (this.state.results[ref] !== undefined) return;
+    this.aiPendingRefs.set(ref, { cmd, summary, reqId, late: false });
+    this.set({ aiPending: { ...this.state.aiPending, [reqId]: (this.state.aiPending[reqId] ?? 0) + 1 } });
+  }
+
+  /** The apply stopped waiting for `ref`: if its answer is `ok` later, that answer records the highlight. */
+  markAiLate(ref: number): void {
+    const rec = this.aiPendingRefs.get(ref);
+    if (rec) rec.late = true;
+  }
+
+  /** Called in the same synchronous step that processes the answer, so a later session change cannot lose it. */
+  private settleAiPending(ref: number, outcome: string): void {
+    const rec = this.aiPendingRefs.get(ref);
+    if (!rec) return;
+    this.aiPendingRefs.delete(ref);
+    const { [rec.reqId]: n = 1, ...rest } = this.state.aiPending;
+    this.set({ aiPending: n > 1 ? { ...rest, [rec.reqId]: n - 1 } : rest });
+    if (rec.late && outcome === 'ok') this.recordAiApplied(rec.cmd, rec.summary, rec.reqId, 'AI 제안의 늦게 도착한 항목이 적용되었습니다 (되돌리려면 철거 도구로 지우세요)');
+  }
+
+  /** The session ended: unanswered refs are "unknown" (never inferred from the doc) and their guard is released. */
+  private releaseAiPending(): number {
+    const n = this.aiPendingRefs.size;
+    this.aiPendingRefs.clear();
+    if (Object.keys(this.state.aiPending).length) this.set({ aiPending: {} });
+    return n;
+  }
+
+  /** An AI proposal (one batch, or several commands collected into one) was applied: highlight, camera, toast. */
+  recordAiApplied(batch: Command, summary: string, reqId: number, toast = 'AI 제안을 적용했습니다 (되돌리려면 철거 도구로 지우세요)'): void {
+    const s = this.state;
+    const h = highlightFromBatch(batch, s.doc.buildingTypes, this.now(), 0, summary, s.doc);
+    if (h) {
+      const next = addHighlight(s.highlights, h);
+      this.set({ highlights: next });
+      this.onAiHighlight?.(next.items[next.items.length - 1]!);
+    }
+    // Only the proposal this batch came from: a newer one the user asked for meanwhile stays.
+    if (this.state.ai.proposal?.reqId === reqId) this.aiEvent({ kind: 'discard' });
+    this.toast(toast, 'success');
+  }
+
   aiEvent(ev: AiEvent): void {
     this.set({ ai: reduceAi(this.state.ai, ev) });
   }
 }
+
+export const AI_UNKNOWN = '연결이 바뀌어 결과를 확인할 수 없습니다 — 도시를 확인하세요';
 
 export function selectionExists(doc: CityDoc, sel: Selection): boolean {
   switch (sel.kind) {

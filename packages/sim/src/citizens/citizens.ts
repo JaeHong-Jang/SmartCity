@@ -42,6 +42,33 @@ const ERRAND_SPAN = 6 * 3600;
 const ERRAND_PROB = 0.3;
 /** Seconds a citizen waits at the curb for room to start the car before walking instead. */
 const CAR_WAIT = 30;
+
+/**
+ * Simulator mode (ADR 0010 §5, `w.sc` set): decisions taken at trip/arrival time come from a hash of (citizen
+ * id, game day of the decision, decision kind, doc seed) instead of the shared streams, which are drawn in
+ * event order and so depend on when other citizens arrived. Main mode keeps the streams (golden hashes).
+ * One decision of each kind per citizen and day: workers with a job shop only after work, others only on errands.
+ */
+const Decision = { errandShop: 1, afterWorkShop: 2, afterWorkPick: 3, shopMinutes: 4, carType: 5, job: 6 } as const;
+const DECISION_SALT = 0x5c3a9e1d;
+
+function decide(w: World, c: Citizen, kind: number): number {
+  const day = Math.floor(gameSec(w, w.tick) / DAY);
+  return hash01(c.id, day * 8 + kind, (w.doc.meta.seed ^ DECISION_SALT) | 0);
+}
+
+/** `Rng.weighted` with a given uniform u in [0, 1) (no stream draw). */
+function weightedAt(weights: readonly number[], u: number): number {
+  let total = 0;
+  for (const x of weights) total += x;
+  if (total <= 0) return -1;
+  let r = u * total;
+  for (let i = 0; i < weights.length; i++) {
+    r -= weights[i]!;
+    if (r < 0) return i;
+  }
+  return weights.length - 1;
+}
 const DAY = 86400;
 
 export interface Citizen {
@@ -203,7 +230,7 @@ function assignJob(w: World, c: Citizen): void {
       free.push(f);
     }
   }
-  const k = cz.rngAssign.weighted(free);
+  const k = w.sc !== null ? weightedAt(free, decide(w, c, Decision.job)) : cz.rngAssign.weighted(free);
   if (k < 0) return;
   c.work = ids[k]!;
   cz.jobUsed.set(c.work, (cz.jobUsed.get(c.work) ?? 0) + 1);
@@ -372,8 +399,8 @@ function scheduleHome(w: World, c: Citizen): void {
   }
 }
 
-function pickShop(w: World): string | null {
-  const k = w.cz.rngSched.weighted(w.cz.shopW);
+function pickShop(w: World, c: Citizen, kind: number): string | null {
+  const k = w.sc !== null ? weightedAt(w.cz.shopW, decide(w, c, kind)) : w.cz.rngSched.weighted(w.cz.shopW);
   return k < 0 ? null : w.cz.shopIds[k]!;
 }
 
@@ -382,12 +409,13 @@ function act(w: World, c: Citizen): void {
   if (c.state === CitState.waiting) return leaveStop(w, c);
   if (c.state === CitState.home) {
     if (c.worker && c.work !== null && w.doc.buildings[c.work]) return startTrip(w, c, c.work, Purpose.work);
-    const shop = pickShop(w);
+    const shop = pickShop(w, c, Decision.errandShop);
     if (shop && shop !== c.home) return startTrip(w, c, shop, Purpose.shop);
     return scheduleHome(w, c);
   }
   if (c.state === CitState.atWork) {
-    const shop = w.cz.rngSched.next() < SHOP_PROB ? pickShop(w) : null;
+    const u = w.sc !== null ? decide(w, c, Decision.afterWorkShop) : w.cz.rngSched.next();
+    const shop = u < SHOP_PROB ? pickShop(w, c, Decision.afterWorkPick) : null;
     if (shop && shop !== c.at) return startTrip(w, c, shop, Purpose.shop);
     return startTrip(w, c, c.home, Purpose.home);
   }
@@ -447,7 +475,8 @@ function arrive(w: World, c: Citizen): void {
     schedule(w, c, w.tick + gameDuration(w, WORK_HOURS * 3600));
   } else if (purpose === Purpose.shop) {
     setState(w, c, CitState.atShop);
-    const minutes = SHOP_MIN_MINUTES + w.cz.rngSched.next() * (SHOP_MAX_MINUTES - SHOP_MIN_MINUTES);
+    const u = w.sc !== null ? decide(w, c, Decision.shopMinutes) : w.cz.rngSched.next();
+    const minutes = SHOP_MIN_MINUTES + u * (SHOP_MAX_MINUTES - SHOP_MIN_MINUTES);
     schedule(w, c, w.tick + gameDuration(w, minutes * 60));
   } else {
     setState(w, c, CitState.home);
@@ -474,7 +503,7 @@ function tryCar(w: World, c: Citizen): 'ok' | 'wait' | 'walk' {
   if (lanes) for (let k = lanes.length - 1; k >= 0 && lane < 0; k--) if (!w.net.busOnly[lanes[k]!]) lane = lanes[k]!;
   if (lane < 0 || w.net.closed[lane]) return 'walk';
   if (w.vehicles.length >= w.maxVehicles) return 'wait';
-  const typeId = w.demand.typeIds[w.cz.rngMode.weighted(w.demand.typeW)]!;
+  const typeId = w.demand.typeIds[w.sc !== null ? weightedAt(w.demand.typeW, decide(w, c, Decision.carType)) : w.cz.rngMode.weighted(w.demand.typeW)]!;
   const type = w.types.get(typeId)!;
   const L = w.net.len[lane]!;
   if (L < type.length + 1) return 'walk';

@@ -8,6 +8,7 @@ import type { ZoneIndex } from '../network/crossings.js';
 import type { CompileCache } from '../network/compile.js';
 import type { Net } from '../network/net.js';
 import type { Router } from '../network/route.js';
+import type { ScenarioState } from '../scenario/state.js';
 import type { RoadGraph } from '../types.js';
 import type { DemandModel } from './demand.js';
 import type { BusLineState } from './buses.js';
@@ -97,6 +98,14 @@ export interface Vehicle {
   queued: boolean;
   alive: boolean;
   bus: BusInfo | null;
+  /** Spawn tick (scenario travel-time KPI). */
+  t0: number;
+  /** Scenario route state: 0 none, 1 recovery search queued, 2 waiting with no route (scenario/reroute.ts). */
+  scWait: number;
+  /** In the scenario re-route queue. */
+  scQueued: boolean;
+  /** Re-routed by the response policy at least once. */
+  scRerouted: boolean;
 }
 
 export interface Trip {
@@ -162,6 +171,8 @@ export interface World {
   spawned: number;
   arrived: number;
   removed: number;
+  /** Simulator-mode experiment state (ADR 0010); null until the first scenario call. */
+  sc: ScenarioState | null;
 }
 
 export const STOP_SPEED = 0.5;
@@ -242,6 +253,9 @@ export function canPlace(w: World, lane: number, s: number, len: number, margin:
   if (last && s - len - margin < w.reserved[lane]!) return false;
   // Never inside a mid-block conflict zone.
   for (const p of w.zones.lane[lane]!) if (s + margin > p.enterS && s - len - margin < p.exitS) return false;
+  // Nor on a scenario obstacle (ADR 0010 §3).
+  const obs = w.sc !== null ? w.sc.obs : null;
+  if (obs !== null) for (const o of obs[lane]!) if (s + margin > o.rear && s - len - margin < o.rear + o.len) return false;
   const ob: Obstacle = { gap: Infinity, v: 0 };
   tailOverhang(w, lane, w.net.len[lane]! - s, 0, ob);
   return ob.gap >= margin;

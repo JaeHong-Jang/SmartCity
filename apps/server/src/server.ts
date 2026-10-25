@@ -112,7 +112,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
             return;
           case 'ai.ask': {
             const c = client;
-            ai.ask(room, { id: c.id, send: (m) => send(ws, m) }, ip, msg.reqId, msg.text, msg.focus);
+            ai.ask(room, { id: c.id, send: (m) => send(ws, m) }, ip, msg.reqId, msg.text, msg.focus, msg.images);
             return;
           }
           case 'ai.cancel':

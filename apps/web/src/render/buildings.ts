@@ -6,6 +6,7 @@ import * as THREE from 'three';
 import { AREA_PER_JOB, AREA_PER_PERSON, buildingMetrics, type BuildingType, type CityDoc } from '@smartcity/shared';
 import type { SimSnapshot } from '@smartcity/sim';
 import { bakeBuildingGeometry, createBuildingMaterial } from './buildingGeometry';
+import { toneShift } from './buildingTone';
 
 export { roofHeight, wallHeight } from './buildingGeometry';
 
@@ -42,6 +43,8 @@ interface TypeEntry {
   /** The doc object the geometry was baked from (fast path), and its design signature (after a resync). */
   ref: BuildingType;
   sig: string;
+  /** Per-instance wall tone shift (hue°, saturation, lightness), see buildingTone.ts; applied to each volume's own wall colour in the shader. */
+  tone: THREE.InstancedBufferAttribute;
   mesh: THREE.InstancedMesh;
   capacity: number;
 }
@@ -72,8 +75,9 @@ export class BuildingLayer {
     (this.material.userData.uNight as { value: number }).value = night;
   }
 
-  private createMesh(id: string, geo: THREE.BufferGeometry, capacity: number, occ: THREE.InstancedBufferAttribute): THREE.InstancedMesh {
+  private createMesh(id: string, geo: THREE.BufferGeometry, capacity: number, occ: THREE.InstancedBufferAttribute, tone: THREE.InstancedBufferAttribute): THREE.InstancedMesh {
     geo.setAttribute('aOccupancy', occ);
+    geo.setAttribute('aTone', tone);
     const mesh = new THREE.InstancedMesh(geo, this.material, capacity);
     mesh.name = `buildings-${id}`;
     mesh.count = 0;
@@ -108,7 +112,8 @@ export class BuildingLayer {
         let capacity = 16;
         while (capacity < n) capacity *= 2;
         const occ = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
-        e = { rev: t.rev ?? 0, ids: [], occ, next: new Float32Array(capacity), cap: buildingCapacity(t), ref: t, sig: designSig(t), mesh: this.createMesh(id, bakeBuildingGeometry(t), capacity, occ), capacity };
+        const tone = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
+        e = { rev: t.rev ?? 0, ids: [], occ, tone, next: new Float32Array(capacity), cap: buildingCapacity(t), ref: t, sig: designSig(t), mesh: this.createMesh(id, bakeBuildingGeometry(t), capacity, occ, tone), capacity };
         this.types.set(id, e);
       } else if (n > e.capacity) {
         let capacity = e.capacity;
@@ -117,9 +122,11 @@ export class BuildingLayer {
         this.group.remove(e.mesh);
         e.mesh.dispose();
         e.occ.dispose();
+        e.tone.dispose();
+        e.tone = new THREE.InstancedBufferAttribute(new Float32Array(capacity * 3), 3);
         e.occ = new THREE.InstancedBufferAttribute(new Float32Array(capacity), 1);
         e.next = new Float32Array(capacity);
-        e.mesh = this.createMesh(id, geo, capacity, e.occ);
+        e.mesh = this.createMesh(id, geo, capacity, e.occ, e.tone);
         e.capacity = capacity;
       }
     }
@@ -135,12 +142,16 @@ export class BuildingLayer {
       _m.makeRotationY(b.rotation).setPosition(b.pos.x, 0, b.pos.z);
       this.slotOf.set(b.id, { e, slot: e.mesh.count });
       e.ids.push(b.id);
+      // Only grown buildings are toned; hand-placed and AI ones keep (0, 0, 0) = the design colour.
+      const t = b.auto ? toneShift(b.id) : null;
+      e.tone.setXYZ(e.mesh.count, t?.dh ?? 0, t?.ds ?? 0, t?.dl ?? 0);
       e.mesh.setMatrixAt(e.mesh.count++, _m);
     }
     this.occStale = true;
     for (const e of this.types.values()) {
       e.mesh.visible = e.mesh.count > 0;
       e.mesh.instanceMatrix.needsUpdate = true;
+      e.tone.needsUpdate = true;
       if (e.mesh.count > 0) e.mesh.computeBoundingSphere();
     }
   }
@@ -184,6 +195,7 @@ export class BuildingLayer {
     for (const e of this.types.values()) {
       this.drop(e);
       e.occ.dispose();
+      e.tone.dispose();
     }
     this.types.clear();
     this.slotOf.clear();
