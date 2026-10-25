@@ -135,6 +135,12 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
     expect(got).toEqual(BUS_CORRIDOR);
   }, 120_000);
 
+  // Safe plan changes (ADR 0010 §4, traffic/signalClearing.ts) changed this trace from tick 900 on (hashes
+  // 4–8; 1–3 unchanged): the node move at 900 changes the plan identity of 5 junctions (automatic phase order
+  // and two crosswalk clearances) and the split at 1300 the approach ids at 2 — those now go through yellow,
+  // all red and pedestrian clearance, then restart at their first phase. The crosswalk (400) and the
+  // closure (1700) keep every identity; the removal at 2000 hits its two junctions in their last all-red tick.
+  // Safety of the new behaviour: traffic/signalEdits.test.ts (same script under the per-tick checker).
   it('dense grid: heavy traffic, signals, splits and node moves', () => {
     const doc = gridDoc(7, 120, 'road-4', 11);
     doc.meta.trafficDensity = 3;
@@ -152,6 +158,6 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
 });
 
 const SMALL_CITY = ["abd22600","7be520d5","3473c037","c963d2b5","d8785a55","77e12fe8","48845201","77c6691","f9cf5552","321bf933","f77774f3","8f7ec53e"];
-const DENSE_GRID = ["53671d38","a711768","93e5a844","953b91d1","525b3568","bd3ff771","c1112f13","706cdc0a"];
+const DENSE_GRID = ["53671d38","a711768","93e5a844","3940202d","46fcfaf9","655badb2","716c9018","5550f920"];
 const NO_LINES = ["8863d04b","880f1ab2","b3af70f5","320000a9","8f7b1bf8","f0b3eb82","a1ceba0b","c55fdc77"];
 const BUS_CORRIDOR = ["fc6cbbff","e9d05de9","64ae7cb2","4ad71dff","e532dcbe","159290f4","c0bd4582","78bbdad6","6fb1e2a0","65af2598"];

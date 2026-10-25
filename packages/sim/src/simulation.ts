@@ -25,6 +25,7 @@ import { applyDueInputs, ensureScenario, queuePolicy, queueScenarioInput, reloca
 import { emergencyArrived, fireProgress, processEmergency, recheckIncidents } from './scenario/emergency.js';
 import { inactiveKpi, scenarioKpi } from './scenario/kpi.js';
 import { controlledJunctions, rebindSignalControl, updatePreemption, writeSignalControl } from './scenario/preempt.js';
+import { reconcileSignals, stepClearings, writeClearings } from './traffic/signalClearing.js';
 import { processReroutes } from './scenario/reroute.js';
 import { scenarioHolds } from './scenario/state.js';
 import { processSurge } from './scenario/surge.js';
@@ -127,6 +128,8 @@ export class Simulation {
       typeIds: [],
       types: new Map(),
       signals: { plans: [], mids: [] },
+      signalClearing: new Map(),
+      signalOffsets: new Map(),
       demand: buildDemand(d, net),
       lines: [],
       nextId: 1,
@@ -179,7 +182,9 @@ export class Simulation {
     if (w.sc !== null) applyDueInputs(w);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
     // Signal control state machine (ADR 0010 §4): only while emergency vehicles are out or a junction is driven.
-    if (w.sc !== null && (w.sc.missions.length > 0 || w.sc.ctl.size > 0 || w.sc.clearing.size > 0)) updatePreemption(w);
+    if (w.sc !== null && (w.sc.missions.length > 0 || w.sc.ctl.size > 0 || w.signalClearing.size > 0)) updatePreemption(w);
+    // Junctions entering a changed signal plan (every mode): yellow, all red, pedestrian clearance first.
+    else if (w.signalClearing.size > 0) stepClearings(w);
     processCitizenEvents(w);
     if (w.demandOn) generateTrips(w);
     maintainBuses(w);
@@ -488,14 +493,18 @@ export class Simulation {
         w.removed++;
       }
     }
+    const oldSignals = w.signals;
     w.signals = buildSignals(w.doc, w.net, w.zones, w.tickRate);
     w.signals.builtAt = w.tick;
+    // A changed plan is entered safely (traffic/signalClearing.ts); controllers first turn into clearances.
     if (w.sc !== null) rebindSignalControl(w);
+    reconcileSignals(w, oldSignals, (nodeId) => w.sc !== null && w.sc.ctl.has(nodeId));
     w.laneGreen.fill(1);
     w.zs.pedSig.fill(PedSignal.none);
     w.zs.midColor.fill(2);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
-    if (w.sc !== null && (w.sc.ctl.size > 0 || w.sc.clearing.size > 0)) writeSignalControl(w);
+    if (w.sc !== null && w.sc.ctl.size > 0) writeSignalControl(w);
+    if (w.signalClearing.size > 0) writeClearings(w);
     w.demand = buildDemand(w.doc, w.net);
     // Incidents whose building, and dispatches whose facility, an edit removed (ADR 0010 §3).
     if (w.sc !== null && (w.sc.incidents.length > 0 || w.sc.missions.length > 0)) recheckIncidents(w);

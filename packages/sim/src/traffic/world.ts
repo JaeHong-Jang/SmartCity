@@ -12,6 +12,7 @@ import type { Mission, ScenarioState } from '../scenario/state.js';
 import type { RoadGraph } from '../types.js';
 import type { DemandModel } from './demand.js';
 import type { BusLineState } from './buses.js';
+import type { SignalClearing } from './signalClearing.js';
 import type { SignalSet } from './signals.js';
 import type { ZoneState } from './zones.js';
 
@@ -167,6 +168,10 @@ export interface World {
   typeIds: string[];
   types: Map<string, VehicleType>;
   signals: SignalSet;
+  /** Edit-time clearances of junctions whose signal plan changed (traffic/signalClearing.ts), by node id. */
+  signalClearing: Map<string, SignalClearing>;
+  /** Plan offsets re-phased after a clearance or a controller hand-back, kept while the plan identity is unchanged. */
+  signalOffsets: Map<string, { key: string; offset: number }>;
   demand: DemandModel;
   lines: BusLineState[];
   nextId: number;

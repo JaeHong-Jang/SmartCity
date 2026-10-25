@@ -44,6 +44,24 @@ export interface PedHead {
   clearance: number;
 }
 
+/**
+ * A plan in stable ids (computed when the plan is built, against the graph of that moment): what a signal
+ * controller or an edit-time clearance (traffic/signalClearing.ts) is bound to instead of bare indices.
+ */
+export interface PlanIdentity {
+  /** Phase approaches, head lanes, crosswalks, scramble flag and all timings (offset included). */
+  key: string;
+  yellowTicks: number;
+  allRedTicks: number;
+  /** Per phase: ids of the lanes whose heads it turns green. */
+  phaseLanes: string[][];
+  /** Per pedestrian head: crosswalk id and clearance ticks. */
+  pedIds: string[];
+  pedClearance: number[];
+  /** Index of the pedestrian-only phase, −1 = none. */
+  scrambleIdx: number;
+}
+
 export interface SignalPlan {
   nodeId: string;
   phases: SignalPhase[];
@@ -71,6 +89,7 @@ export interface SignalPlan {
    * `segs` = the approaches the color applies to (every other head is red); `phase` −1 = an edit-time clearance.
    */
   ctl: { phase: number; color: 'green' | 'yellow' | 'allRed'; remaining: number; segs: readonly string[] } | null;
+  id: PlanIdentity;
 }
 
 /** Signalized mid-block crossing: fixed cycle green → yellow → red (WALK, CLEARANCE). */
@@ -233,12 +252,34 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
         heads.push({ lane: l, x: end.x, z: end.z, heading: Math.atan2(end.z - prev.z, end.x - prev.x) });
         headSeg.push(ap.seg);
       }
+    const offset = ticks(ctrl?.offset ?? 0);
+    const laneId = (l: number): string => g.lanes[l]!.id;
+    const pedIds = peds.map((ph) => g.crossings[ph.ci]!.id);
+    const id: PlanIdentity = {
+      key: JSON.stringify([
+        phases.map((ph) => ph.approaches),
+        greenTicks,
+        ticks(yellow),
+        ticks(allRed),
+        t,
+        offset,
+        scramble,
+        heads.map((hd, h) => [laneId(hd.lane), headSeg[h]]),
+        peds.map((ph, k) => [pedIds[k], ph.walks, ph.walk, ph.clearance]),
+      ]),
+      yellowTicks: ticks(yellow),
+      allRedTicks: ticks(allRed),
+      phaseLanes: phases.map((ph) => heads.filter((_, h) => ph.approaches.includes(headSeg[h]!)).map((hd) => laneId(hd.lane))),
+      pedIds,
+      pedClearance: peds.map((ph) => ph.clearance),
+      scrambleIdx: scramble ? phases.length - 1 : -1,
+    };
     plans.push({
       nodeId,
       phases,
       intervals,
       cycle: t,
-      offset: ticks(ctrl?.offset ?? 0),
+      offset,
       heads,
       headSeg,
       phaseStart,
@@ -250,6 +291,7 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
       cur: 0,
       remaining: 0,
       ctl: null,
+      id,
     });
   }
   const mids: MidSignal[] = [];

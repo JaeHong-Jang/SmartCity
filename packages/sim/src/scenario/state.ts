@@ -7,7 +7,7 @@
 import { hash01 } from '../citizens/schedule.js';
 import type { Access } from '../traffic/demand.js';
 import type { Goal, Vehicle, World } from '../traffic/world.js';
-import type { SignalClearing, SignalCtl } from './preempt.js';
+import type { SignalCtl } from './preempt.js';
 import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioInput } from './types.js';
 
 /** Obstacle on a lane, lane coordinates: occupies [rear, rear + len]. */
@@ -130,13 +130,8 @@ export interface ScenarioState {
   missions: Mission[];
   /** Buildings a fire reached 100 % on, ascending id. */
   damaged: string[];
-  /**
-   * Signal controllers driving a junction now and edit-time clearances (by node id, never both for one
-   * node), and plan offsets re-phased by a hand-back (kept while the plan's identity key is unchanged).
-   */
+  /** Signal controllers driving a junction now (by node id; never a junction in `World.signalClearing`). */
   ctl: Map<string, SignalCtl>;
-  clearing: Map<string, SignalClearing>;
-  offsets: Map<string, { key: string; offset: number }>;
   // ----- composed over the current network -----
   /** Per edge: new entry forbidden (closed lanes and every connector into them). Null = no closure. */
   ban: Uint8Array | null;
@@ -188,8 +183,6 @@ export function newScenarioState(w: World): ScenarioState {
     missions: [],
     damaged: [],
     ctl: new Map(),
-    clearing: new Map(),
-    offsets: new Map(),
     ban: null,
     obs: null,
     obsRear: null,

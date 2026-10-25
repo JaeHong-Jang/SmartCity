@@ -1,8 +1,11 @@
 // Test helpers: document builders and physical invariant checks over the simulation internals.
 
-import { applyCommand, createEmptyDoc, type CityDoc, type Command } from '@smartcity/shared';
+import { applyCommand, createEmptyDoc, type CityDoc, type Command, type Rng } from '@smartcity/shared';
 import type { Simulation } from './simulation.js';
+import { headColor } from './traffic/signals.js';
 import type { World } from './traffic/world.js';
+import { PedSignal } from './types.js';
+import { PREEMPT_MIN_GREEN } from './scenario/preempt.js';
 
 export function apply(doc: CityDoc, cmds: Command[]): CityDoc {
   const r = applyCommand(doc, { type: 'batch', commands: cmds });
@@ -320,4 +323,173 @@ export function checkIncidentInvariants(sim: Simulation): string[] {
   for (const m of sc.missions) if (!live(m)) problems.push(`mission of ${m.incident.eventId} (${m.stage}) has no vehicle, departure or incident`);
   for (const v of w.vehicles) if (v.alive && v.em !== null && !sc.missions.includes(v.em)) problems.push(`emergency vehicle ${v.id} without a listed mission`);
   return problems;
+}
+
+type Shown = { kind: 'G' | 'Y' | 'R' | 'F'; key: string; since: number; need: number; yellow: number; allRed: number; redNeed: number };
+
+/**
+ * Observes every junction that is (or was) signalized, tick by tick, by stable ids, and reports safety
+ * violations — across edits and recompiles too:
+ * - green only to the approaches of one plan phase (no conflicting movements of different phases at once);
+ * - green → (≥ yellow) yellow → (≥ all-red) all red → another green; never green → green of other approaches;
+ *   a junction that lost its signal ('F' = unsignalized operation) holds every lane ≥ yellow + all-red first;
+ * - every green lasts ≥ min(5 s, the phase's planned green), except a green an edit cut (`edited`);
+ * - a pedestrian WALK or CLEARANCE never shows while its leg's entry lanes or a straight movement across the
+ *   crosswalk is green (scramble junctions: while any lane is green); WALK always ends in a full CLEARANCE.
+ */
+export class SignalWatch {
+  private shown = new Map<string, Shown>();
+  private ped = new Map<string, { sig: number; since: number; clearance: number }>();
+  private edits = new Map<string, number>();
+  readonly problems: string[] = [];
+  controlledTicks = 0;
+  clearingTicks = 0;
+  /** Phase changes seen while a controller drove the junction (entries into a new green). */
+  controlledGreens = 0;
+  private conflictLanes = new Map<string, Set<number>>();
+
+  constructor(private readonly sim: Simulation) {}
+
+  /** An edit applied now that may change this junction's plan (a green it cuts short is not a min-green fault). */
+  edited(nodeId: string): void {
+    this.edits.set(nodeId, internals(this.sim).tick);
+  }
+
+
+  private lanesAgainst(ci: number, scramble: boolean, node: string): Set<number> {
+    const w = internals(this.sim);
+    const k = `${w.graphRevision}|${ci}|${scramble}`;
+    let set = this.conflictLanes.get(k);
+    if (set) return set;
+    set = new Set<number>();
+    const cr = w.graph.crossings[ci]!;
+    for (const l of w.graph.lanes) if (l.toNode === node && (scramble || l.segmentId === cr.segmentId)) set.add(l.index);
+    for (const p of w.zones.byZone[ci]!) {
+      if (p.edge < w.net.nLanes) continue;
+      const c = w.graph.connectors[p.edge - w.net.nLanes]!;
+      if (c.turn === 'straight') set.add(c.fromLane);
+    }
+    this.conflictLanes.set(k, set);
+    return set;
+  }
+
+  observe(): void {
+    const w = internals(this.sim);
+    const t = w.tick - 1;
+    const minGreen = Math.round(PREEMPT_MIN_GREEN * w.tickRate);
+    const plans = new Map(w.signals.plans.map((p) => [p.nodeId, p]));
+    const nodes = new Set([...plans.keys(), ...this.shown.keys()]);
+    for (const nodeId of nodes) {
+      const p = plans.get(nodeId);
+      if (w.sc !== null && w.sc.ctl.has(nodeId)) this.controlledTicks++;
+      if (w.signalClearing.has(nodeId)) this.clearingTicks++;
+      const green = new Set<string>();
+      const yellow = new Set<string>();
+      let free = false;
+      if (p) {
+        for (let h = 0; h < p.heads.length; h++) {
+          if (w.laneGreen[p.heads[h]!.lane]) green.add(p.headSeg[h]!);
+          if (headColor(p, h) === 'yellow') yellow.add(p.headSeg[h]!);
+        }
+      } else if (w.graph.nodes.has(nodeId)) {
+        for (const l of w.graph.lanes) if (l.toNode === nodeId && w.laneGreen[l.index]) free = true;
+      }
+      const where = `${nodeId}@${t}`;
+      const phaseOf = (segs: Set<string>): number => (p ? p.phases.findIndex((ph) => [...segs].every((s) => ph.approaches.includes(s))) : -1);
+      if (green.size > 0 && phaseOf(green) < 0) this.problems.push(`${where}: green ${[...green]} spans phases`);
+      const kind = green.size > 0 ? 'G' : yellow.size > 0 ? 'Y' : free ? 'F' : 'R';
+      const key = [...(kind === 'G' ? green : yellow)].sort().join(',');
+      const prev = this.shown.get(nodeId);
+      // An edit removed approaches during a yellow: the rest of them stays yellow (same interval).
+      if (prev && prev.kind === 'Y' && kind === 'Y' && key.split(',').every((s) => prev.key.split(',').includes(s))) prev.key = key;
+      else if (!prev || prev.kind !== kind || prev.key !== key) {
+        const timing = { yellow: p?.yellowTicks ?? prev?.yellow ?? 0, allRed: p?.allRedTicks ?? prev?.allRed ?? 0 };
+        let redNeed = timing.allRed;
+        if (prev) {
+          const run = t - prev.since;
+          if (prev.kind === 'G') {
+            if (kind === 'G' || kind === 'F') this.problems.push(`${where}: green ${prev.key} → ${kind} ${key} without clearance`);
+            const cut = (this.edits.get(nodeId) ?? -1) >= prev.since;
+            if (run < prev.need && !cut) this.problems.push(`${where}: green ${prev.key} lasted ${run} ticks`);
+            if (kind === 'R' && prev.yellow > 0) {
+              // Yellow can only be shown on signal heads: a junction (or approach) that lost them must hold red for yellow + all-red.
+              if (p && prev.key.split(',').some((seg) => p.headSeg.includes(seg))) this.problems.push(`${where}: green ${prev.key} → red without yellow`);
+              else redNeed = prev.yellow + prev.allRed;
+            }
+          }
+          if (prev.kind === 'Y') {
+            if (kind !== 'R') this.problems.push(`${where}: yellow → ${kind}`);
+            // Signal heads gone mid-yellow: the rest of the yellow must be held as red.
+            if (run < prev.yellow && p) this.problems.push(`${where}: yellow lasted ${run} ticks`);
+          }
+          if (prev.kind === 'R' && (kind === 'G' || kind === 'F') && run < prev.redNeed) this.problems.push(`${where}: all red lasted ${run} ticks before ${kind}`);
+          if (prev.kind === 'Y' || prev.kind === 'G') timing.yellow = prev.yellow;
+          if (prev.kind === 'Y' || prev.kind === 'G') timing.allRed = prev.allRed;
+          if (prev.kind === 'Y') redNeed = prev.allRed + (p ? 0 : Math.max(0, prev.yellow - (t - prev.since)));
+        }
+        if (kind === 'G' && w.sc !== null && w.sc.ctl.has(nodeId)) this.controlledGreens++;
+        const ph = phaseOf(green);
+        const need = kind === 'G' && p && ph >= 0 ? Math.min(minGreen, p.greenTicks[ph]!) : 0;
+        this.shown.set(nodeId, { kind, key, since: t, need, yellow: kind === 'G' && p ? p.yellowTicks : timing.yellow, allRed: kind === 'G' && p ? p.allRedTicks : timing.allRed, redNeed });
+      }
+      const heads = new Map<number, number>();
+      if (p) for (const hd of p.peds) heads.set(hd.ci, hd.clearance);
+      for (let ci = 0; ci < w.graph.crossings.length; ci++) {
+        const cr = w.graph.crossings[ci]!;
+        if (cr.nodeId !== nodeId) continue;
+        const sig = w.zs.pedSig[ci]!;
+        if (sig === PedSignal.walk || sig === PedSignal.clearance) {
+          for (const l of this.lanesAgainst(ci, p?.scramble ?? false, nodeId)) if (w.laneGreen[l]) this.problems.push(`${where}: crossing ${cr.id} ${sig === PedSignal.walk ? 'WALK' : 'CLEARANCE'} with lane ${l} green`);
+        }
+        const pp = this.ped.get(cr.id);
+        if (!pp || pp.sig !== sig) {
+          if (pp && pp.sig === PedSignal.walk && sig !== PedSignal.clearance) this.problems.push(`${where}: crossing ${cr.id} WALK → ${sig} without clearance`);
+          if (pp && pp.sig === PedSignal.clearance && t - pp.since < pp.clearance) this.problems.push(`${where}: crossing ${cr.id} clearance lasted ${t - pp.since} ticks`);
+          // The clearance owed is the one of the plan that showed the WALK (the crossing's own length).
+          const owed = pp && pp.sig === PedSignal.walk ? pp.clearance : (heads.get(ci) ?? pp?.clearance ?? 0);
+          this.ped.set(cr.id, { sig, since: t, clearance: sig === PedSignal.walk ? (heads.get(ci) ?? owed) : owed });
+        }
+      }
+    }
+  }
+}
+
+/**
+ * A random plan or network edit for junction `node` (state: which edits were made once). Plan edits: back to
+ * signal, reversed phases, one phase per approach (added), automatic phases (removed), scramble toggled,
+ * allStop / uncontrolled, the approach `deletable` deleted; unrelated recompiles / rebuilds: a mid-block
+ * crosswalk on `far`, a building and a road far away.
+ */
+export function randomPlanEdit(w: World, rng: Rng, node: string, deletable: string, far: string, state: { deleted: boolean; n: number }): [string, Command] {
+  const p = w.signals.plans.find((x) => x.nodeId === node);
+  const ctrl = (extra: object): Command => ({ type: 'intersection.set', control: { nodeId: node, kind: 'signal', yellow: 3, allRed: 2, offset: 0, ...extra } }) as Command;
+  const r = rng.int(10);
+  const k = state.n++;
+  if (!p || r === 0) return ['signal', ctrl({})];
+  if (r === 1) return ['reverse', ctrl({ phases: p.phases.filter((ph) => ph.approaches.length > 0).reverse().map((ph) => ({ approaches: ph.approaches.slice(), green: 20 })) })];
+  if (r === 2) return ['split', ctrl({ phases: p.phases.flatMap((ph) => ph.approaches.map((a) => ({ approaches: [a], green: 12 }))) })];
+  if (r === 3) return ['auto', { type: 'intersection.reset', nodeId: node }];
+  if (r === 4) return ['scramble', ctrl({ scramble: !p.scramble })];
+  if (r === 5) {
+    const kind = rng.next() < 0.5 ? 'allStop' : 'uncontrolled';
+    return [kind, { type: 'intersection.set', control: { nodeId: node, kind, yellow: 3, allRed: 2, offset: 0 } } as Command];
+  }
+  if (r === 6 && !state.deleted) {
+    state.deleted = true;
+    return [`delete ${deletable}`, { type: 'segment.remove', id: deletable }];
+  }
+  if (r === 7) return ['far building', { type: 'building.place', building: { id: `fb${k}`, typeId: 'house', pos: { x: 1500 + 30 * (k % 20), z: 1500 + 30 * Math.floor(k / 20) }, rotation: 0 } }];
+  if (r === 8)
+    return [
+      'far road',
+      {
+        type: 'batch',
+        commands: [
+          { type: 'node.add', node: { id: `fa${k}`, pos: { x: -1500, z: -1500 + 40 * k } } },
+          { type: 'node.add', node: { id: `fz${k}`, pos: { x: -1300, z: -1500 + 40 * k } } },
+          { type: 'segment.add', segment: { id: `fr${k}`, a: `fa${k}`, b: `fz${k}`, roadTypeId: 'road-2' } },
+        ],
+      },
+    ];
+  return ['recompile', { type: 'feature.upsert', feature: { id: `x${k}`, segmentId: far, kind: 'crosswalk', t: 0.3 + 0.02 * (k % 20) } }];
 }
