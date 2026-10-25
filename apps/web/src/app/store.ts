@@ -39,6 +39,8 @@ export type Selection =
 export interface ToolOptions {
   roadTypeId: string;
   curve: boolean;
+  /** Road tool: round the corners of a newly drawn road automatically (ADR 0012 §1; remembered per browser). */
+  autoFillet: boolean;
   /** Shared by every placing tool and by moves (G cycles it). */
   snapStep: SnapStep;
   buildingTypeId: string;
@@ -209,6 +211,27 @@ const ERROR_KO: [RegExp, string][] = [
   [/building exists/, '같은 이름의 건물이 이미 있습니다'],
   [/a pedestrian-only phase needs/, '보행 전용 신호 조건(신호 교차로, 3~4갈래, 횡단보도 2곳 이상)을 만족하지 않습니다'],
   [/unknown frontage segment/, '필지가 접한 도로가 없습니다'],
+  [/cannot round the corner: the corner must join exactly two roads/, '도로 두 개가 만나는 꺾임만 둥글게 할 수 있습니다'],
+  [/cannot round the corner: only straight roads/, '직선 도로끼리의 꺾임만 둥글게 할 수 있습니다'],
+  [/cannot round the corner: the two roads differ in type/, '두 도로의 종류가 다릅니다'],
+  [/cannot round the corner: the two roads differ in school zone/, '한쪽만 어린이보호구역입니다'],
+  [/cannot round the corner: the roads run in opposite directions/, '두 도로의 진행 방향이 맞지 않습니다'],
+  [/cannot round the corner: the junction has its own control settings/, '교차점에 신호 설정이 있습니다'],
+  [/cannot round the corner: the corner is almost straight/, '거의 직선이라 둥글게 할 꺾임이 없습니다'],
+  [/cannot round the corner: the turn is too sharp/, '꺾임이 너무 급합니다 (150° 초과)'],
+  [/cannot round the corner: not enough room/, '도로가 짧아 최소 반경의 곡선이 들어가지 않습니다'],
+  [/cannot round the corner: degenerate corner/, '꺾임 형상이 올바르지 않습니다'],
+  [/cannot round the corner: a road is closed/, '폐쇄된 도로가 있습니다'],
+  [/cannot round the corner: a bus stop is in the corner/, '모서리 구간에 버스 정류장이 있습니다'],
+  [/cannot round the corner: a bus line serves the roads/, '버스 노선이 이 도로를 지납니다'],
+  [/cannot round the corner: a crosswalk is in the corner/, '모서리 구간에 횡단보도가 있습니다'],
+  [/cannot round the corner: a speed bump is in the corner/, '모서리 구간에 과속방지턱이 있습니다'],
+  [/cannot round the corner: a lot faces the corner/, '모서리에 접한 필지가 있습니다'],
+  [/cannot round the corner: the curve would cross a building/, '곡선이 건물과 겹칩니다'],
+  [/cannot round the corner: the curve would cross a zoned lot/, '곡선이 자동 필지와 겹칩니다'],
+  [/cannot round the corner: the curve would cross another road/, '곡선이 다른 도로와 교차합니다'],
+  [/cannot round the corner: the corner changed since it was planned/, '다른 사용자가 이 모서리를 먼저 바꿨습니다. 다시 시도하세요'],
+  [/fillet radius out of range/, '반경이 허용 범위를 벗어났습니다'],
 ];
 
 function withResult(results: Record<number, string>, ref: number, outcome: string): Record<number, string> {
@@ -240,7 +263,7 @@ export function initialState(room: string, name: string): ClientState {
     offlineCity: null,
     offlineError: null,
     tool: 'select',
-    toolOptions: { roadTypeId: 'road-2', curve: false, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
+    toolOptions: { roadTypeId: 'road-2', curve: false, autoFillet: true, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
     toolHint: '',
     selection: null,
     phaseHighlight: null,

@@ -2,7 +2,7 @@
 // snap endpoints to nodes or existing roads, split roads where the new one connects or crosses,
 // then add the new segments between all those points.
 
-import { LIMITS, segmentLength, tryApplyCommand } from '../apply.js';
+import { checkFillet, LIMITS, segmentLength, tryApplyCommand, type FilletGeometry } from '../apply.js';
 import type { Command } from '../commands.js';
 import {
   closestPointOnPolyline,
@@ -76,6 +76,12 @@ export interface RoadPlanInput {
   /** Quadratic Bezier control point for a curved road. */
   control?: Vec2;
   roadTypeId: string;
+  /**
+   * Automatic fillet (ADR 0012 §1): `start` is the corner node where the straight road drawn just before
+   * in the same stroke ended; round that corner in the same batch when it can be. The drawing tool never
+   * sets it for a node that existed before the stroke (rounding existing roads is a user action).
+   */
+  filletStart?: boolean;
 }
 
 export interface RoadPlan {
@@ -83,6 +89,13 @@ export interface RoadPlan {
   error?: string;
   /** Junction points along the new road, start to end (for previews). */
   junctions: Vec2[];
+  /**
+   * filletStart: the corner curve the batch adds, by role: `curve` runs from `onPrev` (tangent point on the
+   * road drawn before) to `onNew` (tangent point on the new road, where its straight part now starts).
+   */
+  fillet?: { curve: Vec2[]; onPrev: Vec2; onNew: Vec2 };
+  /** filletStart: why the corner stays sharp (applyCommand error text). */
+  filletError?: string;
 }
 
 interface Stop {
@@ -208,7 +221,83 @@ export function planRoad(doc: CityDoc, input: RoadPlanInput, ids: IdGen): RoadPl
     commands.push({ type: 'segment.add', segment: seg });
   }
 
-  return { command: { type: 'batch', commands }, junctions: points.map((p) => p.pos) };
+  const plan: RoadPlan = { command: { type: 'batch', commands }, junctions: points.map((p) => p.pos) };
+  if (input.filletStart && !control && start.kind === 'node') addStartFillet(doc, plan, commands, start.nodeId, ids);
+  return plan;
+}
+
+/** Copy of the doc whose collections can be changed by road commands without touching `doc` (values are shared, never mutated). */
+function scratchDoc(doc: CityDoc): CityDoc {
+  return {
+    ...doc,
+    nodes: { ...doc.nodes },
+    segments: { ...doc.segments },
+    buildings: { ...doc.buildings },
+    intersections: { ...doc.intersections },
+    busStops: { ...doc.busStops },
+    busLines: { ...doc.busLines },
+    closures: { ...doc.closures },
+    parcels: { ...doc.parcels },
+    features: { ...doc.features },
+  };
+}
+
+/** The road.fillet command for a checked corner (`expect` pins the planned geometry). */
+function filletCommand(g: FilletGeometry, ids: IdGen, radius?: number): Command {
+  return {
+    type: 'road.fillet',
+    nodeId: g.nodeId,
+    ...(radius !== undefined ? { radius } : {}),
+    ids: { a: ids.next('n'), b: ids.next('n'), seg: ids.next('s') },
+    expect: { segments: [g.segments[0].id, g.segments[1].id], points: [{ ...g.points[0] }, { ...g.points[1] }, { ...g.points[2] }] },
+  };
+}
+
+const filletCurve = (g: FilletGeometry): Vec2[] => sampleSegmentCurve(g.p0, g.p2, g.points[1]);
+
+/**
+ * Append road.fillet of `nodeId` when the corner can be rounded once the new road is in place. The whole
+ * batch, fillet included, is dry-run on a scratch doc: if only the fillet fails, it is dropped (the corner
+ * stays sharp, `filletError` says why) and the plain road batch is kept.
+ */
+function addStartFillet(doc: CityDoc, plan: RoadPlan, commands: Command[], nodeId: NodeId, ids: IdGen): void {
+  const work = scratchDoc(doc);
+  // A batch that fails anyway is reported at dispatch, as without fillets.
+  if (!tryApplyCommand(work, plan.command!).ok) return;
+  const r = checkFillet(work, nodeId);
+  if (!r.ok) {
+    if (!/almost straight/.test(r.error)) plan.filletError = r.error;
+    return;
+  }
+  const cmd = filletCommand(r.geometry, ids);
+  const applied = tryApplyCommand(work, cmd);
+  if (!applied.ok) {
+    plan.filletError = applied.error;
+    return;
+  }
+  commands.push(cmd);
+  // The new road is the first segment the batch adds at the corner; geometry p0 belongs to the lower-id road.
+  const added = commands.find((c) => c.type === 'segment.add' && (c.segment.a === nodeId || c.segment.b === nodeId));
+  const newId = added?.type === 'segment.add' ? added.segment.id : '';
+  const g = r.geometry;
+  const [onPrev, onNew] = g.segments[0].id === newId ? [g.p2, g.p0] : [g.p0, g.p2];
+  plan.fillet = { curve: sampleSegmentCurve(onPrev, onNew, g.points[1]), onPrev, onNew };
+}
+
+export interface FilletPlan {
+  command: Command | null;
+  error?: string;
+  /** Center line of the corner curve (for previews). */
+  curve?: Vec2[];
+  /** Minimum curvature radius of the curve, m. */
+  radius?: number;
+}
+
+/** "모서리 둥글게" on an existing corner: the road.fillet command, or why it cannot be rounded. */
+export function planFillet(doc: CityDoc, nodeId: NodeId, ids: IdGen, radius?: number): FilletPlan {
+  const r = checkFillet(doc, nodeId, radius);
+  if (!r.ok) return { command: null, error: r.error };
+  return { command: filletCommand(r.geometry, ids, radius), curve: filletCurve(r.geometry), radius: r.geometry.radius };
 }
 
 export interface RoadBatchInfo {

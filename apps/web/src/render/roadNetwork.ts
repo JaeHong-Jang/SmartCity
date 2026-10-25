@@ -49,6 +49,12 @@ export interface RoadNodeGeom {
   signalized: boolean;
   /** Control kind and crosswalk legs from the doc, for change detection (a segment's markings depend on them). */
   control: string;
+  /**
+   * Smooth joint (two roads of one type, tangent-continuous: e.g. both ends of a fillet curve): unit
+   * direction leaving the node along `segments[0]`. Such roads are drawn up to the node with this shared
+   * end direction and the junction polygon is skipped, so no wedge or seam shows (ADR 0012 §1).
+   */
+  joint?: Vec2;
 }
 
 export interface RoadNetworkGeom {
@@ -103,7 +109,7 @@ export function buildRoadNetwork(doc: CityDoc, compile: (doc: CityDoc) => RoadGr
     const crossings = graph.crossings;
     for (const c of crossings) segments.get(c.segmentId)?.crossings.push(c);
     const nodes = new Map<string, RoadNodeGeom>();
-    for (const [id, n] of graph.nodes) nodes.set(id, { id, pos: n.pos, segments: n.segments, polygon: n.polygon, signalized: n.signalized, control: controlSig(doc, id) });
+    for (const [id, n] of graph.nodes) nodes.set(id, withJoint(doc, { id, pos: n.pos, segments: n.segments, polygon: n.polygon, signalized: n.signalized, control: controlSig(doc, id) }));
     return { segments, nodes, crossings, graph };
   } catch (e) {
     if (!warned) {
@@ -112,6 +118,27 @@ export function buildRoadNetwork(doc: CityDoc, compile: (doc: CityDoc) => RoadGr
     }
     return fallbackNetwork(doc);
   }
+}
+
+/** Largest angle between the end tangents of two roads that still counts as a smooth joint. */
+export const JOINT_ANGLE = (2 * Math.PI) / 180;
+
+/** True end tangent leaving `nodeId` (for a curve: towards its control point, not the first sample). */
+function trueLeaveDir(doc: CityDoc, segId: string, nodeId: string): Vec2 {
+  const s = doc.segments[segId]!;
+  const other = doc.nodes[s.a === nodeId ? s.b : s.a]!.pos;
+  return normalize(sub(s.control ?? other, doc.nodes[nodeId]!.pos));
+}
+
+/** `n` with `joint` set when its two roads continue smoothly. */
+function withJoint(doc: CityDoc, n: RoadNodeGeom): RoadNodeGeom {
+  if (n.segments.length !== 2) return n;
+  const [s0, s1] = n.segments.map((id) => doc.segments[id]);
+  if (!s0 || !s1 || s0.roadTypeId !== s1.roadTypeId || !doc.nodes[n.id]) return n;
+  const d0 = trueLeaveDir(doc, s0.id, n.id);
+  const d1 = trueLeaveDir(doc, s1.id, n.id);
+  if (Math.abs(angleBetween(d0, scale(d1, -1))) >= JOINT_ANGLE) return n;
+  return { ...n, joint: normalize(sub(d0, d1)) };
 }
 
 /** Setback of a node for the fallback geometry (same rule as packages/sim/AGENTS.md). */
@@ -208,7 +235,7 @@ export function fallbackNetwork(doc: CityDoc): RoadNetworkGeom {
     const polygon = corners.length >= 3 ? sortAround(c, dedupe(corners)) : [];
     const custom = doc.intersections[nid];
     const signalized = custom ? custom.kind === 'signal' : list.length >= 3;
-    nodes.set(nid, { id: nid, pos: node.pos, segments: list, polygon: polygon.length >= 3 ? polygon : [], signalized, control: controlSig(doc, nid) });
+    nodes.set(nid, withJoint(doc, { id: nid, pos: node.pos, segments: list, polygon: polygon.length >= 3 ? polygon : [], signalized, control: controlSig(doc, nid) }));
   }
   return { segments, nodes, crossings: [], graph: null };
 }

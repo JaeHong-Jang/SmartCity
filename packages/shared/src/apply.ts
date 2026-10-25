@@ -31,10 +31,23 @@ import {
   validateVehicleType,
 } from './apply/validate.js';
 import { buildingOverlapsBuildings } from './editing/buildings.js';
-import { checkRoadClear, dropCrosswalks, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment } from './apply/roads.js';
+import { checkRoadClear, dropCrosswalks, filletCorner, planNodeFillet, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment, type FilletGeometry } from './apply/roads.js';
 
 export { LIMITS } from './apply/limits.js';
 export { segmentLength, segmentsAtNode } from './apply/validate.js';
+export type { FilletGeometry } from './apply/roads.js';
+
+/**
+ * Whether `road.fillet` on `nodeId` would pass on `doc` now (same checks and geometry as applyCommand;
+ * `doc` is not touched). For previews and the "모서리 둥글게" button.
+ */
+export function checkFillet(doc: CityDoc, nodeId: string, radius?: number): { ok: true; geometry: FilletGeometry } | { ok: false; error: string } {
+  try {
+    return { ok: true, geometry: planNodeFillet(doc, nodeId, radius) };
+  } catch (e) {
+    return { ok: false, error: e instanceof ApplyError ? e.message : `invalid command: ${(e as Error).message}` };
+  }
+}
 
 export type ApplyResult = { ok: true } | { ok: false; error: string };
 
@@ -138,6 +151,9 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
     }
     case 'segment.split':
       splitSegment(doc, cmd.id, cmd.t, cmd.nodeId, cmd.segmentIds, tx);
+      return;
+    case 'road.fillet':
+      filletCorner(doc, cmd, tx);
       return;
     case 'segment.setType': {
       const s = get(doc.segments, cmd.id);

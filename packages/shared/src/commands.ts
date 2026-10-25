@@ -30,6 +30,20 @@ export type Command =
   | { type: 'segment.split'; id: SegmentId; t: number; nodeId: NodeId; segmentIds: [SegmentId, SegmentId] }
   | { type: 'segment.setType'; id: SegmentId; roadTypeId: string }
   | { type: 'segment.setSchoolZone'; id: SegmentId; schoolZone: boolean }
+  /**
+   * Round the corner at a degree-2 node of two straight roads (ADR 0012 §1). The geometry is computed by
+   * applyCommand from the current doc; `radius` omitted = the road type's default. New ids: nodes `a`
+   * (on the lower-id road) and `b`, curve segment `seg`. `expect`: the two roads and the points
+   * [far end of the first, corner, far end of the second] the client planned with; any difference
+   * (moved, split, replaced road) rejects the command.
+   */
+  | {
+      type: 'road.fillet';
+      nodeId: NodeId;
+      radius?: number;
+      ids: { a: NodeId; b: NodeId; seg: SegmentId };
+      expect?: { segments: [SegmentId, SegmentId]; points: [Vec2, Vec2, Vec2] };
+    }
   | { type: 'roadType.upsert'; roadType: RoadType }
   /** `ifClear`: also refused when it would overlap another building (AI proposals, growth: ADR 0009 §5). */
   | { type: 'building.place'; building: Building; ifClear?: true }

@@ -3,7 +3,7 @@
 // Each update diffs per-item geometry signatures and rebuilds only the chunks that changed.
 
 import * as THREE from 'three';
-import { carriagewayWidth, slicePolyline, type RoadType, type Vec2 } from '@smartcity/shared';
+import { add, carriagewayWidth, scale, slicePolyline, sub, type RoadType, type Vec2 } from '@smartcity/shared';
 import { MeshBuilder } from './meshBuilder';
 import type { RoadNetworkGeom, RoadSegGeom, RoadNodeGeom } from './roadNetwork';
 import { speedBump, zebra } from './streetMarks';
@@ -50,11 +50,15 @@ function segSig(g: RoadSegGeom, net: RoadNetworkGeom): string {
   const mid = g.centerline[g.centerline.length >> 1]!;
   const deg = (n: string): number => net.nodes.get(n)?.segments.length ?? 0;
   const control = (n: string): string => net.nodes.get(n)?.control ?? '';
+  const joint = (n: string): string => {
+    const j = net.nodes.get(n)?.joint;
+    return j ? `${Math.round(j.x * 1e4)},${Math.round(j.z * 1e4)}` : '';
+  };
   const crossings = g.crossings.map((c) => `${c.id}:${c.signal ? 1 : 0}:${c.polygon.map((p) => `${r2(p.x)},${r2(p.z)}`).join(';')}`).join('/');
   return [
     r2(first.x), r2(first.z), r2(mid.x), r2(mid.z), r2(last.x), r2(last.z), g.centerline.length, r2(g.setbackA), r2(g.setbackB),
     roadTypeSig(g.roadType), deg(g.a) >= 3, deg(g.b) >= 3,
-    r2(g.laneStartA), r2(g.laneStartB), g.speedBumps.map(r2).join(','), g.schoolZone, control(g.a), control(g.b), crossings,
+    r2(g.laneStartA), r2(g.laneStartB), g.speedBumps.map(r2).join(','), g.schoolZone, control(g.a), control(g.b), joint(g.a), joint(g.b), crossings,
   ].join('|');
 }
 
@@ -108,7 +112,8 @@ export class RoadLayer {
 
     const nextNode = new Map<string, ItemRecord>();
     for (const n of net.nodes.values()) {
-      if (n.polygon.length < 3) continue;
+      // Smooth joints have no junction polygon: their roads are drawn up to the node.
+      if (n.polygon.length < 3 || n.joint) continue;
       const rec = { sig: nodeSig(n), chunk: chunkKey(n.pos) };
       nextNode.set(n.id, rec);
       const old = this.nodeRecords.get(n.id);
@@ -172,11 +177,36 @@ function dividerOffsets(rt: RoadType): { forward: number[]; backward: number[] }
   return { forward, backward };
 }
 
+/** Travel direction (a → b) of `g` at its end on a smooth joint node, or null. */
+function jointTravelDir(net: RoadNetworkGeom, g: RoadSegGeom, atA: boolean): Vec2 | null {
+  const n = net.nodes.get(atA ? g.a : g.b);
+  if (!n?.joint) return null;
+  const away = n.segments[0] === g.id ? n.joint : scale(n.joint, -1);
+  return atA ? away : scale(away, -1);
+}
+
+const PIN = 0.05;
+
+/**
+ * Pin the end directions of a polyline: a tiny first/last piece along `start`/`end`, so offsets
+ * (bands, curbs) at a smooth joint use the joint's shared normal on both roads and meet exactly.
+ */
+function pinEnds(pts: Vec2[], start: Vec2 | null, end: Vec2 | null): Vec2[] {
+  const out = pts.slice();
+  const chord = (i: number): number => Math.hypot(out[i + 1]!.x - out[i]!.x, out[i + 1]!.z - out[i]!.z);
+  if (start && out.length >= 2 && chord(0) > 3 * PIN) out.splice(1, 0, add(out[0]!, scale(start, PIN)));
+  if (end && out.length >= 2 && chord(out.length - 2) > 3 * PIN) out.splice(out.length - 1, 0, sub(out[out.length - 1]!, scale(end, PIN)));
+  return out;
+}
+
 function buildSegment(g: RoadSegGeom, net: RoadNetworkGeom, b: MeshBuilder): void {
-  const s0 = g.setbackA;
-  const s1 = g.length - g.setbackB;
+  // Ends on a smooth joint run to the node (no junction cut); elsewhere the junction setback applies.
+  const ja = jointTravelDir(net, g, true);
+  const jb = jointTravelDir(net, g, false);
+  const s0 = ja ? 0 : g.setbackA;
+  const s1 = jb ? g.length : g.length - g.setbackB;
   if (s1 - s0 < 0.2) return;
-  const pts = slicePolyline(g.centerline, s0, s1);
+  const pts = pinEnds(slicePolyline(g.centerline, s0, s1), ja, jb);
   const rt = g.roadType;
   const cw = carriagewayWidth(rt);
   const hc = cw / 2;
@@ -213,11 +243,11 @@ function buildSegment(g: RoadSegGeom, net: RoadNetworkGeom, b: MeshBuilder): voi
   b.band(pts, -hc + 0.2, -hc + 0.35, Y_MARK, C_WHITE);
 
   // Lane markings start where the lanes do (after the crosswalk zone at junction ends).
-  const l0 = Math.max(s0, g.laneStartA);
-  const l1 = Math.min(s1, g.length - g.laneStartB);
+  const l0 = ja ? 0 : Math.max(s0, g.laneStartA);
+  const l1 = jb ? g.length : Math.min(s1, g.length - g.laneStartB);
   const len = l1 - l0;
   if (len > 0.2) {
-    const lanePts = slicePolyline(g.centerline, l0, l1);
+    const lanePts = pinEnds(slicePolyline(g.centerline, l0, l1), ja, jb);
     // Center line: double solid yellow on two-way roads.
     if (!oneWay) {
       b.band(lanePts, -0.27, -0.12, Y_MARK, C_YELLOW);

@@ -3,6 +3,7 @@ import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
 import type { StreetMode, ToolId } from '../app/store';
 import { ZONE_COLORS } from '../app/zoneColors';
 import { PARCEL_ZONES } from '../tools/parcelTool';
+import { setAutoFillet } from '../tools/roadTool';
 import { TOOL_META } from '../tools/toolMeta';
 import { AiBadge } from './AiBadge';
 import { useSimMode } from '../simmode/store';
@@ -91,6 +92,9 @@ export function ToolOptions() {
         <div className="row wrap">
           <button className={opts.curve ? 'active' : ''} onClick={() => store.setToolOptions({ curve: !opts.curve })}>
             곡선 (C)
+          </button>
+          <button data-auto-fillet className={opts.autoFillet ? 'active' : ''} aria-pressed={opts.autoFillet} onClick={() => setAutoFillet(store, !opts.autoFillet)}>
+            모서리 자동 둥글게 (F)
           </button>
         </div>
         <span className="muted">클릭으로 이어 그리기 · 격자 스냅은 하단 바/G · 우클릭/Esc 취소</span>

@@ -24,6 +24,7 @@ const DOMAINS: Record<Exclude<CommandType, 'batch'>, number> = {
   'segment.add': D_ROAD_PRUNE,
   'segment.remove': D_ROADS,
   'segment.split': D_ROAD_PRUNE,
+  'road.fillet': D_ROAD_PRUNE,
   'segment.setType': D_ROAD_PRUNE,
   'segment.setSchoolZone': D_ROADS,
   'roadType.upsert': D_ROAD_PRUNE,

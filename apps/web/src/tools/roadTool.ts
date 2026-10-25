@@ -1,5 +1,7 @@
 // Road tool: straight or curved (C: start → control → end), continuous drawing, live planRoad
 // preview (length, bearing, junctions), free points use the shared snap step (G), right click / Esc cancels.
+// Automatic fillet (F, ADR 0012 §1): while drawing, each corner between two straight pieces of the stroke
+// is rounded in the batch of the next piece; the corner where the stroke left an existing road is not.
 
 import {
   IdGen,
@@ -13,11 +15,33 @@ import {
   type RoadPlan,
   type Vec2,
 } from '@smartcity/shared';
+import { translateError, type ClientStore } from '../app/store';
 import { RemovalPreview, removalLines } from './removalPreview';
 import { snapLabel, snapPoint } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
 const previewIds = new IdGen('preview');
+const AUTO_FILLET_KEY = 'smartcity.road.autoFillet';
+
+/** The remembered automatic-fillet choice (null = never set, or storage unavailable). */
+function storedAutoFillet(): boolean | null {
+  try {
+    const v = window.localStorage.getItem(AUTO_FILLET_KEY);
+    return v === '1' ? true : v === '0' ? false : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Turn automatic corner rounding on/off and remember it in this browser (best effort). */
+export function setAutoFillet(store: ClientStore, on: boolean): void {
+  store.setToolOptions({ autoFillet: on });
+  try {
+    window.localStorage.setItem(AUTO_FILLET_KEY, on ? '1' : '0');
+  } catch {
+    // Private mode or blocked storage: the choice just lasts for this session.
+  }
+}
 
 /** Compass bearing in degrees (0 = north = -Z, clockwise). */
 export function bearing(a: Vec2, b: Vec2): number {
@@ -31,9 +55,17 @@ export class RoadTool implements Tool {
   private control: Vec2 | null = null;
   private hover: Vec2 | null = null;
   private plan: RoadPlan | null = null;
+  /** End node of the straight piece committed last in this stroke (a new node): the next corner to round. */
+  private corner: string | null = null;
+  /** Pointer-move replans (each may dry-run a fillet on a scratch doc): ≥ 1 px moves, at most once per frame. */
+  private lastClient: { x: number; y: number } | null = null;
+  private frame = false;
   private readonly removal = new RemovalPreview();
 
-  constructor(private readonly ctx: ToolContext) {}
+  constructor(private readonly ctx: ToolContext) {
+    const stored = storedAutoFillet();
+    if (stored !== null && stored !== this.opts.autoFillet) ctx.store.setToolOptions({ autoFillet: stored });
+  }
 
   private get opts() {
     return this.ctx.store.getState().toolOptions;
@@ -52,13 +84,19 @@ export class RoadTool implements Tool {
     return { start, end };
   }
 
+  /** Plan the piece; with auto fillet on, a straight piece from the stroke's last corner also rounds that corner. */
+  private planFor(ep: { start: ResolvedPoint; end: ResolvedPoint; control?: Vec2 }, ids: IdGen): RoadPlan {
+    const filletStart = this.opts.autoFillet && !ep.control && this.corner !== null && ep.start.kind === 'node' && ep.start.nodeId === this.corner;
+    return planRoad(this.ctx.store.getState().doc, { ...ep, roadTypeId: this.opts.roadTypeId, filletStart }, ids);
+  }
+
   private replan(): void {
     const ep = this.endPoints();
     const curvePending = this.opts.curve && !this.control;
     if (!ep || curvePending) {
       this.plan = null;
     } else {
-      this.plan = planRoad(this.ctx.store.getState().doc, { ...ep, roadTypeId: this.opts.roadTypeId }, previewIds);
+      this.plan = this.planFor(ep, previewIds);
     }
     this.updateHint();
     this.ctx.changed();
@@ -76,8 +114,10 @@ export class RoadTool implements Tool {
       hint = `길이 ${len.toFixed(1)}m · 방위 ${bearing(ep.start.pos, ep.end.pos).toFixed(0)}°`;
       if (crossings > 0) hint += ` · 교차 ${crossings}곳`;
       if (this.plan?.error) hint += ` · ${this.plan.error}`;
+      if (this.plan?.fillet) hint += ' · 모서리 둥글게';
+      if (this.plan?.filletError) hint += ` · 모서리 유지: ${translateError(this.plan.filletError)}`;
     }
-    hint += `   [C 곡선 ${this.opts.curve ? '켬' : '끔'} · G 격자 ${snapLabel(this.opts.snapStep)} · Esc 취소]`;
+    hint += `   [C 곡선 ${this.opts.curve ? '켬' : '끔'} · F 모서리 자동 둥글게 ${this.opts.autoFillet ? '켬' : '끔'} · G 격자 ${snapLabel(this.opts.snapStep)} · Esc 취소]`;
     if (this.ctx.store.getState().toolHint !== hint) this.ctx.store.set({ toolHint: hint });
   }
 
@@ -87,6 +127,7 @@ export class RoadTool implements Tool {
     if (!this.start) {
       this.start = this.resolve(e.pos).pos;
       this.control = null;
+      this.corner = null;
       this.replan();
       return;
     }
@@ -97,21 +138,38 @@ export class RoadTool implements Tool {
     }
     const ep = this.endPoints();
     if (!ep) return;
-    const plan = planRoad(this.ctx.store.getState().doc, { ...ep, roadTypeId: this.opts.roadTypeId }, this.ctx.ids());
+    const plan = this.planFor(ep, this.ctx.ids());
     if (!plan.command) {
       this.ctx.store.toast(plan.error ?? '도로를 놓을 수 없습니다', 'error');
       return;
     }
-    this.ctx.dispatch(plan.command, [sampleSegmentCurve(ep.start.pos, ep.end.pos, ep.control)]);
-    // Continuous drawing: the end becomes the next start.
+    const ghost = [sampleSegmentCurve(plan.fillet?.onNew ?? ep.start.pos, ep.end.pos, ep.control)];
+    if (plan.fillet) ghost.push(plan.fillet.curve);
+    this.ctx.dispatch(plan.command, ghost);
+    // Continuous drawing: the end becomes the next start; a new straight end is the next corner to round.
+    const added = plan.command.type === 'batch' ? plan.command.commands.filter((c) => c.type === 'segment.add') : [];
+    const last = added[added.length - 1];
+    this.corner = !ep.control && ep.end.kind === 'free' && last?.type === 'segment.add' ? last.segment.b : null;
     this.start = ep.end.pos;
     this.control = null;
     this.replan();
   }
 
   onPointerMove(e: ToolPointer): void {
+    const last = this.lastClient;
+    if (last && Math.abs(e.client.x - last.x) < 1 && Math.abs(e.client.y - last.y) < 1) return;
+    this.lastClient = { x: e.client.x, y: e.client.y };
     this.hover = e.pos;
-    this.replan();
+    if (typeof requestAnimationFrame !== 'function') {
+      this.replan();
+      return;
+    }
+    if (this.frame) return;
+    this.frame = true;
+    requestAnimationFrame(() => {
+      this.frame = false;
+      this.replan();
+    });
   }
 
   onPointerUp(): void {}
@@ -121,6 +179,11 @@ export class RoadTool implements Tool {
     if (k === 'c') {
       this.ctx.store.setToolOptions({ curve: !this.opts.curve });
       this.control = null;
+      this.replan();
+      return true;
+    }
+    if (k === 'f') {
+      setAutoFillet(this.ctx.store, !this.opts.autoFillet);
       this.replan();
       return true;
     }
@@ -134,6 +197,7 @@ export class RoadTool implements Tool {
   cancel(): void {
     this.start = null;
     this.control = null;
+    this.corner = null;
     this.plan = null;
     this.removal.reset();
     this.updateHint();
@@ -169,8 +233,12 @@ export class RoadTool implements Tool {
     const ep = this.endPoints();
     if (!ep) return prev;
     const ok = !!this.plan?.command;
-    const pts = sampleSegmentCurve(ep.start.pos, ep.end.pos, ep.control);
+    const fillet = this.plan?.fillet;
+    // A rounded corner: the new piece starts where the curve ends, and the curve is drawn too.
+    const pts = sampleSegmentCurve(fillet ? fillet.onNew : ep.start.pos, ep.end.pos, ep.control);
     prev.lines.push({ pts, width, color: ok ? '#7dd3fc' : '#f87171' });
+    if (fillet) prev.lines.push({ pts: fillet.curve, width, color: ok ? '#7dd3fc' : '#f87171' });
+    if (this.plan?.filletError) prev.points.push({ pos: ep.start.pos, radius: 2.6, color: '#fb923c' });
     if (ep.control) {
       prev.lines.push({ pts: [ep.start.pos, ep.control, ep.end.pos], width: 0.3, color: '#e2e8f0' });
       prev.points.push({ pos: ep.control, radius: 1.2, color: '#e2e8f0' });

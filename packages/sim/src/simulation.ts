@@ -65,6 +65,7 @@ const NETWORK_COMMANDS = new Set<Command['type']>([
   'segment.add',
   'segment.remove',
   'segment.split',
+  'road.fillet',
   'segment.setType',
   'roadType.upsert',
   'closure.set',

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { applyCommand } from '@smartcity/shared';
+import { applyCommand, createEmptyDoc } from '@smartcity/shared';
 import type * as THREE from 'three';
 import { crossDoc, road } from '../test/fixtures';
-import { fallbackNetwork } from './roadNetwork';
+import { buildRoadNetwork, fallbackNetwork } from './roadNetwork';
 import { RoadLayer } from './roads';
 
 describe('RoadLayer chunk rebuilds', () => {
@@ -99,5 +99,73 @@ describe('RoadLayer street facilities', () => {
     withCrossing.update(net);
     const tris = (l: RoadLayer): number => l.group.children.reduce((n, m) => n + (m as THREE.Mesh).geometry.getAttribute('position').count / 3, 0);
     expect(tris(withCrossing)).toBeGreaterThan(tris(plain));
+  });
+});
+
+describe('RoadLayer smooth joints (fillets, ADR 0012 §1)', () => {
+  /** A → V → C corner of road-2, rounded by road.fillet (new nodes fa, fb; curve fc). */
+  function filletDoc() {
+    const doc = createEmptyDoc();
+    const r = applyCommand(doc, {
+      type: 'batch',
+      commands: [
+        { type: 'node.add', node: { id: 'A', pos: { x: -100, z: 0 } } },
+        { type: 'node.add', node: { id: 'V', pos: { x: 0, z: 0 } } },
+        { type: 'node.add', node: { id: 'C', pos: { x: 0, z: 100 } } },
+        { type: 'segment.add', segment: { id: 'sa', a: 'A', b: 'V', roadTypeId: 'road-2' } },
+        { type: 'segment.add', segment: { id: 'sb', a: 'V', b: 'C', roadTypeId: 'road-2' } },
+        { type: 'road.fillet', nodeId: 'V', ids: { a: 'fa', b: 'fb', seg: 'fc' } },
+      ],
+    });
+    expect(r).toEqual({ ok: true });
+    return doc;
+  }
+
+  it('marks the curve ends as smooth joints (compiled and fallback) and leaves sharp corners alone', () => {
+    const doc = filletDoc();
+    for (const net of [buildRoadNetwork(doc), fallbackNetwork(doc)]) {
+      expect(net.nodes.get('fa')!.joint).toBeDefined();
+      expect(net.nodes.get('fb')!.joint).toBeDefined();
+      expect(net.nodes.get('A')!.joint).toBeUndefined();
+    }
+    const sharp = createEmptyDoc();
+    applyCommand(sharp, {
+      type: 'batch',
+      commands: [
+        { type: 'node.add', node: { id: 'A', pos: { x: -100, z: 0 } } },
+        { type: 'node.add', node: { id: 'V', pos: { x: 0, z: 0 } } },
+        { type: 'node.add', node: { id: 'C', pos: { x: 0, z: 100 } } },
+        { type: 'segment.add', segment: { id: 'sa', a: 'A', b: 'V', roadTypeId: 'road-2' } },
+        { type: 'segment.add', segment: { id: 'sb', a: 'V', b: 'C', roadTypeId: 'road-2' } },
+      ],
+    });
+    expect(buildRoadNetwork(sharp).nodes.get('V')!.joint).toBeUndefined();
+  });
+
+  it('the straight road and the curve share their edge points at the joint (no wedge, gap or overlap)', () => {
+    const doc = filletDoc();
+    const net = buildRoadNetwork(doc);
+    /** Mesh vertices (x, z) of one road drawn alone. */
+    const vertices = (segId: string): { x: number; z: number }[] => {
+      const layer = new RoadLayer();
+      layer.update({ ...net, segments: new Map([[segId, net.segments.get(segId)!]]) });
+      const out: { x: number; z: number }[] = [];
+      for (const m of layer.group.children as THREE.Mesh[]) {
+        const a = m.geometry.getAttribute('position').array as Float32Array;
+        for (let i = 0; i < a.length; i += 3) out.push({ x: a[i]!, z: a[i + 2]! });
+      }
+      return out;
+    };
+    const p0 = doc.nodes.fa!.pos;
+    const straight = vertices('sa');
+    const curve = vertices('fc');
+    // At fa the joint runs along +x: curb (±3.5) and outer sidewalk edge (±6) of both roads end on the same
+    // points. Without the shared end direction the curve's edges would start up to ~0.3 m off them.
+    for (const edge of [-6, -3.5, 3.5, 6]) {
+      const target = { x: p0.x, z: p0.z + edge };
+      for (const vs of [straight, curve]) expect(Math.min(...vs.map((q) => Math.hypot(q.x - target.x, q.z - target.z)))).toBeLessThan(1e-3);
+    }
+    // And the curve is drawn from the node itself (no junction cut, no polygon at the joint).
+    expect(Math.min(...curve.map((q) => Math.abs(q.x - p0.x)))).toBeLessThan(1e-3);
   });
 });

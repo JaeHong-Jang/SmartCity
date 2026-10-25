@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
+  checkFillet,
   normalize,
+  planFillet,
   sampleSegmentCurve,
   segmentLength,
   segmentsAtNode,
@@ -13,6 +15,7 @@ import {
 import { bearing } from '../tools/roadTool';
 import { segmentFeatures } from '../tools/streetTool';
 import { AiBadge } from './AiBadge';
+import { translateError } from '../app/store';
 import { useDoc, useServices, useStore } from './context';
 import { BuildingPlanning, ParcelInspector } from './PlanningInspector';
 import { clampNum } from './RoadTypeEditor';
@@ -109,6 +112,7 @@ function NodeInspector({ id }: { id: string }) {
         <dt>제어 방식</dt>
         <dd>{custom ? CONTROL_KO[custom.kind] : segs.length >= 3 ? '자동 신호' : '없음'}</dd>
       </dl>
+      {segs.length === 2 && <FilletSection id={id} />}
       {segs.length >= 2 && (
         <>
           <hr />
@@ -237,6 +241,35 @@ function NodeInspector({ id }: { id: string }) {
         </>
       )}
     </>
+  );
+}
+
+/** "모서리 둥글게" on a two-road corner (ADR 0012 §1): one road.fillet, or the reason it is not possible. */
+function FilletSection({ id }: { id: string }) {
+  const { store, dispatcher } = useServices();
+  const { doc } = useDoc();
+  const check = checkFillet(doc, id);
+  const round = () => {
+    const plan = planFillet(store.getState().doc, id, dispatcher.ids());
+    if (!plan.command) {
+      store.toast(translateError(plan.error ?? ''), 'error');
+      return;
+    }
+    dispatcher.dispatch(plan.command, plan.curve ? [plan.curve] : []);
+  };
+  return (
+    <div className="row wrap" data-fillet-section>
+      <button data-fillet disabled={!check.ok} onClick={round}>
+        모서리 둥글게
+      </button>
+      {check.ok ? (
+        <span className="muted">반경 {check.geometry.radius.toFixed(1)} m · 양쪽 {check.geometry.t.toFixed(1)} m</span>
+      ) : (
+        <span className="muted" data-fillet-reason>
+          {translateError(check.error)}
+        </span>
+      )}
+    </div>
   );
 }
 
