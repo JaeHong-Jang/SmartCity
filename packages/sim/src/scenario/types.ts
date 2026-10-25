@@ -8,7 +8,17 @@ export const ENGINE_VERSION = 1;
 export const SCENARIO_VERSION = 1;
 
 /** `policy.set` = a response-policy change; `Simulation.setPolicy` records one, so replays stay exact. */
-export type ScenarioInputKind = 'closure.start' | 'closure.end' | 'accident.start' | 'accident.end' | 'surge.start' | 'policy.set';
+export type ScenarioInputKind =
+  | 'closure.start'
+  | 'closure.end'
+  | 'accident.start'
+  | 'accident.end'
+  | 'surge.start'
+  | 'fire.start'
+  | 'fire.end'
+  | 'medical.start'
+  | 'medical.end'
+  | 'policy.set';
 
 export interface ScenarioTarget {
   segmentId?: string;
@@ -18,10 +28,10 @@ export interface ScenarioTarget {
   s?: number;
   buildingId?: string;
   /**
-   * `closure.end` / `accident.end` only: end exactly the event started by this input; segmentId / lane may then
-   * be omitted. Accepted whenever well-formed; if that event is not active when the end applies (unknown, other
+   * `*.end` only: end exactly the event started by this input; segmentId / lane / buildingId may then be
+   * omitted. Accepted whenever well-formed; if that event is not active when the end applies (unknown, other
    * kind, not started yet, already ended) the end is a logged no-op — the same live and on replay. Without it:
-   * the earliest-started active event of that kind on segmentId + lane.
+   * the earliest-started active event of that kind on segmentId + lane (fire / medical: on buildingId).
    */
   eventId?: string;
 }
@@ -39,20 +49,32 @@ export interface ScenarioInput {
    * closure.start: durationTicks (optional, no auto end without it).
    * accident.start: durationTicks (default 2400 = 2 min sim = 20 game min), length (default 9 m).
    * surge.start: extraTrips (required), inflowTicks (default 1200), stayTicks (default 2400), outflowTicks (default = inflowTicks).
+   * fire.start: burnTicks (0 → 100 %, default 2400 = 20 game min), suppressTicks (default 600 = 5 game min).
+   * medical.start: treatTicks (on-scene treatment, default 360 = 3 game min).
    * *.end: none; ends the earliest-started active event of that kind with the same segmentId and lane.
-   * policy.set: reroute (0 | 1), informedShare (0..1); target {}.
+   * policy.set: reroute (0 | 1), informedShare (0..1), preempt (optional 0 | 1); target {}.
    */
   params: Record<string, number>;
 }
 
+/**
+ * "스마트 대응" (smart response). The UI has one toggle: `reroute` switches re-routing and, unless `preempt`
+ * is given, emergency signal pre-emption with it. Records without `preempt` (every 4c1 record) therefore
+ * pre-empt exactly when they re-route; an explicit `preempt` decouples the two (tests, experiments).
+ */
 export interface ResponsePolicy {
   /** Informed vehicles re-route when an event starts or ends. */
   reroute: boolean;
   /** Share of vehicles that are informed (vehicle id hash < share), 0..1. */
   informedShare: number;
+  /** Emergency vehicles pre-empt signals (ADR 0010 §4). Omitted = same as `reroute`. */
+  preempt?: boolean;
 }
 
 export const DEFAULT_POLICY: ResponsePolicy = { reroute: false, informedShare: 0.7 };
+
+/** Whether signal pre-emption is on under a policy (`preempt` omitted = `reroute`). */
+export const preemptOn = (p: ResponsePolicy): boolean => p.preempt ?? p.reroute;
 
 /** The only keys a ScenarioInput may carry (anything else is rejected, so every accepted input is plain JSON). */
 export const SCENARIO_INPUT_KEYS = ['eventId', 'tick', 'order', 'kind', 'target', 'params'] as const;
@@ -64,15 +86,20 @@ export const SCENARIO_PARAM_KEYS: Record<ScenarioInputKind, readonly string[]> =
   'accident.start': ['durationTicks', 'length'],
   'accident.end': [],
   'surge.start': ['extraTrips', 'inflowTicks', 'stayTicks', 'outflowTicks'],
-  'policy.set': ['reroute', 'informedShare'],
+  'fire.start': ['burnTicks', 'suppressTicks'],
+  'fire.end': [],
+  'medical.start': ['treatTicks'],
+  'medical.end': [],
+  'policy.set': ['reroute', 'informedShare', 'preempt'],
 };
 
 /** Strict policy check shared by setPolicy, records and the worker (no type coercion). Null = valid. */
 export function policyError(p: unknown): string | null {
   if (typeof p !== 'object' || p === null) return 'policy는 객체여야 합니다';
-  const { reroute, informedShare } = p as Record<string, unknown>;
+  const { reroute, informedShare, preempt } = p as Record<string, unknown>;
   if (typeof reroute !== 'boolean') return 'policy.reroute는 boolean이어야 합니다';
   if (typeof informedShare !== 'number' || !Number.isFinite(informedShare) || informedShare < 0 || informedShare > 1) return 'policy.informedShare는 0..1 수여야 합니다';
+  if (preempt !== undefined && typeof preempt !== 'boolean') return 'policy.preempt는 boolean이어야 합니다';
   return null;
 }
 
@@ -134,8 +161,30 @@ export interface ScenarioKpi {
   detoured: number;
   /** Invalid-route recoveries that found a route (policy independent). */
   recovered: number;
-  /** Closures and accidents in effect, plus surges with trips still to depart. */
+  /** Closures, accidents, fires and medical calls in effect, plus surges with trips still to depart. */
   activeEvents: number;
+  // Emergency KPIs (4c2-①).
+  /** Emergency responses (fire / medical): call → arrival at the scene, game minutes. 0 when none arrived yet. */
+  avgResponseTime: number;
+  maxResponseTime: number;
+  /** Emergency vehicles that reached an active incident. */
+  responses: number;
+  /** Fires put out before reaching 100 %, and buildings damaged (fire reached 100 %). */
+  extinguished: number;
+  damaged: number;
+  /** Patients treated on scene and delivered to the hospital. */
+  medicalCompleted: number;
+  /** Incidents no vehicle could be sent to (no facility, no route, no emergency vehicle type). */
+  dispatchFailed: number;
+  /**
+   * Responses still under way NOW (instantaneous, not cumulative): dispatches of active incidents that have not
+   * reached the scene yet (on the road, or waiting for room to leave), and the sum / maximum of their elapsed
+   * game minutes since the call. With them a mean response time can count the late ones (no survivorship bias):
+   * (avgResponseTime × responses + respondingElapsedSum) / (responses + respondingNow).
+   */
+  respondingNow: number;
+  respondingElapsedSum: number;
+  oldestPendingMinutes: number;
 }
 
 /** Render data of the scenario overlay (only present in snapshots once a scenario state exists). */
@@ -150,19 +199,37 @@ export interface ScenarioView {
    * Events in effect now, sorted by eventId. `endTick` = scheduled automatic end (null = until an end input);
    * for a surge, the departure tick of its last trip (it stays listed while trips are still to depart).
    */
-  activeEvents: { eventId: string; kind: 'closure' | 'accident' | 'surge'; startTick: number; endTick: number | null }[];
+  activeEvents: { eventId: string; kind: 'closure' | 'accident' | 'surge' | 'fire' | 'medical'; startTick: number; endTick: number | null }[];
   /**
    * The last RECENT_LOG_SIZE (20) scenario log entries, oldest first: every applied input, automatic end and
    * edit-time move or drop. `applied: false` = a no-op, with the `reason` (e.g. an end whose event is not active).
    */
   recentLog: ScenarioOutcome[];
+  /** Active fires and medical calls (eventId order); `progress` = fire progress 0..100 (medical: 0). */
+  incidents: { eventId: string; kind: 'fire' | 'medical'; buildingId: string; state: 'burning' | 'suppressing' | 'waiting' | 'treating' | 'transport'; progress: number }[];
+  /** Buildings a fire reached 100 % on (id order). Scenario state only: the document is never changed. */
+  damagedBuildings: string[];
+  /**
+   * Emergency vehicles out (incident eventId order): `vehicleId` = the vehicle on the network, null while it
+   * waits for room at its origin or is parked at the scene (`working`). `facilityId` = the dispatching building.
+   */
+  dispatches: { eventId: string; kind: 'fire' | 'medical'; vehicleId: number | null; stage: 'enroute' | 'working' | 'transport' | 'returning'; facilityId: string; buildingId: string }[];
+  /** Junctions the signal controller drives (nodeId order): serving `vehicleId`, or −1 while handing back to the plan. */
+  preempted: { nodeId: string; vehicleId: number; phase: number; color: 'green' | 'yellow' | 'red' }[];
 }
 
 /** One apply-time scenario outcome (`Simulation.drainScenarioOutcomes`, `ScenarioView.recentLog`). */
 export interface ScenarioOutcome {
   eventId: string;
   tick: number;
-  /** Input kind, or `closure.end` / `accident.end` for automatic ends, `accident.move` after an edit. */
+  /**
+   * Input kind, or `closure.end` / `accident.end` for automatic ends, `accident.move` after an edit. Emergency
+   * outcomes (eventId = the fire / medical event): `dispatch.start` (vehicle left its facility), `dispatch.arrive`
+   * (at the scene; reason = response time), `fire.extinguished`, `fire.damaged`, `medical.complete` (patient
+   * at the hospital), `dispatch.return` (back at the facility), `dispatch.cancel` (incident over before the
+   * vehicle could leave), `dispatch.failed` (출동 불가: 시설 없음 / 경로 없음 / 긴급 차종 없음 — the incident
+   * still runs), `dispatch.lost` (vehicle removed by an edit, or no way back / to the hospital).
+   */
   kind: string;
   applied: boolean;
   reason?: string;

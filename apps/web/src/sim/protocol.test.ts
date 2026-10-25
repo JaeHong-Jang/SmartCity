@@ -49,6 +49,17 @@ describe('handleScenarioMessage (simulator mode)', () => {
 });
 
 describe('inputShapeError / toWorkerError', () => {
+  it('fire / medical inputs and the optional policy.set preempt flag', () => {
+    expect(inputShapeError({ eventId: 'f', tick: 1, order: 0, kind: 'fire.start', target: { buildingId: 'b' }, params: { burnTicks: 100, suppressTicks: 10 } })).toBeNull();
+    expect(inputShapeError({ eventId: 'm', tick: 1, order: 0, kind: 'medical.start', target: { buildingId: 'b' }, params: { treatTicks: 10 } })).toBeNull();
+    expect(inputShapeError({ eventId: 'm', tick: 1, order: 0, kind: 'medical.start', target: { buildingId: 'b' }, params: { burnTicks: 10 } })).toMatch(/burnTicks/);
+    expect(inputShapeError({ eventId: 'e', tick: 1, order: 0, kind: 'fire.end', target: { eventId: 'f' }, params: {} })).toBeNull();
+    const policy = { eventId: 'p', tick: 0, order: 0, kind: 'policy.set', target: {}, params: { reroute: 1, informedShare: 0.5 } };
+    expect(inputShapeError(policy)).toBeNull();
+    expect(inputShapeError({ ...policy, params: { ...policy.params, preempt: 0 } })).toBeNull();
+    expect(inputShapeError({ ...policy, params: { ...policy.params, preempt: 2 } })).toMatch(/preempt/);
+  });
+
   it('checks target.eventId (ending one specific event) and top-level messages', () => {
     const base = { eventId: 'e', tick: 0, order: 0, kind: 'closure.end', params: {} };
     expect(inputShapeError({ ...base, target: { eventId: 'A' } })).toBeNull();

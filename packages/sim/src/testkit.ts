@@ -291,3 +291,33 @@ export function checkObstacleOverlaps(sim: Simulation): string[] {
   }
   return problems;
 }
+
+/**
+ * Emergency bookkeeping (ADR 0010 §3): no orphans. Every active incident either has its mission (listed,
+ * pointing back at it, with a vehicle on the network, a departure waiting for room, or parked at the scene
+ * while it works) or is in a state that progresses on its own — burning (fire) / waiting for a vehicle —
+ * with a dispatch retry scheduled. Every mission is listed once and has a vehicle, a pending departure or
+ * (working) its incident; vehicles marked as emergency belong to a listed mission.
+ */
+export function checkIncidentInvariants(sim: Simulation): string[] {
+  const w = internals(sim);
+  const sc = w.sc;
+  if (!sc) return [];
+  const problems: string[] = [];
+  const live = (m: NonNullable<(typeof sc.incidents)[number]['mission']>): boolean =>
+    (m.v !== null && m.v.alive && m.v.em === m) || (m.v === null && m.spawn !== null) || (m.v === null && m.stage === 'working' && m.incident.mission === m);
+  for (const inc of sc.incidents) {
+    const m = inc.mission;
+    if (m !== null) {
+      if (!sc.missions.includes(m) || m.incident !== inc) problems.push(`incident ${inc.eventId}: mission not listed`);
+      else if (!live(m)) problems.push(`incident ${inc.eventId}: mission ${m.stage} has no vehicle, departure or parking`);
+      continue;
+    }
+    if (inc.state !== 'burning' && inc.state !== 'waiting') problems.push(`incident ${inc.eventId}: orphan in state ${inc.state}`);
+    else if (inc.retryAt < 0) problems.push(`incident ${inc.eventId}: no vehicle and no dispatch retry`);
+  }
+  if (new Set(sc.missions).size !== sc.missions.length) problems.push('mission listed twice');
+  for (const m of sc.missions) if (!live(m)) problems.push(`mission of ${m.incident.eventId} (${m.stage}) has no vehicle, departure or incident`);
+  for (const v of w.vehicles) if (v.alive && v.em !== null && !sc.missions.includes(v.em)) problems.push(`emergency vehicle ${v.id} without a listed mission`);
+  return problems;
+}

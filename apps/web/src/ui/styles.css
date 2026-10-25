@@ -1216,7 +1216,7 @@ body[data-simmode] .hint {
   position: absolute;
   top: 112px;
   right: 12px;
-  width: 560px;
+  width: 640px;
   max-width: calc(100% - 400px);
   max-height: calc(100% - 112px - 60px);
   overflow-y: auto;
@@ -1320,4 +1320,22 @@ body[data-simmode] .hint {
   padding: 5px 12px;
   font-size: 11px;
   color: var(--text-dim);
+}
+
+.sim-table {
+  font-size: 11px;
+}
+
+.sim-table th {
+  white-space: nowrap;
+}
+
+.sim-table-wrap {
+  flex: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.sim-table td {
+  white-space: nowrap;
 }

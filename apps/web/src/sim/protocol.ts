@@ -117,6 +117,7 @@ export function inputShapeError(x: unknown): string | null {
     if (x.params.reroute !== 0 && x.params.reroute !== 1) return 'reroute는 0 또는 1이어야 합니다';
     const share = x.params.informedShare;
     if (!(typeof share === 'number' && share >= 0 && share <= 1)) return 'informedShare는 0..1이어야 합니다';
+    if (x.params.preempt !== undefined && x.params.preempt !== 0 && x.params.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
   }
   return null;
 }

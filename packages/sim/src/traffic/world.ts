@@ -8,7 +8,7 @@ import type { ZoneIndex } from '../network/crossings.js';
 import type { CompileCache } from '../network/compile.js';
 import type { Net } from '../network/net.js';
 import type { Router } from '../network/route.js';
-import type { ScenarioState } from '../scenario/state.js';
+import type { Mission, ScenarioState } from '../scenario/state.js';
 import type { RoadGraph } from '../types.js';
 import type { DemandModel } from './demand.js';
 import type { BusLineState } from './buses.js';
@@ -106,6 +106,8 @@ export interface Vehicle {
   scQueued: boolean;
   /** Re-routed by the response policy at least once. */
   scRerouted: boolean;
+  /** Emergency mission this vehicle drives for (scenario/emergency.ts); null for every other vehicle. */
+  em: Mission | null;
 }
 
 export interface Trip {

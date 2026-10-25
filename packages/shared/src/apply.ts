@@ -283,6 +283,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
           : {}),
         ...(bt.growth ? { growth: { level: bt.growth.level } } : {}),
         ...(bt.origin ? { origin: bt.origin } : {}),
+        ...(bt.service ? { service: bt.service } : {}),
       });
       return;
     }

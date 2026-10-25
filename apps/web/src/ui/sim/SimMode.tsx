@@ -4,7 +4,9 @@ import { useEffect, useRef } from 'react';
 import { CLOCK_SCALE } from '@smartcity/sim';
 import { formatClock } from '../../render/dayNight';
 import { simModeController } from '../../simmode/instance';
-import { alignKpiSeries, KPI_METRICS, rebaseSeries } from '../../simmode/kpiSeries';
+import { alignKpiSeries, inclusiveResponseTime, KPI_METRICS, rebaseSeries } from '../../simmode/kpiSeries';
+import { dispatchText, incidentText } from '../../simmode/emergencyText';
+import { facilityHint, FACILITY_SUMMARY } from '../../simmode/facilities';
 import { DEFAULT_ARMED, useSimMode, type EventKind, type EventRow } from '../../simmode/store';
 import { ticksToGameMin, WARMUP_GAME_MIN, WARMUP_TICKS } from '../../simmode/time';
 import { useServices, useStore } from '../context';
@@ -61,6 +63,8 @@ const EVENT_BUTTONS: { kind: EventKind; label: string; hint: string }[] = [
   { kind: 'closure', label: '도로 통제', hint: '도로를 클릭하면 전 차선이 통제됩니다' },
   { kind: 'accident', label: '사고', hint: '도로의 차선 위치를 클릭하세요' },
   { kind: 'surge', label: '행사·수요 급증', hint: '건물을 클릭하세요' },
+  { kind: 'fire', label: '화재', hint: '불을 낼 건물을 클릭하세요' },
+  { kind: 'medical', label: '응급 환자', hint: '환자가 생길 건물을 클릭하세요' },
 ];
 
 function NumField({ label, value, min, max, onChange, id }: { label: string; value: number; min: number; max: number; onChange: (v: number) => void; id: string }) {
@@ -92,6 +96,13 @@ function remainingText(e: EventRow, tick: number, fatal: boolean): string {
   return `남은 ${Math.ceil(ticksToGameMin(e.endTick - tick))}분`;
 }
 
+function emergencyRowText(e: EventRow, tick: number, fatal: boolean): string {
+  if (e.status === 'pending' || e.status === 'rejected' || (!e.active && !e.ended && !e.endReason)) return remainingText(e, tick, fatal);
+  // The incident and the vehicle can both say "이송 중": show each phrase once.
+  const parts = [incidentText(e), ...dispatchText(e).split(' · ')].filter(Boolean);
+  return [...new Set(parts)].join(' · ');
+}
+
 function Palette() {
   const s = useSimMode((x) => x);
   const c = simModeController();
@@ -113,7 +124,7 @@ function Palette() {
       </div>
       {armed && (
         <div className="sim-params">
-          {armed.kind !== 'surge' ? (
+          {armed.kind === 'fire' || armed.kind === 'medical' ? null : armed.kind !== 'surge' ? (
             <NumField id="duration" label="기간(게임 분)" value={armed.durationMin} min={1} max={600} onChange={(v) => upd({ durationMin: v })} />
           ) : (
             <>
@@ -126,9 +137,17 @@ function Palette() {
           <span className="muted" data-simmode-arm-hint>
             {EVENT_BUTTONS.find((b) => b.kind === armed.kind)!.hint}
           </span>
+          {(armed.kind === 'fire' || armed.kind === 'medical') && facilityHint(armed.kind, s.facilities) && (
+            <span className="sim-error" data-simmode-facility-hint role="status">
+              {facilityHint(armed.kind, s.facilities)}
+            </span>
+          )}
         </div>
       )}
-      <h3>스마트 대응</h3>
+      <span className="muted" data-simmode-facilities title="사본 도시의 시설 (설계의 service 종류 기준)">
+        시설 · {FACILITY_SUMMARY(s.facilities)}
+      </span>
+      <h3>스마트 대응: 우회 안내 + 긴급차량 신호 우선</h3>
       <label className="toggle" title={locked ? '사건을 넣은 뒤에는 바꿀 수 없습니다. 비교 실행이 반대 정책을 돌려 줍니다' : '정보를 가진 차량이 사건 시작·종료 때 경로를 다시 찾습니다'}>
         <input type="checkbox" data-simmode-policy checked={s.policy.reroute} disabled={!ready || locked} onChange={(e) => c.setPolicy({ ...s.policy, reroute: e.target.checked })} />
         스마트 대응 {s.policy.reroute ? 'ON' : 'OFF'}
@@ -162,7 +181,7 @@ function Palette() {
               onMouseLeave={() => hover.current && clearTimeout(hover.current)}
             >
               <span className="sim-ev-label">{e.label}</span>
-              <span className="muted">{remainingText(e, s.tick, s.fatal)}</span>
+              <span className="muted">{e.kind === 'fire' || e.kind === 'medical' ? emergencyRowText(e, s.tick, s.fatal) : remainingText(e, s.tick, s.fatal)}</span>
               {e.note && (
                 <span className="muted" data-simmode-note>
                   {e.note}
@@ -232,6 +251,15 @@ function ComparePanel() {
         <td>{Math.round(k.congestionLength)}m</td>
         <td>{k.noRoute + k.waitingToDepart}</td>
         <td>{k.rerouted}</td>
+        <td data-simmode-inclusive>{k.responses + k.respondingNow > 0 ? `${inclusiveResponseTime(k).toFixed(1)}분` : '—'}</td>
+        <td data-simmode-arrived-avg>{k.responses > 0 ? `${k.avgResponseTime.toFixed(1)}분` : '—'}</td>
+        <td>
+          대응 {k.responses}건 · 미도착 {k.respondingNow}건
+        </td>
+        <td>
+          {k.extinguished} / {k.damaged} / {k.medicalCompleted}
+        </td>
+        <td>{k.dispatchFailed}</td>
         <td>
           {k.inProgress} / {k.droppedTrips}
         </td>
@@ -248,6 +276,7 @@ function ComparePanel() {
           <KpiChart key={m.id} rows={rows} metric={m} />
         ))}
       </div>
+      <div className="sim-table-wrap">
       <table className="sim-table" data-simmode-table>
         <thead>
           <tr>
@@ -257,6 +286,11 @@ function ComparePanel() {
             <th>정체</th>
             <th>경로없음+대기</th>
             <th>재탐색</th>
+            <th>대응 시간(미도착 포함)</th>
+            <th>도착 평균</th>
+            <th>대응 · 미도착</th>
+            <th>진화/피해/이송</th>
+            <th>출동 불가</th>
             <th>미완료 / 포기</th>
           </tr>
         </thead>
@@ -265,6 +299,10 @@ function ComparePanel() {
           {line(off, 'OFF')}
         </tbody>
       </table>
+      </div>
+      <p className="muted" data-simmode-response-note>
+        평균 대응 시간: 도착 전 출동은 경과 시간으로 계산(하한). 도착한 차량만의 평균은 "도착 평균"입니다.
+      </p>
       <p className="muted">미완료 = 아직 도로 위에 있는 차량, 포기 = 경로 없음·막힌 출발지로 시작하지 못한 통행. ON이 항상 낫지 않을 수 있음 — 게임 모델(보정 전 값).</p>
     </aside>
   );

@@ -39,3 +39,10 @@ export function surgePlace(doc: CityDoc, buildingId: string, people: number): Pl
   if (!b) return { label: `행사 ${people}명`, pos: { x: 0, z: 0 } };
   return { label: `${doc.buildingTypes[b.typeId]?.name ?? '건물'} 행사 ${people}명 ${at(b.pos)}`, pos: b.pos };
 }
+
+export function emergencyPlace(doc: CityDoc, buildingId: string, kind: 'fire' | 'medical'): Place {
+  const b = doc.buildings[buildingId];
+  const name = b ? (doc.buildingTypes[b.typeId]?.name ?? '건물') : '건물';
+  const pos = b?.pos ?? { x: 0, z: 0 };
+  return { label: kind === 'fire' ? `${name} 건물 화재 ${at(pos)}` : `${name} 응급 환자 ${at(pos)}`, pos };
+}

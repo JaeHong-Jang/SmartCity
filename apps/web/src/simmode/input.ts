@@ -48,7 +48,9 @@ export function installSimModeInput(
       if (spot) controller.placeAccident(spot.segmentId, spot.lane, spot.s, armed);
     } else {
       const id = buildingAt(idx, p);
-      if (id) controller.placeSurge(id, armed);
+      if (!id) return;
+      if (armed.kind === 'surge') controller.placeSurge(id, armed);
+      else controller.placeEmergency(armed.kind, id);
     }
   };
 

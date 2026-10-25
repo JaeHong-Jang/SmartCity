@@ -81,7 +81,7 @@ export function ToolOptions() {
         <h3>도로 타입</h3>
         <div className="list">
           {Object.values(doc.roadTypes).map((rt) => (
-            <button key={rt.id} className={opts.roadTypeId === rt.id ? 'active' : ''} onClick={() => store.setToolOptions({ roadTypeId: rt.id })}>
+            <button key={rt.id} data-road-type={rt.id} className={opts.roadTypeId === rt.id ? 'active' : ''} onClick={() => store.setToolOptions({ roadTypeId: rt.id })}>
               <span className="swatch" style={{ background: rt.busOnlyRightLane ? '#9a3434' : '#3b3f45' }} />
               <span style={{ flex: 1 }}>{rt.name}</span>
               <span className="muted">{rt.lanesForward + rt.lanesBackward}차선</span>
@@ -103,7 +103,7 @@ export function ToolOptions() {
         <h3>건물 타입</h3>
         <div className="list">
           {Object.values(doc.buildingTypes).map((bt) => (
-            <button key={bt.id} className={opts.buildingTypeId === bt.id ? 'active' : ''} onClick={() => store.setToolOptions({ buildingTypeId: bt.id })}>
+            <button key={bt.id} data-building-type={bt.id} className={opts.buildingTypeId === bt.id ? 'active' : ''} onClick={() => store.setToolOptions({ buildingTypeId: bt.id })}>
               <span className="swatch" style={{ background: bt.parts[0]?.color }} />
               <span style={{ flex: 1 }}>{bt.name}</span>
               <AiBadge type={bt} />

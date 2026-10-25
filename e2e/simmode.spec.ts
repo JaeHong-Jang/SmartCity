@@ -67,8 +67,7 @@ test('phase 4c1: simulator mode — private copy, events, ON/OFF comparison, no 
 
   // A grid of 4-lane roads and a few buildings (built the same way as the vehicles test).
   await page.locator('[data-tool="road"]').click();
-  // The 4-lane avenue (matched on its lane count).
-  await page.locator('.tool-options .list button').filter({ hasText: '4차선' }).first().click();
+  await page.locator('[data-road-type="road-4"]').click();
   for (const v of [-144, -48, 48, 144]) {
     await clickWorld(page, -192, v);
     await clickWorld(page, 192, v);
@@ -193,8 +192,8 @@ test('phase 4c1: simulator mode — private copy, events, ON/OFF comparison, no 
   await expect(page.locator('[data-simmode-result]')).toBeVisible({ timeout: 150_000 });
   expect(await workers(page)).toBe(1);
   await expect(page.locator('[data-simmode-result]')).toContainText('게임 모델');
-  expect(await page.locator('[data-simmode-line="on"]').count()).toBe(5);
-  expect(await page.locator('[data-simmode-line="off"]').count()).toBe(5);
+  expect(await page.locator('[data-simmode-line="on"]').count()).toBe(6);
+  expect(await page.locator('[data-simmode-line="off"]').count()).toBe(6);
   for (const side of ['on', 'off'] as const) {
     const pts = await page.locator(`[data-simmode-line="${side}"]`).evaluateAll((els) => els.map((e) => (e.getAttribute('points') ?? '').trim().split(/\s+/).filter(Boolean).length));
     expect(Math.min(...pts)).toBeGreaterThan(5);

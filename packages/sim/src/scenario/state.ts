@@ -6,7 +6,8 @@
 
 import { hash01 } from '../citizens/schedule.js';
 import type { Access } from '../traffic/demand.js';
-import type { Vehicle, World } from '../traffic/world.js';
+import type { Goal, Vehicle, World } from '../traffic/world.js';
+import type { SignalClearing, SignalCtl } from './preempt.js';
 import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioInput } from './types.js';
 
 /** Obstacle on a lane, lane coordinates: occupies [rear, rear + len]. */
@@ -56,6 +57,46 @@ export interface SurgeTrip {
   dropped: boolean;
 }
 
+/** A fire or medical call (ADR 0010 §3), from its start input until it is over. */
+export interface Incident {
+  kind: 'fire' | 'medical';
+  eventId: string;
+  buildingId: string;
+  startTick: number;
+  /** Fire: ticks from 0 to 100 %. Medical: unused (0). */
+  burnTicks: number;
+  /** Fire: suppression ticks once a fire truck is there. Medical: treatment ticks once an ambulance is there. */
+  workTicks: number;
+  state: 'burning' | 'suppressing' | 'waiting' | 'treating' | 'transport';
+  /** Tick the suppression / treatment ends, −1 before it started. */
+  workEnd: number;
+  mission: Mission | null;
+  /**
+   * No vehicle on the way (dispatch failed, or the vehicle was lost before arriving): the next dispatch
+   * attempt is at this tick (−1 = a mission is out). `failed` = a `dispatch.failed` was logged and counted.
+   */
+  retryAt: number;
+  failed: boolean;
+}
+
+/** One emergency vehicle's trip chain: facility → scene → work → back (fire) or to the hospital (medical). */
+export interface Mission {
+  incident: Incident;
+  /**
+   * Dispatching facility (building id): where a fire truck returns and an ambulance takes the patient.
+   * Replaced by the closest remaining facility of the same service if an edit removes it.
+   */
+  facilityId: string;
+  /** The incident building's access point at dispatch (the vehicle leaves the scene from here). */
+  scene: Access;
+  typeId: string;
+  stage: 'enroute' | 'working' | 'transport' | 'returning';
+  /** On the network; null while waiting for room (`spawn`) or parked at the scene. */
+  v: Vehicle | null;
+  /** Waiting to enter the network at this access point, towards `goal` (retried every tick). */
+  spawn: { from: Access; goal: Goal } | null;
+}
+
 export interface ScenarioLogEntry {
   eventId: string;
   tick: number;
@@ -84,6 +125,18 @@ export interface ScenarioState {
   surgeQueue: SurgeTrip[];
   /** Per surge event: the tick it applied and the departure tick of its last trip. */
   surges: Map<string, { startTick: number; endTick: number }>;
+  /** Fires and medical calls not over yet (application order), and the emergency missions out (creation order). */
+  incidents: Incident[];
+  missions: Mission[];
+  /** Buildings a fire reached 100 % on, ascending id. */
+  damaged: string[];
+  /**
+   * Signal controllers driving a junction now and edit-time clearances (by node id, never both for one
+   * node), and plan offsets re-phased by a hand-back (kept while the plan's identity key is unchanged).
+   */
+  ctl: Map<string, SignalCtl>;
+  clearing: Map<string, SignalClearing>;
+  offsets: Map<string, { key: string; offset: number }>;
   // ----- composed over the current network -----
   /** Per edge: new entry forbidden (closed lanes and every connector into them). Null = no closure. */
   ban: Uint8Array | null;
@@ -109,6 +162,12 @@ export interface ScenarioState {
   rerouted: number;
   detoured: number;
   recovered: number;
+  responses: number;
+  responseTicks: number;
+  maxResponseTicks: number;
+  extinguished: number;
+  medicalCompleted: number;
+  dispatchFailed: number;
 }
 
 export function newScenarioState(w: World): ScenarioState {
@@ -125,6 +184,12 @@ export function newScenarioState(w: World): ScenarioState {
     surgeTrips: [],
     surgeQueue: [],
     surges: new Map(),
+    incidents: [],
+    missions: [],
+    damaged: [],
+    ctl: new Map(),
+    clearing: new Map(),
+    offsets: new Map(),
     ban: null,
     obs: null,
     obsRear: null,
@@ -141,6 +206,12 @@ export function newScenarioState(w: World): ScenarioState {
     rerouted: 0,
     detoured: 0,
     recovered: 0,
+    responses: 0,
+    responseTicks: 0,
+    maxResponseTicks: 0,
+    extinguished: 0,
+    medicalCompleted: 0,
+    dispatchFailed: 0,
   };
 }
 
@@ -225,15 +296,16 @@ export function obstacleAhead(obs: Obstacle[][], lane: number, s: number): numbe
  */
 export function scenarioHolds(w: World, v: Vehicle): boolean {
   const sc = w.sc!;
-  if (v.scWait !== 0) return true;
+  // Emergency vehicles are never removed as stuck: their incident depends on them.
+  if (v.scWait !== 0 || v.em !== null) return true;
   const nxt = v.route[v.ri + 1];
   if (sc.ban && nxt !== undefined && sc.ban[nxt]) return true;
   return sc.obs !== null && v.edge < w.net.nLanes && obstacleAhead(sc.obs, v.edge, v.s) < Infinity;
 }
 
-/** Every effect and surge still running. */
+/** Every effect, incident and surge still running. */
 export function activeEvents(sc: ScenarioState): number {
   const surges = new Set<string>();
   for (const t of sc.surgeQueue) surges.add(t.eventId);
-  return sc.effects.length + surges.size;
+  return sc.effects.length + sc.incidents.length + surges.size;
 }

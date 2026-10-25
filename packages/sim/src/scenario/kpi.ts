@@ -2,6 +2,7 @@
 
 import { CLOCK_SCALE } from '../types.js';
 import type { World } from '../traffic/world.js';
+import { gameMinutes } from './emergency.js';
 import { NO_ROUTE } from './reroute.js';
 import { activeEvents } from './state.js';
 import { surgeWaiting } from './surge.js';
@@ -33,7 +34,8 @@ export function scenarioKpi(w: World): ScenarioKpi {
   let inProgress = 0;
   let noRoute = 0;
   for (const v of w.vehicles) {
-    if (!v.alive || v.bus) continue;
+    // Emergency vehicles are not trips (response KPIs below).
+    if (!v.alive || v.bus || v.em !== null) continue;
     inProgress++;
     if (v.scWait === NO_ROUTE) {
       const nxt = v.route[v.ri + 1];
@@ -57,7 +59,30 @@ export function scenarioKpi(w: World): ScenarioKpi {
     detoured: sc.detoured,
     recovered: sc.recovered,
     activeEvents: activeEvents(sc),
+    avgResponseTime: sc.responses > 0 ? gameMinutes(w, sc.responseTicks / sc.responses) : 0,
+    maxResponseTime: gameMinutes(w, sc.maxResponseTicks),
+    responses: sc.responses,
+    extinguished: sc.extinguished,
+    damaged: sc.damaged.length,
+    medicalCompleted: sc.medicalCompleted,
+    dispatchFailed: sc.dispatchFailed,
+    ...respondingNow(w),
   };
+}
+
+/** Dispatches of active incidents not at the scene yet, and their elapsed game minutes since the call. */
+function respondingNow(w: World): Pick<ScenarioKpi, 'respondingNow' | 'respondingElapsedSum' | 'oldestPendingMinutes'> {
+  let n = 0;
+  let sum = 0;
+  let oldest = 0;
+  for (const m of w.sc!.missions) {
+    if (m.stage !== 'enroute' || m.incident.mission !== m) continue;
+    const min = gameMinutes(w, w.tick - m.incident.startTick);
+    n++;
+    sum += min;
+    oldest = Math.max(oldest, min);
+  }
+  return { respondingNow: n, respondingElapsedSum: sum, oldestPendingMinutes: oldest };
 }
 
 /** KPI of a simulation whose scenario state is not active (nothing is created): counters 0, `since` −1. */
@@ -81,6 +106,16 @@ export function inactiveKpi(w: World): ScenarioKpi {
     detoured: 0,
     recovered: 0,
     activeEvents: 0,
+    avgResponseTime: 0,
+    maxResponseTime: 0,
+    responses: 0,
+    extinguished: 0,
+    damaged: 0,
+    medicalCompleted: 0,
+    dispatchFailed: 0,
+    respondingNow: 0,
+    respondingElapsedSum: 0,
+    oldestPendingMinutes: 0,
   };
 }
 

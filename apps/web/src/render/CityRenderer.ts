@@ -17,6 +17,7 @@ import { OverlayLayer } from './overlays';
 import { PedestrianLayer } from './pedestrians';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer, Y_WALK } from './roads';
+import { EmergencyLayer } from './emergency';
 import { ScenarioLayer } from './scenario';
 import { configureRenderer, createSun } from './sceneKit';
 import { PedSignalLayer, SignalLayer } from './signals';
@@ -47,6 +48,7 @@ export class CityRenderer {
   private overlays: OverlayLayer;
   private highlights = new HighlightLayer();
   readonly scenario: ScenarioLayer;
+  readonly emergency: EmergencyLayer;
   private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
   private dirty = { roads: true, buildings: true, vehicleTypes: true };
   private raf = 0;
@@ -95,7 +97,8 @@ export class CityRenderer {
     this.pedSignals = new PedSignalLayer(stream);
     this.overlays = new OverlayLayer(store, stream, labelRoot, () => this.network);
     this.scenario = new ScenarioLayer(stream);
-    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group);
+    this.emergency = new EmergencyLayer(stream);
+    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group);
 
     this.unsubs.push(
       store.onApplied((cmd) => {
@@ -258,6 +261,7 @@ export class CityRenderer {
     this.pedSignals.update(now, Y_WALK);
     this.highlights.update(Date.now(), s.doc, s.highlights, s.docVersion);
     this.scenario.update(now);
+    this.emergency.update(now);
     this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.renderer.render(this.scene, this.cam.camera);
@@ -301,6 +305,7 @@ export class CityRenderer {
     this.overlays.dispose();
     this.highlights.dispose();
     this.scenario.dispose();
+    this.emergency.dispose();
     this.ground.dispose();
     this.renderer.dispose();
   }

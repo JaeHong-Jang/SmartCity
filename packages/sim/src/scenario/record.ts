@@ -11,8 +11,9 @@ export interface ReplayOptions {
   /** Run the record's warm-up before returning (default true). False: returned at tick 0, ready to step / runTo. */
   warmup?: boolean;
   /**
-   * ON/OFF comparison: replace `reroute` in the initial policy and in every recorded `policy.set` input,
-   * keeping everything else (inputs, informed share, ticks) identical.
+   * ON/OFF comparison of the smart response: replace `reroute` in the initial policy and in every recorded
+   * `policy.set` input and drop any explicit `preempt` (so pre-emption follows it), keeping everything else
+   * (inputs, informed share, ticks) identical.
    */
   reroute?: boolean;
 }
@@ -42,9 +43,15 @@ export function simulationFromRecord(record: ScenarioRecord, opts: Omit<SimOptio
   const activate = (): void => {
     // The initial policy is state, not an input: `record.inputs` may already hold the `policy.set` inputs of
     // the recorded run (ids `policy@…`), and a second recorded one would collide with them.
-    ensureScenario((sim as unknown as { w: World }).w).policy = { reroute: reroute ?? record.policy.reroute, informedShare: record.policy.informedShare };
+    const policy = reroute === undefined ? record.policy : { reroute, informedShare: record.policy.informedShare };
+    ensureScenario((sim as unknown as { w: World }).w).policy = { reroute: policy.reroute, informedShare: policy.informedShare, ...(policy.preempt !== undefined ? { preempt: policy.preempt } : {}) };
     for (const input of record.inputs) {
-      const copy = input.kind === 'policy.set' && reroute !== undefined ? { ...input, params: { ...input.params, reroute: reroute ? 1 : 0 } } : input;
+      let copy = input;
+      if (input.kind === 'policy.set' && reroute !== undefined) {
+        const params: Record<string, number> = { ...input.params, reroute: reroute ? 1 : 0 };
+        delete params.preempt;
+        copy = { ...input, params };
+      }
       const r = sim.scenarioInput(copy);
       if (!r.ok) throw new Error(`${input.eventId}: ${r.error}`);
     }

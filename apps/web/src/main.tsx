@@ -2,7 +2,7 @@
 
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three';
-import { ROOM_ID_RE } from '@smartcity/shared';
+import { buildingFootprints, ROOM_ID_RE } from '@smartcity/shared';
 import { createDispatcher } from './app/dispatch';
 import { resumeImport } from './app/importExport';
 import { sameDisplayedStats } from './app/simStats';
@@ -168,6 +168,27 @@ renderer.scenario.setSource({
       .flatMap((e) => (e.buildingId && doc.buildings[e.buildingId] ? [doc.buildings[e.buildingId]!.pos] : []));
   },
 });
+renderer.emergency.setSource({
+  building(id) {
+    const doc = simMode.copyCityDoc();
+    const b = doc?.buildings[id];
+    const t = b && doc?.buildingTypes[b.typeId];
+    if (!b || !t) return null;
+    let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity;
+    for (const poly of buildingFootprints(b, t)) {
+      for (const p of poly) {
+        minX = Math.min(minX, p.x);
+        maxX = Math.max(maxX, p.x);
+        minZ = Math.min(minZ, p.z);
+        maxZ = Math.max(maxZ, p.z);
+      }
+    }
+    if (!Number.isFinite(minX)) return null;
+    const h = Math.max(6, ...t.parts.map((p) => p.baseHeight + p.floors * p.floorHeight));
+    return { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2, w: maxX - minX, d: maxZ - minZ, h };
+  },
+  node: (id) => simMode.copyCityDoc()?.nodes[id]?.pos ?? null,
+});
 // Before the ToolController: while simulator mode is active the shared editing tools never see the left button.
 installSimModeInput(renderer.renderer.domElement, simMode, renderer.pickGround, renderer.groundPan);
 new ToolController(
@@ -220,6 +241,7 @@ if (import.meta.env.DEV) {
       drawnBuildings: () => Object.keys(frozen.view.getState().doc.buildings).length,
       liveBuildings: () => Object.keys(store.getState().doc.buildings).length,
       scene: () => renderer.scenario.stats(),
+      emergency: () => renderer.emergency.stats(),
     },
     worldToScreen(x: number, z: number) {
       const rect = renderer.renderer.domElement.getBoundingClientRect();

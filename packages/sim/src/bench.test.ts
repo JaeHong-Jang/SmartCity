@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Rng } from '@smartcity/shared';
 import { spawnWalker } from './citizens/peds.js';
 import { compileNetwork } from './network/compile.js';
+import { updatePreemption } from './scenario/preempt.js';
 import { Simulation } from './simulation.js';
 import { apply, gridDoc, internals } from './testkit.js';
 
@@ -87,6 +88,57 @@ describe('performance', () => {
     );
     expect(k.activeEvents).toBe(3);
   }, 120_000);
+
+  it('simulator mode: ~3000 vehicles with 24 fire / medical calls out, pre-emption ON vs OFF (reported)', () => {
+    const cmds = [];
+    const corners: [number, number][] = [[-650, -650], [650, 650], [-650, 650], [650, -650]];
+    for (const [k, [x, z]] of corners.entries()) {
+      cmds.push({ type: 'building.place' as const, building: { id: `fs${k}`, typeId: 'svc-fire-station', pos: { x, z }, rotation: 0 } });
+      cmds.push({ type: 'building.place' as const, building: { id: `h${k}`, typeId: 'svc-hospital', pos: { x: x / 2 + 50 * Math.sign(x), z: -z / 2 - 50 * Math.sign(z) }, rotation: 0 } });
+    }
+    for (let k = 0; k < 24; k++) cmds.push({ type: 'building.place' as const, building: { id: `b${k}`, typeId: 'house', pos: { x: -550 + (k % 6) * 200, z: -450 + Math.floor(k / 6) * 300 }, rotation: 0 } });
+    const doc = apply(gridDoc(15, 100, 'road-4'), cmds);
+    doc.meta.trafficDensity = 3;
+    // probe: also times one extra pre-emption pass after every step (that run's own timings are not reported).
+    const measure = (preempt: boolean, probe = false) => {
+      const sim = new Simulation(doc, { maxVehicles: 3000, scenario: true });
+      sim.setPolicy({ reroute: false, informedShare: 0.7, preempt });
+      for (let i = 0; i < 2000 && sim.stats().vehicles < 2950; i++) sim.step();
+      const t = sim.stats().tick;
+      for (let k = 0; k < 24; k++) {
+        const kind = k % 2 === 0 ? 'fire.start' : 'medical.start';
+        expect(sim.scenarioInput({ eventId: `e${k}`, tick: t, order: 0, kind, target: { buildingId: `b${k}` }, params: kind === 'fire.start' ? { burnTicks: 100000 } : {} }).ok).toBe(true);
+      }
+      const w = internals(sim);
+      const times: number[] = [];
+      let out = 0;
+      let ctl = 0;
+      let pass = 0;
+      for (let i = 0; i < 400; i++) {
+        const t0 = performance.now();
+        sim.step();
+        times.push(performance.now() - t0);
+        if (probe) {
+          const t1 = performance.now();
+          updatePreemption(w);
+          pass += (performance.now() - t1) / 400;
+        }
+        out += w.sc!.missions.filter((m) => m.v !== null).length / 400;
+        ctl += w.sc!.ctl.size / 400;
+      }
+      times.sort((a, b) => a - b);
+      return { mean: times.reduce((a, b) => a + b, 0) / times.length, p95: times[Math.floor(times.length * 0.95)]!, out, ctl, pass, vehicles: sim.stats().vehicles };
+    };
+    const off = measure(false);
+    const on = measure(true);
+    const pass = measure(true, true).pass;
+    console.log(
+      `[sim bench emergency] vehicles=${on.vehicles} emergency vehicles on the road (mean)=${on.out.toFixed(1)} driven junctions (mean)=${on.ctl.toFixed(1)} ` +
+        `step ON mean=${on.mean.toFixed(2)}ms p95=${on.p95.toFixed(2)}ms | OFF mean=${off.mean.toFixed(2)}ms p95=${off.p95.toFixed(2)}ms | pre-emption pass mean=${(pass * 1000).toFixed(1)}µs`,
+    );
+    expect(on.out).toBeGreaterThan(5);
+    expect(on.ctl).toBeGreaterThan(1);
+  }, 300_000);
 
   it('~3000 vehicles and ~5000 outdoor pedestrians: reports step mean / p95 (not a pass/fail target)', () => {
     const doc = gridDoc(15, 100, 'road-4');

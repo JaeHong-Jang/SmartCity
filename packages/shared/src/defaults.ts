@@ -1,5 +1,6 @@
 // Built-in presets every new city starts with. Users can edit or add their own through commands.
 
+import { FACILITY_PRESETS } from './facilityPresets.js';
 import { GROWTH_PRESETS } from './growthPresets.js';
 import { cloneJson, DOC_VERSION, type BuildingPart, type BuildingType, type CityDoc, type Facade, type RoadType, type SmartFeatures, type VehiclePart, type VehicleType } from './model.js';
 
@@ -215,7 +216,7 @@ export function createEmptyDoc(name = '새 도시', seed = 1): CityDoc {
     nodes: {},
     segments: {},
     roadTypes: byId(DEFAULT_ROAD_TYPES),
-    buildingTypes: byId(withRev([...DEFAULT_BUILDING_TYPES, ...SMART_CITY_PRESETS, ...GROWTH_PRESETS])),
+    buildingTypes: byId(withRev([...DEFAULT_BUILDING_TYPES, ...SMART_CITY_PRESETS, ...GROWTH_PRESETS, ...FACILITY_PRESETS])),
     buildings: {},
     vehicleTypes: byId(DEFAULT_VEHICLE_TYPES),
     intersections: {},

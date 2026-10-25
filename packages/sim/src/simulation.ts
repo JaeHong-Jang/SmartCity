@@ -22,7 +22,9 @@ import { buildPedGraph, type PedGraph } from './network/pedGraph.js';
 import { buildNet, writePose } from './network/net.js';
 import { Router } from './network/route.js';
 import { applyDueInputs, ensureScenario, queuePolicy, queueScenarioInput, relocateObstacles } from './scenario/apply.js';
+import { emergencyArrived, fireProgress, processEmergency, recheckIncidents } from './scenario/emergency.js';
 import { inactiveKpi, scenarioKpi } from './scenario/kpi.js';
+import { controlledJunctions, rebindSignalControl, updatePreemption, writeSignalControl } from './scenario/preempt.js';
 import { processReroutes } from './scenario/reroute.js';
 import { scenarioHolds } from './scenario/state.js';
 import { processSurge } from './scenario/surge.js';
@@ -176,6 +178,8 @@ export class Simulation {
     this.flush();
     if (w.sc !== null) applyDueInputs(w);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
+    // Signal control state machine (ADR 0010 §4): only while emergency vehicles are out or a junction is driven.
+    if (w.sc !== null && (w.sc.missions.length > 0 || w.sc.ctl.size > 0 || w.sc.clearing.size > 0)) updatePreemption(w);
     processCitizenEvents(w);
     if (w.demandOn) generateTrips(w);
     maintainBuses(w);
@@ -183,6 +187,7 @@ export class Simulation {
     if (w.sc !== null) {
       processReroutes(w);
       processSurge(w);
+      if (w.sc.incidents.length > 0 || w.sc.missions.length > 0) processEmergency(w);
     }
     processPedQueue(w);
     updateGates(w);
@@ -373,9 +378,27 @@ export class Simulation {
       const s = sc.surges.get(id)!;
       activeEvents.push({ eventId: id, kind: 'surge', startTick: s.startTick, endTick: s.endTick });
     }
+    for (const inc of sc.incidents) activeEvents.push({ eventId: inc.eventId, kind: inc.kind, startTick: inc.startTick, endTick: null });
     activeEvents.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
     const recentLog = sc.log.slice(-RECENT_LOG_SIZE).map((e) => ({ eventId: e.eventId, tick: e.tick, kind: e.kind, applied: e.applied, ...(e.note !== undefined ? { reason: e.note } : {}) }));
-    return { graphRevision: w.graphRevision, obstacles, closedLanes: sc.closedLanes.slice(), kpi: scenarioKpi(w), activeEvents, recentLog };
+    const byEvent = <T extends { eventId: string }>(list: T[]): T[] => list.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
+    const incidents = byEvent(sc.incidents.map((inc) => ({ eventId: inc.eventId, kind: inc.kind, buildingId: inc.buildingId, state: inc.state, progress: inc.kind === 'fire' ? fireProgress(inc, w.tick) : 0 })));
+    const dispatches = byEvent(
+      sc.missions.map((m) => ({ eventId: m.incident.eventId, kind: m.incident.kind, vehicleId: m.v !== null ? m.v.id : null, stage: m.stage, facilityId: m.facilityId, buildingId: m.incident.buildingId })),
+    );
+    const preempted = controlledJunctions(w);
+    return {
+      graphRevision: w.graphRevision,
+      obstacles,
+      closedLanes: sc.closedLanes.slice(),
+      kpi: scenarioKpi(w),
+      activeEvents,
+      recentLog,
+      incidents,
+      damagedBuildings: sc.damaged.slice(),
+      dispatches,
+      preempted,
+    };
   }
 
   private flush(): void {
@@ -466,11 +489,16 @@ export class Simulation {
       }
     }
     w.signals = buildSignals(w.doc, w.net, w.zones, w.tickRate);
+    w.signals.builtAt = w.tick;
+    if (w.sc !== null) rebindSignalControl(w);
     w.laneGreen.fill(1);
     w.zs.pedSig.fill(PedSignal.none);
     w.zs.midColor.fill(2);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
+    if (w.sc !== null && (w.sc.ctl.size > 0 || w.sc.clearing.size > 0)) writeSignalControl(w);
     w.demand = buildDemand(w.doc, w.net);
+    // Incidents whose building, and dispatches whose facility, an edit removed (ADR 0010 §3).
+    if (w.sc !== null && (w.sc.incidents.length > 0 || w.sc.missions.length > 0)) recheckIncidents(w);
     syncBusLines(w);
     syncTransit(w);
     clearTransitCaches(w);
@@ -531,7 +559,8 @@ export class Simulation {
         v.person = -1;
         despawn(w, v);
         w.arrived++;
-        if (w.sc !== null) {
+        if (v.em !== null) emergencyArrived(w, v);
+        else if (w.sc !== null) {
           w.sc.completed++;
           w.sc.ttTicks += w.tick + 1 - v.t0;
         }

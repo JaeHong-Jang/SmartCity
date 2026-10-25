@@ -11,7 +11,7 @@ import { SwitchableStream } from './switchableStream';
 import { WARMUP_TICKS } from './time';
 
 const kpi = (tick: number): ScenarioKpi => ({
-  tick, since: 0, completed: tick / 100, avgTravelTime: 30, inProgress: 2, noRoute: 0, droppedTrips: 0, waitingToDepart: 0, removed: 0, congestionLength: 0, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0,
+  tick, since: 0, completed: tick / 100, avgTravelTime: 30, inProgress: 2, noRoute: 0, droppedTrips: 0, waitingToDepart: 0, removed: 0, congestionLength: 0, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0, avgResponseTime: 0, maxResponseTime: 0, responses: 0, extinguished: 0, damaged: 0, medicalCompleted: 0, dispatchFailed: 0, respondingNow: 0, respondingElapsedSum: 0, oldestPendingMinutes: 0,
 });
 
 class FakeStream implements CopyStream {
@@ -546,5 +546,23 @@ describe('SimModeController', () => {
     expect(e.store.getState().error).toBeNull();
     e.streams()[1]!.done(WARMUP_TICKS);
     expect(e.c.placeClosure('s1', DEFAULT_ARMED.closure)).toBe(true);
+  });
+
+  it('fire and medical calls: start inputs on a building, ended by their own event id', () => {
+    const e = setup();
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    expect(e.c.placeEmergency('fire', 'b1')).toBe(true);
+    expect(e.c.placeEmergency('medical', 'b2')).toBe(true);
+    expect(copy.sent.map((i) => [i.kind, i.target.buildingId])).toEqual([['fire.start', 'b1'], ['medical.start', 'b2']]);
+    const [f, m] = e.store.getState().events as [EventRow, EventRow];
+    expect([f.kind, m.kind]).toEqual(['fire', 'medical']);
+    copy.active = [f, m].map((r) => ({ eventId: r.eventId, kind: r.kind, startTick: r.startTick, endTick: null }));
+    copy.emit(m.startTick + 1);
+    expect(e.c.endEvent(f.eventId)).toBe(true);
+    expect(copy.sent.at(-1)).toMatchObject({ kind: 'fire.end', target: { buildingId: 'b1', eventId: f.eventId } });
+    expect(e.c.endEvent(m.eventId)).toBe(true);
+    expect(copy.sent.at(-1)).toMatchObject({ kind: 'medical.end', target: { buildingId: 'b2', eventId: m.eventId } });
   });
 });

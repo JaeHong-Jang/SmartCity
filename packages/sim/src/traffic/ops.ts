@@ -92,6 +92,7 @@ export function createVehicle(w: World, typeId: string, lane: number, s: number,
     scWait: 0,
     scQueued: false,
     scRerouted: false,
+    em: null,
   };
   w.vehicles.push(v);
   insertOnEdge(w.onEdge[lane]!, v);

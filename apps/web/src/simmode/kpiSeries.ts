@@ -60,9 +60,19 @@ export function alignKpiSeries(on: readonly ScenarioKpi[], off: readonly Scenari
   return rows;
 }
 
+/**
+ * Mean response time counting vehicles that have not arrived yet by their elapsed time (a lower bound for
+ * them): (Σ arrived + Σ elapsed) / (arrived + still responding). Arrived-only averages hide slow responses
+ * (survivorship bias). `k` is rebased, so the arrived sum is avg × responses since the base. 0 when none.
+ */
+export function inclusiveResponseTime(k: ScenarioKpi): number {
+  const n = k.responses + k.respondingNow;
+  return n > 0 ? (k.avgResponseTime * k.responses + k.respondingElapsedSum) / n : 0;
+}
+
 /** Metrics drawn as charts, with a getter from a KPI point. */
 export interface KpiMetric {
-  id: 'completed' | 'avgTravelTime' | 'congestionLength' | 'stuck' | 'rerouted';
+  id: 'completed' | 'avgTravelTime' | 'congestionLength' | 'stuck' | 'rerouted' | 'avgResponseTime';
   label: string;
   unit: string;
   get(k: ScenarioKpi): number;
@@ -74,6 +84,9 @@ export const KPI_METRICS: KpiMetric[] = [
   { id: 'congestionLength', label: '정체 길이', unit: 'm', get: (k) => k.congestionLength },
   { id: 'stuck', label: '경로 없음 + 출발 대기', unit: '대', get: (k) => k.noRoute + k.waitingToDepart },
   { id: 'rerouted', label: '재탐색 수', unit: '대', get: (k) => k.rerouted },
+  // Game minutes, call → arrival; vehicles still on their way count with their elapsed time (a lower bound).
+  // 0 while there is no response at all (flat zero line).
+  { id: 'avgResponseTime', label: '평균 대응 시간 (미도착 포함)', unit: '게임 분', get: inclusiveResponseTime },
 ];
 
 /**
@@ -86,6 +99,7 @@ export const KPI_METRICS: KpiMetric[] = [
 export function sinceBase(k: ScenarioKpi, base: ScenarioKpi): ScenarioKpi {
   const n = k.completed - base.completed;
   const sum = k.avgTravelTime * k.completed - base.avgTravelTime * base.completed;
+  const responses = k.responses - base.responses;
   return {
     ...k,
     completed: n,
@@ -95,6 +109,13 @@ export function sinceBase(k: ScenarioKpi, base: ScenarioKpi): ScenarioKpi {
     rerouted: k.rerouted - base.rerouted,
     detoured: k.detoured - base.detoured,
     recovered: k.recovered - base.recovered,
+    // Emergency counters; the mean response time is rebuilt from sums like the travel time (sum = avg × responses).
+    responses: k.responses - base.responses,
+    avgResponseTime: responses > 0 ? (k.avgResponseTime * k.responses - base.avgResponseTime * base.responses) / responses : 0,
+    extinguished: k.extinguished - base.extinguished,
+    damaged: k.damaged - base.damaged,
+    medicalCompleted: k.medicalCompleted - base.medicalCompleted,
+    dispatchFailed: k.dispatchFailed - base.dispatchFailed,
   };
 }
 

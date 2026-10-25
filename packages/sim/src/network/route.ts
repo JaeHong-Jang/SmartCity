@@ -13,6 +13,8 @@ export interface RouteResult {
   path: number[];
   /** Goal lane reached (last element of path) and the destination position on it. */
   destS: number;
+  /** Route cost (s) from the start position to the destination, with the costs this search used. */
+  cost: number;
 }
 
 const HEURISTIC_SPEED = 40;
@@ -128,7 +130,7 @@ export class Router {
       this.goalS[gl.lane] = gl.destS;
     }
     if (start < net.nLanes && this.goalMark[start] === stamp && s <= this.goalS[start]! + 1e-6) {
-      return { path: [start], destS: this.goalS[start]! };
+      return { path: [start], destS: this.goalS[start]!, cost: (this.goalS[start]! - s) / net.speed[start]! };
     }
     const g0 = goals[0]!;
     const destPts = net.pts[g0.lane]!;
@@ -153,7 +155,7 @@ export class Router {
         }
         path.push(start);
         path.reverse();
-        return { path, destS: this.goalS[e]! };
+        return { path, destS: this.goalS[e]!, cost: this.g[e]! };
       }
       const ge = this.g[e]!;
       for (const n of net.next[e]!) this.relax(n, ge, e, stamp, bus, stopped, destP.x, destP.z);

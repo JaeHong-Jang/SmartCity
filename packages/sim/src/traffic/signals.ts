@@ -58,9 +58,19 @@ export interface SignalPlan {
   peds: PedHead[];
   /** A pedestrian-only phase (the last one) is part of the cycle. */
   scramble: boolean;
+  /** Per phase: ticks of its green interval (the pedestrian-only phase: its all-red interval). */
+  greenTicks: number[];
+  yellowTicks: number;
+  allRedTicks: number;
   /** Current state, updated by updateSignals. */
   cur: number;
   remaining: number;
+  /**
+   * Shown state while the scenario signal controller drives this junction (ADR 0010 §4, scenario/preempt.ts);
+   * null = the fixed-time plan above. Written by the controller every tick, cleared when it hands back.
+   * `segs` = the approaches the color applies to (every other head is red); `phase` −1 = an edit-time clearance.
+   */
+  ctl: { phase: number; color: 'green' | 'yellow' | 'allRed'; remaining: number; segs: readonly string[] } | null;
 }
 
 /** Signalized mid-block crossing: fixed cycle green → yellow → red (WALK, CLEARANCE). */
@@ -79,6 +89,8 @@ export interface MidSignal {
 export interface SignalSet {
   plans: SignalPlan[];
   mids: MidSignal[];
+  /** Tick the plans were (re)built at: what they show is on display since then at the earliest. */
+  builtAt?: number;
 }
 
 /** Approaches of a node = segments with lanes entering it, with their outward angle. */
@@ -189,6 +201,7 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
     }
     const intervals: Interval[] = [];
     const phaseStart: number[] = [];
+    const greenTicks: number[] = [];
     let t = 0;
     phases.forEach((ph, i) => {
       let green = ph.green;
@@ -203,6 +216,7 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
               ['yellow', ticks(yellow)],
               ['allRed', ticks(allRed)],
             ];
+      greenTicks.push(parts[0]![1]);
       for (const [color, d] of parts) {
         if (d <= 0) continue;
         intervals.push({ phase: i, color, start: t, end: t + d });
@@ -219,7 +233,24 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
         heads.push({ lane: l, x: end.x, z: end.z, heading: Math.atan2(end.z - prev.z, end.x - prev.x) });
         headSeg.push(ap.seg);
       }
-    plans.push({ nodeId, phases, intervals, cycle: t, offset: ticks(ctrl?.offset ?? 0), heads, headSeg, phaseStart, peds, scramble, cur: 0, remaining: 0 });
+    plans.push({
+      nodeId,
+      phases,
+      intervals,
+      cycle: t,
+      offset: ticks(ctrl?.offset ?? 0),
+      heads,
+      headSeg,
+      phaseStart,
+      peds,
+      scramble,
+      greenTicks,
+      yellowTicks: ticks(yellow),
+      allRedTicks: ticks(allRed),
+      cur: 0,
+      remaining: 0,
+      ctl: null,
+    });
   }
   const mids: MidSignal[] = [];
   for (const cr of g.crossings) {
@@ -275,19 +306,20 @@ export function updateSignals(set: SignalSet, tick: number, laneGreen: Uint8Arra
 
 /** Color shown to an approach: its phase's color while that phase runs, red otherwise. */
 export function headColor(p: SignalPlan, h: number): SignalColor {
+  if (p.ctl) return p.ctl.color !== 'allRed' && p.ctl.segs.includes(p.headSeg[h]!) ? p.ctl.color : 'red';
   const iv = p.intervals[p.cur]!;
   if (iv.color === 'allRed') return 'red';
   return p.phases[iv.phase]!.approaches.includes(p.headSeg[h]!) ? iv.color : 'red';
 }
 
 export function signalView(p: SignalPlan, tickRate: number): SignalView {
-  const iv = p.intervals[p.cur]!;
+  const iv = p.ctl ?? p.intervals[p.cur]!;
   return {
     nodeId: p.nodeId,
     phaseIndex: iv.phase,
     color: iv.color === 'allRed' ? 'red' : iv.color,
-    remaining: p.remaining / tickRate,
-    greenApproaches: iv.color === 'green' ? p.phases[iv.phase]!.approaches.slice() : [],
+    remaining: (p.ctl ? p.ctl.remaining : p.remaining) / tickRate,
+    greenApproaches: iv.color !== 'green' ? [] : p.ctl ? p.ctl.segs.slice() : p.phases[iv.phase]!.approaches.slice(),
     cycle: p.cycle / tickRate,
     scramble: p.scramble,
   };

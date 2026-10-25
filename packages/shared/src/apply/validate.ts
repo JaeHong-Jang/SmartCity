@@ -1,6 +1,6 @@
 // Validators and sanitisers for the apply module: every check throws through fail().
 
-import { PROP_KINDS } from '../model.js';
+import { FACILITY_SERVICES, PROP_KINDS } from '../model.js';
 import {
   bounds,
   boundsOverlap,
@@ -127,6 +127,7 @@ export function validateBuildingType(bt: BuildingType): void {
   if (!ZONES.includes(bt.zone)) fail('invalid zone');
   if (bt.growth !== undefined && bt.growth?.level !== 1) fail('invalid growth level');
   if (bt.origin !== undefined && bt.origin !== 'ai') fail('invalid origin');
+  if (bt.service !== undefined && !(FACILITY_SERVICES as readonly string[]).includes(bt.service)) fail('invalid service');
   if (!Array.isArray(bt.parts) || bt.parts.length < 1 || bt.parts.length > LIMITS.buildingParts) fail('invalid building parts');
   for (const p of bt.parts) {
     checkNum(p.offset?.x, -200, 200, 'part.offset.x');

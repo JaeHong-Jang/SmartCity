@@ -6,7 +6,8 @@ import { compileNetwork, DEFAULT_POLICY, type ResponsePolicy, type RoadGraph, ty
 import type { WorkerSpeed } from '../sim/protocol';
 import type { FastForwardControl, ScenarioReply, ScenarioControl, SimulationStream } from '../sim/simStream';
 import { applyOutcomes, reconcileEvents, type EventOutcome, type PendingEnd } from './eventState';
-import { accidentPlace, closurePlace, surgePlace } from './label';
+import { countFacilities } from './facilities';
+import { accidentPlace, closurePlace, emergencyPlace, surgePlace } from './label';
 import { KPI_EVERY, KpiCollector } from './kpiSeries';
 import { transition, type SimAction } from './machine';
 import { accidentParams, closureParams, eventEndTick, ScenarioRecorder, surgeParams } from './record';
@@ -185,6 +186,7 @@ export class SimModeController {
       compare: null,
       error: null,
       fatal: false,
+      facilities: countFacilities(doc),
     });
 
     const copy = this.spawn();
@@ -379,7 +381,16 @@ export class SimModeController {
     return true;
   }
 
-  /** End a closure or accident now (surges have no end input). */
+  placeEmergency(kind: 'fire' | 'medical', buildingId: string): boolean {
+    if (!this.ready()) return false;
+    const tick = this.tickNow() + EVENT_LEAD_TICKS;
+    const input = this.recorder!.make(kind === 'fire' ? 'fire.start' : 'medical.start', tick, { buildingId }, {});
+    this.row({ eventId: input.eventId, kind, ...emergencyPlace(this.copyDoc!, buildingId, kind), startTick: tick, endTick: null, buildingId });
+    this.send(input);
+    return true;
+  }
+
+  /** End a closure, accident, fire or medical call now (surges have no end input). */
   endEvent(eventId: string): boolean {
     if (!this.ready()) return false;
     const row = this.store.getState().events.find((e) => e.eventId === eventId);
@@ -389,8 +400,9 @@ export class SimModeController {
     for (const pending of this.endOf.values()) if (pending.rowId === row.eventId) return false; // end already in flight
     const tick = this.tickNow() + EVENT_LEAD_TICKS;
     // `eventId` makes the sim end exactly this event.
-    const target: ScenarioTarget = kind === 'closure' ? { segmentId: row.segmentId, eventId: row.eventId } : { segmentId: row.segmentId, lane: row.lane, eventId: row.eventId };
-    const input = this.recorder!.make(kind === 'closure' ? 'closure.end' : 'accident.end', tick, target);
+    const target: ScenarioTarget =
+      kind === 'closure' ? { segmentId: row.segmentId, eventId: row.eventId } : kind === 'accident' ? { segmentId: row.segmentId, lane: row.lane, eventId: row.eventId } : { buildingId: row.buildingId, eventId: row.eventId };
+    const input = this.recorder!.make(`${kind}.end` as 'closure.end', tick, target);
     this.endOf.set(input.eventId, { rowId: row.eventId, tick });
     this.send(input);
     return true;

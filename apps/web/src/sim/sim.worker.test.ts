@@ -315,6 +315,52 @@ describe('sim.worker outcome stream', () => {
   });
 });
 
+describe('sim.worker emergency outcomes (4c2-①)', () => {
+  it('dispatch and fire outcomes arrive in the outcome stream before the snapshot; the overlay lists the incident and vehicle', async () => {
+    const doc = grid(3, 150);
+    expect(
+      applyCommand(doc, {
+        type: 'batch',
+        commands: [
+          { type: 'building.place', building: { id: 'fs', typeId: 'svc-fire-station', pos: { x: 75, z: 75 }, rotation: 0 } },
+          { type: 'building.place', building: { id: 'home', typeId: 'house', pos: { x: 225, z: 230 }, rotation: 0 } },
+          { type: 'building.place', building: { id: 'lone', typeId: 'house', pos: { x: 230, z: 75 }, rotation: 0 } },
+        ],
+      }).ok,
+    ).toBe(true);
+    send({ t: 'init', doc, scenario: true });
+    send({ t: 'setSpeed', speed: 0 });
+    send({ t: 'policy', policy: { reroute: true, informedShare: 0.7, preempt: false } });
+    expect(out.find((m) => m.t === 'policy')).toMatchObject({ result: { ok: true }, input: { params: { reroute: 1, preempt: 0 } } });
+    send({
+      t: 'scenario',
+      inputs: [
+        { eventId: 'f', tick: 10, order: 0, kind: 'fire.start', target: { buildingId: 'home' }, params: { burnTicks: 30000 } },
+        { eventId: 'm', tick: 12, order: 0, kind: 'medical.start', target: { buildingId: 'lone' }, params: {} },
+        { eventId: 'x', tick: 12, order: 0, kind: 'medical.start', target: { buildingId: 'home' }, params: { burnTicks: 5 } },
+      ],
+    });
+    const reply = out.find((m): m is Extract<FromWorker, { t: 'scenario' }> => m.t === 'scenario')!;
+    expect(reply.results.map((r) => r.ok)).toEqual([true, true, false]);
+    out = [];
+    send({ t: 'runTo', tick: 2000 });
+    await finishRun();
+    const kinds = out.filter((m): m is Extract<FromWorker, { t: 'outcomes' }> => m.t === 'outcomes').flatMap((m) => m.outcomes.map((o) => `${o.eventId}:${o.kind}`));
+    expect(kinds).toContain('f:dispatch.start');
+    expect(kinds).toContain('f:dispatch.arrive');
+    // No hospital in this city: the call runs, the dispatch fails.
+    expect(kinds).toContain('m:dispatch.failed');
+    expect(out.map((m) => m.t).lastIndexOf('outcomes')).toBeLessThan(out.map((m) => m.t).lastIndexOf('snapshot'));
+    const snap = out.filter((m): m is Extract<FromWorker, { t: 'snapshot' }> => m.t === 'snapshot').pop()!.snapshot;
+    expect(snap.scenario!.incidents.map((i) => [i.eventId, i.kind])).toEqual([
+      ['f', 'fire'],
+      ['m', 'medical'],
+    ]);
+    expect(snap.scenario!.kpi.dispatchFailed).toBe(1);
+    expect(structuredClone(snap.scenario)).toEqual(snap.scenario);
+  });
+});
+
 describe('sim.worker simulator mode', () => {
   it('answers malformed scenario messages with errors and keeps running', () => {
     send({ t: 'init', doc: grid(3, 150) });

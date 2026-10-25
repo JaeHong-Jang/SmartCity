@@ -4,6 +4,7 @@
 
 import type { World } from '../traffic/world.js';
 import { closureLanes, compose, logOutcome, newScenarioState, type AccidentEffect, type ClosureEffect, type Effect } from './state.js';
+import { endIncident, startIncident } from './emergency.js';
 import { enqueueAffected } from './reroute.js';
 import { generateSurge } from './surge.js';
 import { SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS, type ResponsePolicy, type ScenarioInput, type ScenarioInputKind, type ScenarioResult } from './types.js';
@@ -14,7 +15,8 @@ export const ACCIDENT_LENGTH = 9;
 const PLACE_MARGIN = 0.5;
 const MAX_SURGE_TRIPS = 5000;
 
-const KINDS = new Set<ScenarioInputKind>(['closure.start', 'closure.end', 'accident.start', 'accident.end', 'surge.start', 'policy.set']);
+const KINDS = new Set<ScenarioInputKind>(['closure.start', 'closure.end', 'accident.start', 'accident.end', 'surge.start', 'fire.start', 'fire.end', 'medical.start', 'medical.end', 'policy.set']);
+const END_KINDS = new Set<ScenarioInputKind>(['closure.end', 'accident.end', 'fire.end', 'medical.end']);
 
 export function ensureScenario(w: World): NonNullable<World['sc']> {
   w.sc ??= newScenarioState(w);
@@ -63,7 +65,8 @@ function validate(w: World, input: ScenarioInput): string | null {
   if (t.s !== undefined && !(typeof t.s === 'number' && Number.isFinite(t.s) && t.s >= 0)) return 'target.s는 0 이상의 유한한 수여야 합니다';
   for (const k of Object.keys(p)) if (typeof p[k] !== 'number' || !Number.isFinite(p[k]!)) return `params.${k}는 유한한 수여야 합니다`;
   if (p.durationTicks !== undefined && (!isTick(p.durationTicks) || p.durationTicks < 1)) return 'durationTicks는 1 이상의 정수여야 합니다';
-  if (t.eventId !== undefined && input.kind !== 'closure.end' && input.kind !== 'accident.end') return 'target.eventId는 *.end 입력에만 씁니다';
+  if (t.eventId !== undefined && !END_KINDS.has(input.kind)) return 'target.eventId는 *.end 입력에만 씁니다';
+  for (const k of ['burnTicks', 'suppressTicks', 'treatTicks'] as const) if (p[k] !== undefined && (!isTick(p[k]) || p[k] < 1)) return `${k}는 1 이상의 정수여야 합니다`;
   switch (input.kind) {
     case 'closure.start':
       return laneError(w, t.segmentId, t.lane, false);
@@ -86,9 +89,18 @@ function validate(w: World, input: ScenarioInput): string | null {
       for (const k of ['inflowTicks', 'stayTicks', 'outflowTicks'] as const) if (p[k] !== undefined && !isTick(p[k])) return `${k}는 0 이상의 정수여야 합니다`;
       return null;
     }
+    case 'fire.start':
+    case 'medical.start':
+      // Facilities and routes are looked up when the call applies: none → the incident runs, `dispatch.failed`.
+      return typeof t.buildingId === 'string' && w.doc.buildings[t.buildingId] ? null : `없는 건물 ${String(t.buildingId)}`;
+    case 'fire.end':
+    case 'medical.end':
+      if (t.eventId !== undefined) return t.eventId.length > 0 ? null : 'target.eventId는 문자열이어야 합니다';
+      return typeof t.buildingId === 'string' && w.doc.buildings[t.buildingId] ? null : `없는 건물 ${String(t.buildingId)}`;
     case 'policy.set':
       if (p.reroute !== 0 && p.reroute !== 1) return 'reroute는 0 또는 1이어야 합니다';
       if (!(p.informedShare! >= 0 && p.informedShare! <= 1)) return 'informedShare는 0..1이어야 합니다';
+      if (p.preempt !== undefined && p.preempt !== 0 && p.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
       return null;
   }
   return null;
@@ -125,7 +137,7 @@ export function queuePolicy(w: World, policy: ResponsePolicy): ScenarioInput {
     order: Number.MIN_SAFE_INTEGER + k,
     kind: 'policy.set',
     target: {},
-    params: { reroute: policy.reroute ? 1 : 0, informedShare: policy.informedShare },
+    params: { reroute: policy.reroute ? 1 : 0, informedShare: policy.informedShare, ...(policy.preempt !== undefined ? { preempt: policy.preempt ? 1 : 0 } : {}) },
   };
   const r = queueScenarioInput(w, input);
   if (!r.ok) throw new RangeError(r.error);
@@ -303,9 +315,28 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
       log(w, input, n > 0, n > 0 ? `${n} trips` : 'no origin');
       return;
     }
+    case 'fire.start':
+    case 'medical.start': {
+      const id = t.buildingId!;
+      if (!w.doc.buildings[id]) return log(w, input, false, 'target gone');
+      if (input.kind === 'fire.start') {
+        if (sc.damaged.includes(id)) return log(w, input, false, 'building damaged');
+        if (sc.incidents.some((x) => x.kind === 'fire' && x.buildingId === id)) return log(w, input, false, 'fire already active');
+      }
+      log(w, input, true);
+      startIncident(w, input);
+      return;
+    }
+    case 'fire.end':
+    case 'medical.end': {
+      const why = endIncident(w, input);
+      if (why !== null) return log(w, input, false, why);
+      log(w, input, true);
+      return;
+    }
     case 'policy.set':
-      // Applies to events from now on (no retroactive re-route).
-      sc.policy = { reroute: p.reroute === 1, informedShare: p.informedShare! };
+      // Applies to events from now on (no retroactive re-route); pre-emption follows at once (requests are per tick).
+      sc.policy = { reroute: p.reroute === 1, informedShare: p.informedShare!, ...(p.preempt !== undefined ? { preempt: p.preempt === 1 } : {}) };
       log(w, input, true);
       return;
   }
