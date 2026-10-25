@@ -31,6 +31,8 @@ export interface PreviewBuilding {
   rotation: number;
   /** Ghost tint: green/blue = ok, orange = regulation warning, red = blocked. */
   color: string;
+  /** Changes when the pose was confirmed (click): the eased ghost jumps to the target at once. */
+  settle?: number;
 }
 
 export interface ToolPreview {
@@ -64,6 +66,8 @@ export interface Tool {
   onPointerUp(e: ToolPointer): void;
   /** Pointer left the viewport: drop hover-only state (not an in-progress drawing). */
   onLeave?(): void;
+  /** Window lost focus: key-ups were missed, drop held-key state. */
+  onBlur?(): void;
   /** Right click without drag: return true when handled (otherwise the tool is cancelled). */
   onSecondaryClick?(): boolean;
   /** Return true when the key was handled. */

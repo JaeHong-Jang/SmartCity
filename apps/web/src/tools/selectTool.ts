@@ -21,8 +21,9 @@ import {
 import { closedRing } from '../app/ring';
 import { translateError, type Selection } from '../app/store';
 import { removeCommandFor } from './bulldozeTool';
-import { GHOST_ID, placeAt, placementGuide, placementStatus, STATUS_COLORS, type Placement, type PlacementStatus } from './buildingTool';
+import { GHOST_ID, placementGuide, placementStatus, STATUS_COLORS, type Placement, type PlacementStatus } from './buildingTool';
 import { DragGesture } from './gesture';
+import { PlacementSolver } from './placement';
 import { buildingGizmo, highlightPreview } from './highlight';
 import { RemovalPreview, removalLines } from './removalPreview';
 import { pickAt, type PickIndex, type PickResult } from './picking';
@@ -38,7 +39,7 @@ type DownHit = PickResult | { kind: 'vertex'; id: string; index: number };
 
 type Drag =
   | { kind: 'pan' }
-  | { kind: 'building'; id: string; type: BuildingType; copy: boolean; offset: Vec2; rotation: number; placement: Placement; status: PlacementStatus }
+  | { kind: 'building'; id: string; type: BuildingType; copy: boolean; offset: Vec2; rotation: number; placement: Placement; status: PlacementStatus; solver: PlacementSolver }
   | { kind: 'node'; id: string; offset: Vec2; pos: Vec2; curves: Vec2[][]; error: string | null }
   | { kind: 'vertex'; id: string; index: number; polygon: Vec2[]; error: string | null };
 
@@ -152,7 +153,7 @@ export class SelectTool implements Tool {
       if (type) {
         const copy = this.downAlt;
         const placement: Placement = { pos: b.pos, rotation: b.rotation, segmentId: null };
-        this.drag = { kind: 'building', id: b.id, type, copy, offset: sub(b.pos, this.downPos), rotation: b.rotation, placement, status: 'ok' };
+        this.drag = { kind: 'building', id: b.id, type, copy, offset: sub(b.pos, this.downPos), rotation: b.rotation, placement, status: 'ok', solver: new PlacementSolver() };
         if (!copy) this.select({ kind: 'building', id: b.id });
         return;
       }
@@ -206,11 +207,11 @@ export class SelectTool implements Tool {
         this.ctx.pan.move(e.client.x, e.client.y);
         return;
       case 'building': {
-        d.placement = placeAt(doc, this.index(), d.type, add(e.pos, d.offset), d.rotation, this.step, e.shift);
+        d.placement = d.solver.solve(doc, this.index(), d.type, add(e.pos, d.offset), { rotation: d.rotation, step: this.step, free: e.shift, excludeId: d.copy ? undefined : d.id });
         d.status = placementStatus(doc, d.type, d.placement, d.copy ? GHOST_ID : d.id);
         const what = d.copy ? '복제' : '이동';
         const state = d.status === 'block' ? ' · 도로와 겹치거나 영역 밖 (놓을 수 없음)' : d.status === 'warn' ? ' · 필지 규제 위반 (경고)' : '';
-        this.ctx.store.set({ toolHint: `건물 ${what}: ${d.placement.segmentId ? '도로에 맞춰 정렬됨' : '자유 배치'}${state}   [Shift 자유 배치 · [ ] 회전 · Esc 취소]` });
+        this.ctx.store.set({ toolHint: `건물 ${what}: ${d.placement.segmentId ? `도로에 맞춰 정렬됨${d.solver.selector.locked ? ' (잠금)' : ''}` : '자유 배치'}${state}   [Shift 자유 배치 · [ ] 회전 · L 도로 잠금 · Esc 취소]` });
         break;
       }
       case 'node': {
@@ -344,6 +345,13 @@ export class SelectTool implements Tool {
       return this.rotateBy((e.code === 'BracketLeft' ? -1 : 1) * (e.altKey ? 1 : 15) * DEG);
     }
     if (e.type !== 'keydown') return false;
+    if (e.code === 'KeyL' && this.drag?.kind === 'building') {
+      if (!e.repeat) {
+        const locked = this.drag.solver.selector.toggleLock();
+        this.ctx.store.toast(locked ? '도로 잠금: 이 도로에 계속 맞춥니다 (L로 해제)' : '도로 잠금 해제', 'info', 'road-lock');
+      }
+      return true;
+    }
     if (e.key === 'Escape') {
       if (this.gesture.phase !== 'idle' || this.rot) {
         this.cancelDrag();

@@ -1,78 +1,53 @@
 // Building placement: ghost of the selected type that snaps to the nearest road (front faces the
-// road, just outside the sidewalk). Shift = free placement, , / . rotate 15°. Red = blocks a road,
-// orange = breaks the destination parcel's regulations (allowed, warning only).
+// road, just outside the sidewalk; curved roads use the arc-length secant). Shift = free placement,
+// , / . rotate 15°, hold T + move = continuous rotation (Shift = no 15° snap; a quick tap = +15°),
+// L = lock / unlock the road. Red = blocks a road, orange = breaks the destination parcel's
+// regulations (allowed, warning only). The target pose drives collision, colour and the command;
+// the 3D ghost only chases it with a render-side spring (render/ghostBuilding.ts).
 
 import {
-  add,
   buildingBlocksRoad,
   buildingFootprints,
-  cumulativeLengths,
-  dot,
   parcelCompliance,
   partOutline,
-  pointAtLength,
   pointInPolygon,
-  rightNormal,
-  roadHalfWidth,
-  scale,
-  sub,
-  tangentAtLength,
   type BuildingType,
   type CityDoc,
   type Vec2,
 } from '@smartcity/shared';
 import { closedRing } from '../app/ring';
 import type { SnapStep } from '../app/store';
-import { guideGridLines, type RoadFrame } from './guideGrid';
+import { guideGridLines } from './guideGrid';
+import {
+  ALIGN_RADIUS,
+  alignOnCurve,
+  PlacementSolver,
+  RotateGesture,
+  ROT_STEP,
+  snapRotation,
+  wrapAngle,
+  type Placement,
+} from './placement';
 import type { PickIndex } from './picking';
-import { snapAlong, snapPoint } from './snap';
 import type { Tool, ToolContext, ToolPointer, ToolPreview } from './types';
 
-export const ALIGN_RADIUS = 40;
-export const SETBACK_MARGIN = 1;
-const ROT_STEP = (15 * Math.PI) / 180;
+export { ALIGN_RADIUS, SETBACK_MARGIN, frontExtent } from './placement';
+export type { Placement } from './placement';
 
-export interface Placement {
-  pos: Vec2;
-  rotation: number;
-  segmentId: string | null;
-  /** Road frame of an aligned placement (for the local guide grid). */
-  frame?: RoadFrame;
-}
+/** A press shorter than this (ms) with no turning is a tap: rotate one 15° step. */
+const TAP_MS = 250;
+/** Turning less than this (rad) during a short press still counts as a tap. */
+const TAP_TURN = (5 * Math.PI) / 180;
 
 export type PlacementStatus = 'ok' | 'warn' | 'block';
 /** Id for previews validated with the real rules (must pass the server's id check). */
 export const GHOST_ID = '_ghost';
 export const STATUS_COLORS: Record<PlacementStatus, string> = { ok: '#60a5fa', warn: '#fb923c', block: '#f87171' };
 
-/** Local +z extent of the building (its front edge). */
-export function frontExtent(type: BuildingType): number {
-  return Math.max(...type.parts.flatMap((p) => partOutline(p).map((v) => v.z)));
-}
-
-/**
- * Align a building to the nearest road within ALIGN_RADIUS: local +z (the front) points at the
- * road and the front edge sits SETBACK_MARGIN outside the road's full half width. With a snap step
- * the position along the road moves in step increments (the road-frame grid).
- */
+/** Align a building to the nearest road within ALIGN_RADIUS (stateless: no hysteresis or lock). */
 export function alignToRoad(doc: CityDoc, idx: PickIndex, type: BuildingType, cursor: Vec2, step: SnapStep = 0): Placement | null {
   const hit = idx.nearestSegment(cursor, ALIGN_RADIUS);
-  if (!hit) return null;
-  const seg = doc.segments[hit.id]!;
-  const rt = doc.roadTypes[seg.roadTypeId]!;
-  const cum = cumulativeLengths(hit.curve);
-  const s = snapAlong(hit.s, hit.length, step);
-  const point = pointAtLength(hit.curve, cum, s);
-  const t = tangentAtLength(hit.curve, cum, s);
-  const right = rightNormal(t);
-  const side = dot(sub(cursor, point), right) >= 0 ? 1 : -1;
-  const away = scale(right, side);
-  const toRoad = scale(away, -1);
-  // rotateY maps local (0, 1) to (sin r, cos r).
-  const rotation = Math.atan2(toRoad.x, toRoad.z);
-  const edge = roadHalfWidth(rt) + SETBACK_MARGIN;
-  const pos = add(point, scale(away, edge + frontExtent(type)));
-  return { pos, rotation, segmentId: hit.id, frame: { anchor: add(point, scale(away, edge)), u: t, v: away } };
+  return hit ? alignOnCurve(doc, type, hit, cursor, step) : null;
 }
 
 export function placementValid(doc: CityDoc, type: BuildingType, p: Pick<Placement, 'pos' | 'rotation'>): boolean {
@@ -96,12 +71,6 @@ export function placementStatus(doc: CityDoc, type: BuildingType, p: Pick<Placem
   return c.violations.some((v) => v.buildingId === undefined || v.buildingId === buildingId) ? 'warn' : 'ok';
 }
 
-/** Placement for a building centered near `cursor`: aligned to a road unless `free`, else on the snap grid. */
-export function placeAt(doc: CityDoc, idx: PickIndex, type: BuildingType, cursor: Vec2, rotation: number, step: SnapStep, free: boolean): Placement {
-  const aligned = free ? null : alignToRoad(doc, idx, type, cursor, step);
-  return aligned ?? { pos: snapPoint(cursor, step), rotation, segmentId: null };
-}
-
 /** Guide grid lines for an aligned placement (empty for free placement or snapping off). */
 export function placementGuide(p: Placement, step: SnapStep): Vec2[][] {
   return p.frame ? guideGridLines(p.frame, step) : [];
@@ -113,6 +82,13 @@ export class BuildingTool implements Tool {
   private shift = false;
   private placement: Placement | null = null;
   private status: PlacementStatus = 'ok';
+  private solver = new PlacementSolver();
+  /** Hold-T rotation in progress (the building stays put and turns). */
+  private turn: { gesture: RotateGesture; at: number; rotation: number } | null = null;
+  /** After a rotation the building stays unaligned (with that angle) until L or Esc. */
+  private manual = false;
+  /** Bumped on every click: tells the ghost to jump to the target instead of easing. */
+  private settle = 0;
 
   constructor(
     private readonly ctx: ToolContext,
@@ -124,21 +100,33 @@ export class BuildingTool implements Tool {
     return s.doc.buildingTypes[s.toolOptions.buildingTypeId] ?? Object.values(s.doc.buildingTypes)[0];
   }
 
-  private recompute(): void {
+  private recompute(keep = false): void {
     const type = this.type();
     const s = this.ctx.store.getState();
     if (!type || !this.hover) {
       this.placement = null;
+    } else if (this.turn && this.placement) {
+      const rotation = snapRotation(this.turn.gesture.move(this.hover), !this.shift);
+      this.turn.rotation = rotation;
+      this.placement = { pos: this.turn.gesture.anchor, rotation, segmentId: null };
+      this.status = placementStatus(s.doc, type, this.placement);
+    } else if (keep && this.placement) {
+      this.status = placementStatus(s.doc, type, this.placement);
     } else {
-      this.placement = placeAt(s.doc, this.index(), type, this.hover, s.toolOptions.buildingRotation, s.toolOptions.snapStep, this.shift);
+      this.placement = this.solver.solve(s.doc, this.index(), type, this.hover, {
+        rotation: s.toolOptions.buildingRotation,
+        step: s.toolOptions.snapStep,
+        free: this.shift || this.manual,
+      });
       this.status = placementStatus(s.doc, type, this.placement);
     }
     const name = type?.name ?? '';
     let hint = `${name} 배치: `;
-    hint += this.placement?.segmentId ? '도로에 맞춰 정렬됨' : '자유 배치';
+    if (this.turn) hint += `회전 ${Math.round(((this.placement?.rotation ?? 0) * 180) / Math.PI)}° (T를 누른 채 마우스 이동, Shift = 15° 스냅 해제)`;
+    else hint += this.placement?.segmentId ? `도로에 맞춰 정렬됨${this.solver.selector.locked ? ' (잠금)' : ''}` : '자유 배치';
     if (this.placement && this.status === 'block') hint += ' · 도로와 겹쳐 배치할 수 없습니다';
     if (this.placement && this.status === 'warn') hint += ' · 필지 규제 위반 (경고)';
-    hint += '   [Shift 자유 배치 · , . 회전 15° · Esc 취소]';
+    hint += '   [Shift 자유 배치 · , . 회전 15° · T+이동 회전 · L 도로 잠금 · Esc 취소]';
     if (s.toolHint !== hint) this.ctx.store.set({ toolHint: hint });
     this.ctx.changed();
   }
@@ -154,6 +142,9 @@ export class BuildingTool implements Tool {
       this.ctx.store.toast('도로와 겹치거나 영역 밖이라 배치할 수 없습니다', 'error');
       return;
     }
+    // The command carries the target pose; the eased ghost jumps onto it.
+    this.settle++;
+    this.ctx.changed();
     const b = { id: this.ctx.ids().next('b'), typeId: type.id, pos: this.placement.pos, rotation: this.placement.rotation };
     const ghost = buildingFootprints(b, type).map(closedRing);
     this.ctx.dispatch({ type: 'building.place', building: b }, ghost);
@@ -168,14 +159,61 @@ export class BuildingTool implements Tool {
   onPointerUp(): void {}
 
   onLeave(): void {
-    this.cancel();
+    // Hover-only state goes; the road lock and the chosen free angle survive a trip to the toolbar.
+    this.turn = null;
+    this.hover = null;
+    this.placement = null;
+    this.ctx.changed();
+  }
+
+  /** Window lost focus: key-up events will never arrive. */
+  onBlur(): void {
+    this.shift = false;
+    this.onLeave();
+  }
+
+  private startTurn(): void {
+    if (this.turn || !this.placement || !this.hover) return;
+    this.turn = { gesture: new RotateGesture(this.placement.pos, this.placement.rotation, this.hover), at: performance.now(), rotation: this.placement.rotation };
+    this.recompute();
+  }
+
+  /** Release T: keep the angle (a quick tap adds one 15° step) and stay unaligned from then on. */
+  private endTurn(keep: boolean): void {
+    const t = this.turn;
+    this.turn = null;
+    if (!t || !keep) return;
+    const tap = performance.now() - t.at < TAP_MS && Math.abs(t.gesture.travelled) < TAP_TURN;
+    const rotation = tap ? wrapAngle(t.gesture.base + ROT_STEP) : t.rotation;
+    this.ctx.store.setToolOptions({ buildingRotation: rotation });
+    this.manual = true;
+    // Stay where the building stands; only the next pointer move re-places it.
+    this.placement = { pos: t.gesture.anchor, rotation, segmentId: null };
+    this.recompute(true);
   }
 
   onKey(e: KeyboardEvent): boolean {
+    if (e.code === 'KeyT') {
+      if (e.type === 'keydown') {
+        if (!e.repeat) this.startTurn();
+      } else {
+        this.endTurn(true);
+      }
+      return true;
+    }
     if (e.key === ',' || e.key === '.') {
       const r = this.ctx.store.getState().toolOptions.buildingRotation + (e.key === ',' ? -ROT_STEP : ROT_STEP);
       this.ctx.store.setToolOptions({ buildingRotation: Math.atan2(Math.sin(r), Math.cos(r)) });
       this.recompute();
+      return true;
+    }
+    if (e.code === 'KeyL') {
+      if (e.type === 'keydown' && !e.repeat) {
+        this.manual = false;
+        const locked = this.solver.selector.toggleLock();
+        this.ctx.store.toast(locked ? '도로 잠금: 이 도로에 계속 맞춥니다 (L로 해제)' : '도로 잠금 해제', 'info', 'road-lock');
+        this.recompute();
+      }
       return true;
     }
     if (e.key === 'Shift') {
@@ -191,6 +229,9 @@ export class BuildingTool implements Tool {
   }
 
   cancel(): void {
+    this.turn = null;
+    this.manual = false;
+    this.solver.selector.clear();
     this.hover = null;
     this.placement = null;
     this.ctx.changed();
@@ -215,8 +256,7 @@ export class BuildingTool implements Tool {
         ...buildingFootprints(this.placement, type).map((poly) => ({ pts: closedRing(poly), width: 0.6, color })),
       ],
       points: [],
-      building: { typeId: type.id, pos: this.placement.pos, rotation: this.placement.rotation, color },
+      building: { typeId: type.id, pos: this.placement.pos, rotation: this.placement.rotation, color, settle: this.settle },
     };
   }
 }
-

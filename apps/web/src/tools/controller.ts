@@ -22,7 +22,7 @@ import type { GroundPan, Tool, ToolContext, ToolPointer, ToolPreview } from './t
 export const TOOL_KEYS: Record<string, ToolId> = Object.fromEntries(TOOL_META.map((t) => [t.key, t.id]));
 const PRESENCE_MS = 1000 / 15;
 /** Keys whose keyup the tools need (modifier state, rotation batching). */
-const KEYUP_CODES = new Set(['ShiftLeft', 'ShiftRight', 'BracketLeft', 'BracketRight']);
+const KEYUP_CODES = new Set(['ShiftLeft', 'ShiftRight', 'BracketLeft', 'BracketRight', 'KeyT']);
 
 /** Camera and cursor hooks the controller needs from the renderer. */
 export interface ViewHooks {
@@ -97,6 +97,8 @@ export class ToolController {
     dom.addEventListener('wheel', this.wheel, { capture: true, passive: false });
     window.addEventListener('keydown', this.key);
     window.addEventListener('keyup', this.key);
+    window.addEventListener('blur', this.blur);
+    window.addEventListener('focusin', this.focusIn);
     this.unsub = store.subscribe(this.onStore);
     this.presenceTimer = setInterval(this.publishPresence, PRESENCE_MS);
   }
@@ -179,8 +181,16 @@ export class ToolController {
     this.active.onLeave?.();
   };
 
+  private blur = (): void => this.active.onBlur?.();
+
+  /** Focus moved into a text field: cancel held-key gestures (their key-ups may be swallowed). */
+  private focusIn = (): void => {
+    if (isTyping()) this.active.onBlur?.();
+  };
+
   private key = (e: KeyboardEvent): void => {
-    if (isTyping()) return;
+    // Key-ups always reach the tool: a gesture started before focus moved into an input must end.
+    if (isTyping() && e.type !== 'keyup') return;
     if (e.type === 'keydown' && !e.ctrlKey && !e.metaKey && !e.altKey) {
       const t = TOOL_KEYS[e.key];
       if (t) {
@@ -222,5 +232,7 @@ export class ToolController {
     this.dom.removeEventListener('wheel', this.wheel, { capture: true });
     window.removeEventListener('keydown', this.key);
     window.removeEventListener('keyup', this.key);
+    window.removeEventListener('blur', this.blur);
+    window.removeEventListener('focusin', this.focusIn);
   }
 }
