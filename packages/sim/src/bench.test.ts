@@ -140,6 +140,32 @@ describe('performance', () => {
     expect(on.ctl).toBeGreaterThan(1);
   }, 300_000);
 
+  it('simulator mode: ~3000 vehicles, a blackout darkening ~50 junctions (all-way stops), vs none (reported)', () => {
+    const doc = apply(gridDoc(15, 100, 'road-4'), [{ type: 'building.place', building: { id: 'sub', typeId: 'svc-substation', pos: { x: 50, z: 50 }, rotation: 0 } }]);
+    doc.meta.trafficDensity = 3;
+    const measure = (blackout: boolean) => {
+      const sim = new Simulation(doc, { maxVehicles: 3000, scenario: true });
+      sim.setPolicy({ reroute: false, informedShare: 0.7, battery: false });
+      for (let i = 0; i < 2000 && sim.stats().vehicles < 2950; i++) sim.step();
+      const t = sim.stats().tick;
+      if (blackout) expect(sim.scenarioInput({ eventId: 'b', tick: t, order: 0, kind: 'blackout.start', target: { buildingId: 'sub' }, params: { durationTicks: 100000 } }).ok).toBe(true);
+      const w = internals(sim);
+      const times: number[] = [];
+      for (let i = 0; i < 400; i++) {
+        const t0 = performance.now();
+        sim.step();
+        times.push(performance.now() - t0);
+      }
+      times.sort((a, b) => a - b);
+      return { mean: times.reduce((a, b) => a + b, 0) / times.length, p95: times[Math.floor(times.length * 0.95)]!, dark: w.dark?.junctions.size ?? 0 };
+    };
+    const none = measure(false);
+    const on = measure(true);
+    console.log(`[sim bench blackout] dark junctions=${on.dark} step mean=${on.mean.toFixed(2)}ms p95=${on.p95.toFixed(2)}ms | no blackout mean=${none.mean.toFixed(2)}ms p95=${none.p95.toFixed(2)}ms`);
+    expect(on.dark).toBeGreaterThan(20);
+    expect(none.dark).toBe(0);
+  }, 300_000);
+
   it('~3000 vehicles and ~5000 outdoor pedestrians: reports step mean / p95 (not a pass/fail target)', () => {
     const doc = gridDoc(15, 100, 'road-4');
     doc.meta.trafficDensity = 3;

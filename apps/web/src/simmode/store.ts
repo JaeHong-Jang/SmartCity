@@ -2,10 +2,11 @@
 
 import { useSyncExternalStore } from 'react';
 import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioKpi } from '@smartcity/sim';
+import type { CoverageRing } from './coverage';
 import type { FacilityCounts } from './facilities';
 import type { SimPhase } from './machine';
 
-export type EventKind = 'closure' | 'accident' | 'surge' | 'fire' | 'medical';
+export type EventKind = 'closure' | 'accident' | 'surge' | 'fire' | 'medical' | 'blackout';
 
 export interface ArmedEvent {
   kind: EventKind;
@@ -16,6 +17,9 @@ export interface ArmedEvent {
   inflowMin: number;
   stayMin: number;
   outflowMin: number;
+  /** Blackout: a substation's area, or a disc of `radius` meters at the clicked point. */
+  blackoutMode: 'substation' | 'area';
+  radius: number;
 }
 
 export interface EventRow {
@@ -81,6 +85,10 @@ export interface SimModeState {
   fatal: boolean;
   /** A short fast-forward to the next KPI grid tick is running (compare must wait). */
   aligning: boolean;
+  /** Power state now (from the snapshot KPIs): signals dark, signals on battery, buildings without power. */
+  power: { dark: number; battery: number; buildings: number; /** Vehicle-minutes stopped at dark junctions so far (1 decimal). */ queue: number };
+  /** Substation coverage circles (only asked for while the 정전 tool is armed). */
+  coverage: CoverageRing[];
   /** Facilities in the simulated copy, for the guidance line and the missing-facility hint. */
   facilities: FacilityCounts;
   /** Live workers (copy + compare), for the leak test hook. */
@@ -88,11 +96,12 @@ export interface SimModeState {
 }
 
 export const DEFAULT_ARMED: Record<EventKind, ArmedEvent> = {
-  closure: { kind: 'closure', durationMin: 30, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
-  accident: { kind: 'accident', durationMin: 20, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
-  surge: { kind: 'surge', durationMin: 0, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
-  fire: { kind: 'fire', durationMin: 0, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
-  medical: { kind: 'medical', durationMin: 0, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
+  closure: { blackoutMode: 'substation', radius: 150, kind: 'closure', durationMin: 30, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
+  accident: { blackoutMode: 'substation', radius: 150, kind: 'accident', durationMin: 20, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
+  surge: { blackoutMode: 'substation', radius: 150, kind: 'surge', durationMin: 0, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
+  fire: { blackoutMode: 'substation', radius: 150, kind: 'fire', durationMin: 0, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
+  medical: { blackoutMode: 'substation', radius: 150, kind: 'medical', durationMin: 0, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
+  blackout: { blackoutMode: 'substation', radius: 150, kind: 'blackout', durationMin: 30, people: 100, inflowMin: 20, stayMin: 40, outflowMin: 20 },
 };
 
 export function initialSimModeState(): SimModeState {
@@ -109,6 +118,8 @@ export function initialSimModeState(): SimModeState {
     error: null,
     fatal: false,
     aligning: false,
+    power: { dark: 0, battery: 0, buildings: 0, queue: 0 },
+    coverage: [],
     facilities: { fireStation: 0, hospital: 0, substation: 0, powerPlant: 0 },
     workers: 0,
   };

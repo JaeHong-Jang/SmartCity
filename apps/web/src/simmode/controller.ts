@@ -7,15 +7,18 @@ import type { WorkerSpeed } from '../sim/protocol';
 import type { FastForwardControl, ScenarioReply, ScenarioControl, SimulationStream } from '../sim/simStream';
 import { applyOutcomes, reconcileEvents, type EventOutcome, type PendingEnd } from './eventState';
 import { countFacilities } from './facilities';
-import { accidentPlace, closurePlace, emergencyPlace, surgePlace } from './label';
+import { coverageRings, type PowerCoverageLike } from './coverage';
+import { accidentPlace, blackoutAreaPlace, blackoutSubstationPlace, closurePlace, emergencyPlace, surgePlace } from './label';
 import { KPI_EVERY, KpiCollector } from './kpiSeries';
 import { transition, type SimAction } from './machine';
 import { accidentParams, closureParams, eventEndTick, ScenarioRecorder, surgeParams } from './record';
 import { simModeStore, type ArmedEvent, type EventKind, type EventRow, type SimModeStore } from './store';
-import { EVENT_LEAD_TICKS, WARMUP_TICKS } from './time';
+import { EVENT_LEAD_TICKS, gameMinToTicks, WARMUP_TICKS } from './time';
 
 /** What the controller needs from a worker stream (WorkerSimStream implements it). */
 export interface CopyStream extends SimulationStream, ScenarioControl, FastForwardControl {
+  /** Read-only power coverage request (answered with a `coverage` reply). */
+  requestCoverage?(): void;
   setSpeed(speed: WorkerSpeed): void;
   onStatus(cb: (status: 'ready' | 'error', error?: string) => void): void;
 }
@@ -202,6 +205,7 @@ export class SimModeController {
         else if (r.t === 'runTo') this.onCopyRun(r);
         else if (r.t === 'error') this.store.set({ error: r.error });
         else if (r.t === 'outcomes') this.onOutcomes(r.outcomes);
+        else if (r.t === 'coverage') this.onCoverage(r.coverage);
       }),
     );
     // Scenario mode from tick 0 (warm-up included), so the record replays exactly. The real-time loop stays
@@ -243,6 +247,10 @@ export class SimModeController {
       const rows = this.store.getState().events;
       const next = reconcileEvents(rows, snap.scenario, snap.tick, this.endOf);
       if (next !== rows) this.store.set({ events: next });
+      const k = snap.scenario.kpi;
+      const power = { dark: k.darkSignals, battery: Math.max(0, k.unpoweredSignals - k.darkSignals), buildings: k.unpoweredBuildings, queue: Math.round(k.darkQueueVehicleMinutes * 10) / 10 };
+      const cur = this.store.getState().power;
+      if (power.dark !== cur.dark || power.battery !== cur.battery || power.buildings !== cur.buildings || power.queue !== cur.queue) this.store.set({ power });
     }
     if (this.store.getState().phase !== 'warming') this.publish({ tick: snap.tick });
   }
@@ -335,6 +343,14 @@ export class SimModeController {
 
   setArmed(armed: ArmedEvent | null): void {
     this.store.set({ armed });
+    // The 정전 tool shows which area each substation supplies.
+    if (armed?.kind === 'blackout') this.copy?.requestCoverage?.();
+    else if (this.store.getState().coverage.length) this.store.set({ coverage: [] });
+  }
+
+  private onCoverage(c: PowerCoverageLike): void {
+    if (!this.copyDoc) return;
+    this.store.set({ coverage: coverageRings(this.copyDoc, c) });
   }
 
   private send(input: ScenarioInput): void {
@@ -390,7 +406,32 @@ export class SimModeController {
     return true;
   }
 
-  /** End a closure, accident, fire or medical call now (surges have no end input). */
+  /** 정전 of a substation's whole supply area (the clicked building must be a substation). */
+  placeBlackoutSubstation(buildingId: string, a: ArmedEvent): boolean {
+    if (!this.ready() || !this.copyDoc) return false;
+    const b = this.copyDoc.buildings[buildingId];
+    if (!b || this.copyDoc.buildingTypes[b.typeId]?.service !== 'substation') return false;
+    const tick = this.tickNow() + EVENT_LEAD_TICKS;
+    const params = { durationTicks: Math.max(1, gameMinToTicks(a.durationMin)) };
+    const input = this.recorder!.make('blackout.start', tick, { buildingId }, params);
+    this.row({ eventId: input.eventId, kind: 'blackout', ...blackoutSubstationPlace(this.copyDoc, buildingId), startTick: tick, endTick: tick + params.durationTicks, buildingId });
+    this.send(input);
+    return true;
+  }
+
+  /** 정전 of a disc (x, z, radius meters). */
+  placeBlackoutArea(x: number, z: number, a: ArmedEvent): boolean {
+    if (!this.ready()) return false;
+    const radius = Math.min(20000, Math.max(1, a.radius));
+    const tick = this.tickNow() + EVENT_LEAD_TICKS;
+    const params = { x, z, radius, durationTicks: Math.max(1, gameMinToTicks(a.durationMin)) };
+    const input = this.recorder!.make('blackout.start', tick, {}, params);
+    this.row({ eventId: input.eventId, kind: 'blackout', ...blackoutAreaPlace(x, z, radius), startTick: tick, endTick: tick + params.durationTicks });
+    this.send(input);
+    return true;
+  }
+
+  /** End a closure, accident, fire, medical call or blackout now (surges have no end input). */
   endEvent(eventId: string): boolean {
     if (!this.ready()) return false;
     const row = this.store.getState().events.find((e) => e.eventId === eventId);
@@ -401,7 +442,7 @@ export class SimModeController {
     const tick = this.tickNow() + EVENT_LEAD_TICKS;
     // `eventId` makes the sim end exactly this event.
     const target: ScenarioTarget =
-      kind === 'closure' ? { segmentId: row.segmentId, eventId: row.eventId } : kind === 'accident' ? { segmentId: row.segmentId, lane: row.lane, eventId: row.eventId } : { buildingId: row.buildingId, eventId: row.eventId };
+      kind === 'blackout' ? { eventId: row.eventId } : kind === 'closure' ? { segmentId: row.segmentId, eventId: row.eventId } : kind === 'accident' ? { segmentId: row.segmentId, lane: row.lane, eventId: row.eventId } : { buildingId: row.buildingId, eventId: row.eventId };
     const input = this.recorder!.make(`${kind}.end` as 'closure.end', tick, target);
     this.endOf.set(input.eventId, { rowId: row.eventId, tick });
     this.send(input);

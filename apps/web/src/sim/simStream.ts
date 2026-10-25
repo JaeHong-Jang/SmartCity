@@ -143,6 +143,11 @@ export class WorkerSimStream implements SimulationStream, SimControl, ScenarioCo
     this.post({ t: 'cancel' });
   }
 
+  /** Read-only power coverage; answered with `{ t: 'coverage' }` on the scenario reply listeners. */
+  requestCoverage(): void {
+    this.post({ t: 'coverage' });
+  }
+
   scenario(inputs: ScenarioInput[]): void {
     this.post({ t: 'scenario', inputs });
   }

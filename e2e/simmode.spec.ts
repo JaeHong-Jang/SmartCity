@@ -192,8 +192,8 @@ test('phase 4c1: simulator mode — private copy, events, ON/OFF comparison, no 
   await expect(page.locator('[data-simmode-result]')).toBeVisible({ timeout: 150_000 });
   expect(await workers(page)).toBe(1);
   await expect(page.locator('[data-simmode-result]')).toContainText('게임 모델');
-  expect(await page.locator('[data-simmode-line="on"]').count()).toBe(6);
-  expect(await page.locator('[data-simmode-line="off"]').count()).toBe(6);
+  expect(await page.locator('[data-simmode-line="on"]').count()).toBe(7);
+  expect(await page.locator('[data-simmode-line="off"]').count()).toBe(7);
   for (const side of ['on', 'off'] as const) {
     const pts = await page.locator(`[data-simmode-line="${side}"]`).evaluateAll((els) => els.map((e) => (e.getAttribute('points') ?? '').trim().split(/\s+/).filter(Boolean).length));
     expect(Math.min(...pts)).toBeGreaterThan(5);

@@ -12,7 +12,8 @@ import type { Mission, ScenarioState } from '../scenario/state.js';
 import type { RoadGraph } from '../types.js';
 import type { DemandModel } from './demand.js';
 import type { BusLineState } from './buses.js';
-import type { SignalClearing } from './signalClearing.js';
+import type { MidClearing, SignalClearing } from './signalClearing.js';
+import type { DarkState } from './signalDark.js';
 import type { SignalSet } from './signals.js';
 import type { ZoneState } from './zones.js';
 
@@ -170,8 +171,12 @@ export interface World {
   signals: SignalSet;
   /** Edit-time clearances of junctions whose signal plan changed (traffic/signalClearing.ts), by node id. */
   signalClearing: Map<string, SignalClearing>;
-  /** Plan offsets re-phased after a clearance or a controller hand-back, kept while the plan identity is unchanged. */
+  /** Mid-block signal crosswalks finishing a pedestrian clearance before a switch (by crosswalk id). */
+  midClearing: Map<string, MidClearing>;
+  /** Plan (and `mid:` crosswalk signal) offsets re-phased after a clearance or a hand-back, kept while the identity is unchanged. */
   signalOffsets: Map<string, { key: string; offset: number }>;
+  /** Dark (unpowered) junctions and crosswalk signals (traffic/signalDark.ts); null while none. */
+  dark: DarkState | null;
   demand: DemandModel;
   lines: BusLineState[];
   nextId: number;

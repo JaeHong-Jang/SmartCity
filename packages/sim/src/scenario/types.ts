@@ -18,6 +18,8 @@ export type ScenarioInputKind =
   | 'fire.end'
   | 'medical.start'
   | 'medical.end'
+  | 'blackout.start'
+  | 'blackout.end'
   | 'policy.set';
 
 export interface ScenarioTarget {
@@ -51,8 +53,11 @@ export interface ScenarioInput {
    * surge.start: extraTrips (required), inflowTicks (default 1200), stayTicks (default 2400), outflowTicks (default = inflowTicks).
    * fire.start: burnTicks (0 → 100 %, default 2400 = 20 game min), suppressTicks (default 600 = 5 game min).
    * medical.start: treatTicks (on-scene treatment, default 360 = 3 game min).
-   * *.end: none; ends the earliest-started active event of that kind with the same segmentId and lane.
-   * policy.set: reroute (0 | 1), informedShare (0..1), preempt (optional 0 | 1); target {}.
+   * blackout.start: target.buildingId (a substation: its coverage area) or x, z, radius (a disc, m);
+   *   durationTicks (default 3600 = 30 game min).
+   * *.end: none; ends the earliest-started active event of that kind with the same segmentId and lane
+   *   (fire / medical / blackout: buildingId).
+   * policy.set: reroute (0 | 1), informedShare (0..1), preempt (optional 0 | 1), battery (optional 0 | 1); target {}.
    */
   params: Record<string, number>;
 }
@@ -69,12 +74,17 @@ export interface ResponsePolicy {
   informedShare: number;
   /** Emergency vehicles pre-empt signals (ADR 0010 §4). Omitted = same as `reroute`. */
   preempt?: boolean;
+  /** Signal batteries keep unpowered signals on for a while in a blackout (4c2-②). Omitted = same as `reroute`. */
+  battery?: boolean;
 }
 
 export const DEFAULT_POLICY: ResponsePolicy = { reroute: false, informedShare: 0.7 };
 
 /** Whether signal pre-emption is on under a policy (`preempt` omitted = `reroute`). */
 export const preemptOn = (p: ResponsePolicy): boolean => p.preempt ?? p.reroute;
+
+/** Whether signal batteries are on under a policy (`battery` omitted = `reroute`). */
+export const batteryOn = (p: ResponsePolicy): boolean => p.battery ?? p.reroute;
 
 /** The only keys a ScenarioInput may carry (anything else is rejected, so every accepted input is plain JSON). */
 export const SCENARIO_INPUT_KEYS = ['eventId', 'tick', 'order', 'kind', 'target', 'params'] as const;
@@ -90,16 +100,19 @@ export const SCENARIO_PARAM_KEYS: Record<ScenarioInputKind, readonly string[]> =
   'fire.end': [],
   'medical.start': ['treatTicks'],
   'medical.end': [],
-  'policy.set': ['reroute', 'informedShare', 'preempt'],
+  'blackout.start': ['x', 'z', 'radius', 'durationTicks'],
+  'blackout.end': [],
+  'policy.set': ['reroute', 'informedShare', 'preempt', 'battery'],
 };
 
 /** Strict policy check shared by setPolicy, records and the worker (no type coercion). Null = valid. */
 export function policyError(p: unknown): string | null {
   if (typeof p !== 'object' || p === null) return 'policy는 객체여야 합니다';
-  const { reroute, informedShare, preempt } = p as Record<string, unknown>;
+  const { reroute, informedShare, preempt, battery } = p as Record<string, unknown>;
   if (typeof reroute !== 'boolean') return 'policy.reroute는 boolean이어야 합니다';
   if (typeof informedShare !== 'number' || !Number.isFinite(informedShare) || informedShare < 0 || informedShare > 1) return 'policy.informedShare는 0..1 수여야 합니다';
   if (preempt !== undefined && typeof preempt !== 'boolean') return 'policy.preempt는 boolean이어야 합니다';
+  if (battery !== undefined && typeof battery !== 'boolean') return 'policy.battery는 boolean이어야 합니다';
   return null;
 }
 
@@ -185,6 +198,16 @@ export interface ScenarioKpi {
   respondingNow: number;
   respondingElapsedSum: number;
   oldestPendingMinutes: number;
+  // Blackout KPIs (4c2-②). Instantaneous: signals without grid power (dark or on battery), signals dark now
+  // (junctions + mid-block crosswalks), buildings without power. Cumulative since `since`, game minutes:
+  // junction-minutes dark, junction-minutes kept on by batteries, vehicle-minutes stopped at the lanes into
+  // dark junctions (the all-way-stop delay).
+  unpoweredSignals: number;
+  darkSignals: number;
+  unpoweredBuildings: number;
+  darkJunctionMinutes: number;
+  batteryJunctionMinutes: number;
+  darkQueueVehicleMinutes: number;
 }
 
 /** Render data of the scenario overlay (only present in snapshots once a scenario state exists). */
@@ -199,7 +222,7 @@ export interface ScenarioView {
    * Events in effect now, sorted by eventId. `endTick` = scheduled automatic end (null = until an end input);
    * for a surge, the departure tick of its last trip (it stays listed while trips are still to depart).
    */
-  activeEvents: { eventId: string; kind: 'closure' | 'accident' | 'surge' | 'fire' | 'medical'; startTick: number; endTick: number | null }[];
+  activeEvents: { eventId: string; kind: 'closure' | 'accident' | 'surge' | 'fire' | 'medical' | 'blackout'; startTick: number; endTick: number | null }[];
   /**
    * The last RECENT_LOG_SIZE (20) scenario log entries, oldest first: every applied input, automatic end and
    * edit-time move or drop. `applied: false` = a no-op, with the `reason` (e.g. an end whose event is not active).
@@ -216,6 +239,15 @@ export interface ScenarioView {
   dispatches: { eventId: string; kind: 'fire' | 'medical'; vehicleId: number | null; stage: 'enroute' | 'working' | 'transport' | 'returning'; facilityId: string; buildingId: string }[];
   /** Junctions the signal controller drives (nodeId order): serving `vehicleId`, or −1 while handing back to the plan. */
   preempted: { nodeId: string; vehicleId: number; phase: number; color: 'green' | 'yellow' | 'red' }[];
+  /** Active blackouts (eventId order): a substation's area (`substationId`, its position, the coverage radius) or a disc. */
+  blackouts: { eventId: string; substationId: string | null; x: number; z: number; radius: number; startTick: number; endTick: number }[];
+  /** Dark (unpowered) junctions and mid-block signal crosswalks, id order. */
+  darkJunctions: string[];
+  darkCrossings: string[];
+  /** Unpowered signals kept on by their battery: `n:`nodeId / `c:`crosswalk id, game minutes left. */
+  battery: { signalId: string; remainingMinutes: number }[];
+  /** Buildings without power (render: windows dark), id order. Scenario state only. */
+  unpoweredBuildings: string[];
 }
 
 /** One apply-time scenario outcome (`Simulation.drainScenarioOutcomes`, `ScenarioView.recentLog`). */
@@ -229,6 +261,8 @@ export interface ScenarioOutcome {
    * at the hospital), `dispatch.return` (back at the facility), `dispatch.cancel` (incident over before the
    * vehicle could leave), `dispatch.failed` (출동 불가: 시설 없음 / 경로 없음 / 긴급 차종 없음 — the incident
    * still runs), `dispatch.lost` (vehicle removed by an edit, or no way back / to the hospital).
+   * Blackout outcomes (eventId = the blackout): `blackout.end` (reason `duration` / `by <input>`),
+   * `signal.dark` / `signal.restored` / `battery.depleted` (reason = the junction node id or crosswalk id).
    */
   kind: string;
   applied: boolean;

@@ -28,6 +28,8 @@ export type ToWorker =
   | { t: 'runTo'; tick: number; progressEvery?: number; kpiEvery?: number }
   /** Stop a runTo in progress (answered with `{ t: 'runTo', cancelled }`). */
   | { t: 'cancel' }
+  /** Read-only: which substation supplies which junction / crosswalk / building (`Simulation.powerCoverage`). */
+  | { t: 'coverage' }
   | ScenarioToWorker;
 
 export type FromWorker =
@@ -48,6 +50,7 @@ export type FromWorker =
    * batch / runTo chunk that produced any, always before the snapshot of the same tick.
    */
   | { t: 'outcomes'; outcomes: ScenarioOutcome[] }
+  | { t: 'coverage'; coverage: ReturnType<Simulation['powerCoverage']> }
   /** A message the worker could not use (malformed, unknown `t`, or its handler failed); the simulation keeps running. */
   | { t: 'error'; error: string; for?: string };
 
@@ -118,6 +121,7 @@ export function inputShapeError(x: unknown): string | null {
     const share = x.params.informedShare;
     if (!(typeof share === 'number' && share >= 0 && share <= 1)) return 'informedShare는 0..1이어야 합니다';
     if (x.params.preempt !== undefined && x.params.preempt !== 0 && x.params.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
+    if (x.params.battery !== undefined && x.params.battery !== 0 && x.params.battery !== 1) return 'battery는 0 또는 1이어야 합니다';
   }
   return null;
 }
@@ -148,6 +152,7 @@ export function toWorkerError(m: unknown): string | null {
       return null;
     case 'kpi':
     case 'cancel':
+    case 'coverage':
       return null;
     default:
       return `알 수 없는 메시지 ${typeof m.t === 'string' ? m.t : String(m.t)}`;

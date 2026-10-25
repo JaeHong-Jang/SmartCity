@@ -21,6 +21,9 @@ export const PED_DESIGN_SPEED = 1;
 export const MID_GREEN = 30;
 export const MID_YELLOW = 3;
 
+/** Pedestrian clearance a crosswalk of this length needs: ⌈length / 1.0 m/s⌉ s, in ticks. */
+export const clearanceTicks = (length: number, tickRate: number): number => Math.max(0, Math.round(Math.ceil(length / PED_DESIGN_SPEED) * tickRate));
+
 interface Interval {
   phase: number;
   color: SignalColor | 'allRed';
@@ -88,13 +91,15 @@ export interface SignalPlan {
    * null = the fixed-time plan above. Written by the controller every tick, cleared when it hands back.
    * `segs` = the approaches the color applies to (every other head is red); `phase` −1 = an edit-time clearance.
    */
-  ctl: { phase: number; color: 'green' | 'yellow' | 'allRed'; remaining: number; segs: readonly string[] } | null;
+  ctl: { phase: number; color: 'green' | 'yellow' | 'allRed' | 'off'; remaining: number; segs: readonly string[] } | null;
   id: PlanIdentity;
 }
 
 /** Signalized mid-block crossing: fixed cycle green → yellow → red (WALK, CLEARANCE). */
 export interface MidSignal {
   ci: number;
+  /** Crosswalk id (stable across rebuilds). */
+  id: string;
   green: number;
   yellow: number;
   walk: number;
@@ -103,6 +108,12 @@ export interface MidSignal {
   /** One head per lane crossing it, at the stop line. */
   heads: SignalHead[];
   color: SignalColor;
+  /** Cycle offset in ticks (0 as built; re-phased by a safe switch-on, traffic/signalClearing.ts). */
+  offset: number;
+  /** Crosswalk id and timings, head lane ids: a rebuilt signal with another key is switched safely. */
+  key: string;
+  /** Display override: 'red' during an edit-time clearance, 'off' while dark (power cut); null = the cycle. */
+  ctl: 'red' | 'off' | null;
 }
 
 export interface SignalSet {
@@ -308,7 +319,8 @@ export function buildSignals(doc: CityDoc, net: Net, zones: ZoneIndex, tickRate:
     const yellow = ticks(MID_YELLOW);
     const walk = ticks(PED_WALK);
     const clearance = ticks(clearanceOf(cr.index));
-    mids.push({ ci: cr.index, green, yellow, walk, clearance, cycle: green + yellow + walk + clearance, heads, color: 'green' });
+    const key = JSON.stringify([cr.id, green, yellow, walk, clearance, heads.map((hd) => g.lanes[hd.lane]!.id)]);
+    mids.push({ ci: cr.index, id: cr.id, green, yellow, walk, clearance, cycle: green + yellow + walk + clearance, heads, color: 'green', offset: 0, key, ctl: null });
   }
   return { plans, mids };
 }
@@ -338,7 +350,7 @@ export function updateSignals(set: SignalSet, tick: number, laneGreen: Uint8Arra
     }
   }
   for (const m of set.mids) {
-    const tc = tick % m.cycle;
+    const tc = (tick + m.offset) % m.cycle;
     m.color = tc < m.green ? 'green' : tc < m.green + m.yellow ? 'yellow' : 'red';
     midColor[m.ci] = m.color === 'green' ? 2 : m.color === 'yellow' ? 1 : 0;
     const el = tc - m.green - m.yellow;
@@ -348,7 +360,7 @@ export function updateSignals(set: SignalSet, tick: number, laneGreen: Uint8Arra
 
 /** Color shown to an approach: its phase's color while that phase runs, red otherwise. */
 export function headColor(p: SignalPlan, h: number): SignalColor {
-  if (p.ctl) return p.ctl.color !== 'allRed' && p.ctl.segs.includes(p.headSeg[h]!) ? p.ctl.color : 'red';
+  if (p.ctl) return (p.ctl.color === 'green' || p.ctl.color === 'yellow') && p.ctl.segs.includes(p.headSeg[h]!) ? p.ctl.color : 'red';
   const iv = p.intervals[p.cur]!;
   if (iv.color === 'allRed') return 'red';
   return p.phases[iv.phase]!.approaches.includes(p.headSeg[h]!) ? iv.color : 'red';
@@ -359,10 +371,11 @@ export function signalView(p: SignalPlan, tickRate: number): SignalView {
   return {
     nodeId: p.nodeId,
     phaseIndex: iv.phase,
-    color: iv.color === 'allRed' ? 'red' : iv.color,
+    color: iv.color === 'allRed' || iv.color === 'off' ? 'red' : iv.color,
     remaining: (p.ctl ? p.ctl.remaining : p.remaining) / tickRate,
     greenApproaches: iv.color !== 'green' ? [] : p.ctl ? p.ctl.segs.slice() : p.phases[iv.phase]!.approaches.slice(),
     cycle: p.cycle / tickRate,
     scramble: p.scramble,
+    ...(iv.color === 'off' ? { dark: true } : {}),
   };
 }

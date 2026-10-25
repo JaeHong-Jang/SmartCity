@@ -4,6 +4,7 @@
 
 import type { World } from '../traffic/world.js';
 import { closureLanes, compose, logOutcome, newScenarioState, type AccidentEffect, type ClosureEffect, type Effect } from './state.js';
+import { endBlackout, findBlackout, startBlackout } from './blackout.js';
 import { endIncident, startIncident } from './emergency.js';
 import { enqueueAffected } from './reroute.js';
 import { generateSurge } from './surge.js';
@@ -15,8 +16,8 @@ export const ACCIDENT_LENGTH = 9;
 const PLACE_MARGIN = 0.5;
 const MAX_SURGE_TRIPS = 5000;
 
-const KINDS = new Set<ScenarioInputKind>(['closure.start', 'closure.end', 'accident.start', 'accident.end', 'surge.start', 'fire.start', 'fire.end', 'medical.start', 'medical.end', 'policy.set']);
-const END_KINDS = new Set<ScenarioInputKind>(['closure.end', 'accident.end', 'fire.end', 'medical.end']);
+const KINDS = new Set<ScenarioInputKind>(['closure.start', 'closure.end', 'accident.start', 'accident.end', 'surge.start', 'fire.start', 'fire.end', 'medical.start', 'medical.end', 'blackout.start', 'blackout.end', 'policy.set']);
+const END_KINDS = new Set<ScenarioInputKind>(['closure.end', 'accident.end', 'fire.end', 'medical.end', 'blackout.end']);
 
 export function ensureScenario(w: World): NonNullable<World['sc']> {
   w.sc ??= newScenarioState(w);
@@ -97,10 +98,24 @@ function validate(w: World, input: ScenarioInput): string | null {
     case 'medical.end':
       if (t.eventId !== undefined) return t.eventId.length > 0 ? null : 'target.eventId는 문자열이어야 합니다';
       return typeof t.buildingId === 'string' && w.doc.buildings[t.buildingId] ? null : `없는 건물 ${String(t.buildingId)}`;
+    case 'blackout.start': {
+      const disc = p.x !== undefined || p.z !== undefined || p.radius !== undefined;
+      if (t.buildingId !== undefined) {
+        if (disc) return 'blackout.start: buildingId 또는 x, z, radius 중 하나만';
+        const b = w.doc.buildings[t.buildingId];
+        return b && w.doc.buildingTypes[b.typeId]?.service === 'substation' ? null : `변전소가 아닌 건물 ${t.buildingId}`;
+      }
+      if (p.x === undefined || p.z === undefined || p.radius === undefined) return 'blackout.start: 변전소 buildingId 또는 x, z, radius가 필요합니다';
+      return p.radius > 0 && p.radius <= 20000 ? null : 'radius는 0 < r ≤ 20000이어야 합니다';
+    }
+    case 'blackout.end':
+      if (t.eventId !== undefined) return t.eventId.length > 0 ? null : 'target.eventId는 문자열이어야 합니다';
+      return typeof t.buildingId === 'string' && w.doc.buildings[t.buildingId] ? null : `없는 건물 ${String(t.buildingId)}`;
     case 'policy.set':
       if (p.reroute !== 0 && p.reroute !== 1) return 'reroute는 0 또는 1이어야 합니다';
       if (!(p.informedShare! >= 0 && p.informedShare! <= 1)) return 'informedShare는 0..1이어야 합니다';
       if (p.preempt !== undefined && p.preempt !== 0 && p.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
+      if (p.battery !== undefined && p.battery !== 0 && p.battery !== 1) return 'battery는 0 또는 1이어야 합니다';
       return null;
   }
   return null;
@@ -137,7 +152,12 @@ export function queuePolicy(w: World, policy: ResponsePolicy): ScenarioInput {
     order: Number.MIN_SAFE_INTEGER + k,
     kind: 'policy.set',
     target: {},
-    params: { reroute: policy.reroute ? 1 : 0, informedShare: policy.informedShare, ...(policy.preempt !== undefined ? { preempt: policy.preempt ? 1 : 0 } : {}) },
+    params: {
+      reroute: policy.reroute ? 1 : 0,
+      informedShare: policy.informedShare,
+      ...(policy.preempt !== undefined ? { preempt: policy.preempt ? 1 : 0 } : {}),
+      ...(policy.battery !== undefined ? { battery: policy.battery ? 1 : 0 } : {}),
+    },
   };
   const r = queueScenarioInput(w, input);
   if (!r.ok) throw new RangeError(r.error);
@@ -151,6 +171,7 @@ export function applyDueInputs(w: World): void {
   const sc = w.sc!;
   const expired = sc.effects.filter((e) => e.endTick <= w.tick).sort((a, b) => (a.eventId < b.eventId ? -1 : 1));
   for (const e of expired) endEffect(w, e, null);
+  if (sc.blackouts.length > 0) for (const b of sc.blackouts.filter((x) => x.endTick <= w.tick).sort((a, c) => (a.eventId < c.eventId ? -1 : 1))) endBlackout(w, b, null);
   if (sc.pending.length === 0) return;
   if (!sc.pendingSorted) {
     sc.pending.sort(byKey);
@@ -334,9 +355,25 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
       log(w, input, true);
       return;
     }
+    case 'blackout.start': {
+      const why = startBlackout(w, input);
+      return log(w, input, why === null, why ?? undefined);
+    }
+    case 'blackout.end': {
+      const b = findBlackout(w, input);
+      if (!b) return log(w, input, false, t.eventId !== undefined ? `event ${t.eventId} not active (unknown, not started yet or already ended)` : 'no active event on target');
+      endBlackout(w, b, input.eventId);
+      log(w, input, true);
+      return;
+    }
     case 'policy.set':
-      // Applies to events from now on (no retroactive re-route); pre-emption follows at once (requests are per tick).
-      sc.policy = { reroute: p.reroute === 1, informedShare: p.informedShare!, ...(p.preempt !== undefined ? { preempt: p.preempt === 1 } : {}) };
+      // Applies to events from now on (no retroactive re-route); pre-emption and batteries follow at once (per tick).
+      sc.policy = {
+        reroute: p.reroute === 1,
+        informedShare: p.informedShare!,
+        ...(p.preempt !== undefined ? { preempt: p.preempt === 1 } : {}),
+        ...(p.battery !== undefined ? { battery: p.battery === 1 } : {}),
+      };
       log(w, input, true);
       return;
   }

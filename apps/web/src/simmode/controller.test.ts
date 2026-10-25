@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createEmptyDoc, type CityDoc } from '@smartcity/shared';
+import { createEmptyDoc, FACILITY_PRESETS, type CityDoc } from '@smartcity/shared';
 import type { ResponsePolicy, ScenarioInput, ScenarioKpi, ScenarioRecord, SimSnapshot } from '@smartcity/sim';
 import type { WorkerSpeed } from '../sim/protocol';
 import type { ScenarioReply, SimulationStream } from '../sim/simStream';
@@ -11,7 +11,7 @@ import { SwitchableStream } from './switchableStream';
 import { WARMUP_TICKS } from './time';
 
 const kpi = (tick: number): ScenarioKpi => ({
-  tick, since: 0, completed: tick / 100, avgTravelTime: 30, inProgress: 2, noRoute: 0, droppedTrips: 0, waitingToDepart: 0, removed: 0, congestionLength: 0, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0, avgResponseTime: 0, maxResponseTime: 0, responses: 0, extinguished: 0, damaged: 0, medicalCompleted: 0, dispatchFailed: 0, respondingNow: 0, respondingElapsedSum: 0, oldestPendingMinutes: 0,
+  tick, since: 0, completed: tick / 100, avgTravelTime: 30, inProgress: 2, noRoute: 0, droppedTrips: 0, waitingToDepart: 0, removed: 0, congestionLength: 0, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0, avgResponseTime: 0, maxResponseTime: 0, responses: 0, extinguished: 0, damaged: 0, medicalCompleted: 0, dispatchFailed: 0, respondingNow: 0, respondingElapsedSum: 0, oldestPendingMinutes: 0, unpoweredSignals: 0, darkSignals: 0, unpoweredBuildings: 0, darkJunctionMinutes: 0, batteryJunctionMinutes: 0, darkQueueVehicleMinutes: 0,
 });
 
 class FakeStream implements CopyStream {
@@ -48,6 +48,11 @@ class FakeStream implements CopyStream {
   /** The lossless outcome stream (posted before the snapshot that shows the effect). */
   outcomes(list: { eventId: string; tick: number; kind: string; applied: boolean; reason?: string }[]) {
     this.reply({ t: 'outcomes', outcomes: list });
+  }
+  coverageAsked = 0;
+  requestCoverage() {
+    this.coverageAsked++;
+    this.reply({ t: 'coverage', coverage: { substations: ['sub1'], powerPlants: [], junctions: {}, crossings: {}, buildings: { b9: 'sub1' } } });
   }
   rejectEnds = false;
   scenario(inputs: ScenarioInput[]) {
@@ -564,5 +569,57 @@ describe('SimModeController', () => {
     expect(copy.sent.at(-1)).toMatchObject({ kind: 'fire.end', target: { buildingId: 'b1', eventId: f.eventId } });
     expect(e.c.endEvent(m.eventId)).toBe(true);
     expect(copy.sent.at(-1)).toMatchObject({ kind: 'medical.end', target: { buildingId: 'b2', eventId: m.eventId } });
+  });
+
+  it('blackout: a substation (by building) or a disc (x, z, radius), 30 game min by default, ended by its own event id', () => {
+    const e = setup();
+    for (const t of FACILITY_PRESETS) e.doc.buildingTypes[t.id] = t;
+    e.doc.buildingTypes['plain'] = { id: 'plain', name: '집', zone: 'residential', parts: [] };
+    e.doc.buildings['sub1'] = { id: 'sub1', typeId: 'svc-substation', pos: { x: 10, z: 20 }, rotation: 0 };
+    e.doc.buildings['b9'] = { id: 'b9', typeId: 'plain', pos: { x: 50, z: 50 }, rotation: 0 };
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    expect(e.store.getState().facilities.substation).toBe(1);
+    expect(e.c.placeBlackoutSubstation('b9', DEFAULT_ARMED.blackout)).toBe(false); // not a substation
+    expect(e.c.placeBlackoutSubstation('sub1', DEFAULT_ARMED.blackout)).toBe(true);
+    expect(e.c.placeBlackoutArea(100.5, -40, { ...DEFAULT_ARMED.blackout, radius: 120, durationMin: 10 })).toBe(true);
+    const [sub, area] = copy.sent as [ScenarioInput, ScenarioInput];
+    expect(sub).toMatchObject({ kind: 'blackout.start', target: { buildingId: 'sub1' }, params: { durationTicks: 3600 } });
+    expect(area).toMatchObject({ kind: 'blackout.start', target: {}, params: { x: 100.5, z: -40, radius: 120, durationTicks: 1200 } });
+    expect(Object.keys(sub.params)).toEqual(['durationTicks']); // never both a building and a disc
+    const rows = e.store.getState().events;
+    expect(rows[0]!.label).toContain('담당 구역 정전');
+    expect(rows[1]!.label).toContain('반경 120 m');
+    copy.active = rows.map((r) => ({ eventId: r.eventId, kind: 'blackout', startTick: r.startTick, endTick: r.endTick }));
+    copy.emit(rows[1]!.startTick + 1);
+    expect(e.c.endEvent(rows[1]!.eventId)).toBe(true);
+    expect(copy.sent.at(-1)).toMatchObject({ kind: 'blackout.end', target: { eventId: rows[1]!.eventId } });
+  });
+
+  it('arming the 정전 tool asks for the coverage once and shows the circles; disarming clears them', () => {
+    const e = setup();
+    e.doc.buildingTypes['svc-substation'] = FACILITY_PRESETS.find((t) => t.id === 'svc-substation')!;
+    e.doc.buildings['sub1'] = { id: 'sub1', typeId: 'svc-substation', pos: { x: 0, z: 0 }, rotation: 0 };
+    e.doc.buildings['b9'] = { id: 'b9', typeId: 'svc-substation', pos: { x: 30, z: 40 }, rotation: 0 };
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    e.c.setArmed(DEFAULT_ARMED.blackout);
+    expect(copy.coverageAsked).toBe(1);
+    expect(e.store.getState().coverage).toEqual([{ substationId: 'sub1', x: 0, z: 0, radius: 50 }]);
+    e.c.setArmed(null);
+    expect(e.store.getState().coverage).toEqual([]);
+  });
+
+  it('the power counts follow the snapshot KPIs: dark signals, battery-held ones, unpowered buildings', () => {
+    const e = setup();
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    const snap = { ...copy.snap!, tick: WARMUP_TICKS + 1 } as SimSnapshot;
+    (snap.scenario as { kpi: ScenarioKpi }).kpi = { ...kpi(WARMUP_TICKS + 1), unpoweredSignals: 5, darkSignals: 2, unpoweredBuildings: 7 };
+    for (const cb of (copy as unknown as { subs: Set<(s: SimSnapshot) => void> }).subs) cb(snap);
+    expect(e.store.getState().power).toEqual({ dark: 2, battery: 3, buildings: 7, queue: 0 });
   });
 });

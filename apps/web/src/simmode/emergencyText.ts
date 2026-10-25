@@ -33,3 +33,20 @@ export function dispatchText(e: Pick<EventRow, 'dispatchNote' | 'response' | 'di
   if (e.response) parts.push(`대응 ${e.response}`);
   return parts.join(' · ');
 }
+
+/**
+ * State of a blackout row from its snapshot-driven fields: "정전 중 · 남은 N분" while active, "복구됨" once it
+ * left the active events. Null = not decided yet (pending / rejected / not started): the caller shows its
+ * generic text.
+ */
+export function blackoutState(e: Pick<EventRow, 'kind' | 'status' | 'active' | 'ended' | 'endTick'>, tick: number, minutesOf: (ticks: number) => number): string | null {
+  if (e.kind !== 'blackout' || e.status !== 'ok') return null;
+  if (e.ended) return '복구됨';
+  if (!e.active) return null;
+  return e.endTick === null ? '정전 중' : `정전 중 · 남은 ${Math.max(0, Math.ceil(minutesOf(e.endTick - tick)))}분`;
+}
+
+/** Whole-city power line (not per event: several blackouts can overlap), shown once outside the event list. */
+export function powerSummaryText(p: { dark: number; battery: number; buildings: number; queue: number }): string {
+  return `전체 도시 정전 현황: 정전 신호 ${p.dark} · 배터리 유지 ${p.battery} · 전기 끊긴 건물 ${p.buildings} · 대기 ${p.queue}차량·분`;
+}

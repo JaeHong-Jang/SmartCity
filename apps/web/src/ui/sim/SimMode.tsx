@@ -1,12 +1,13 @@
 // Simulator-mode UI: entry button, banner, event palette, policy, compare panel (ADR 0010).
 
 import { useEffect, useRef } from 'react';
+import './blackout.css';
 import { CLOCK_SCALE } from '@smartcity/sim';
 import { formatClock } from '../../render/dayNight';
 import { simModeController } from '../../simmode/instance';
 import { alignKpiSeries, inclusiveResponseTime, KPI_METRICS, rebaseSeries } from '../../simmode/kpiSeries';
-import { dispatchText, incidentText } from '../../simmode/emergencyText';
-import { facilityHint, FACILITY_SUMMARY } from '../../simmode/facilities';
+import { blackoutState, dispatchText, incidentText, powerSummaryText } from '../../simmode/emergencyText';
+import { facilityHint, FACILITY_SUMMARY, SUPPLY_MODEL_NOTE } from '../../simmode/facilities';
 import { DEFAULT_ARMED, useSimMode, type EventKind, type EventRow } from '../../simmode/store';
 import { ticksToGameMin, WARMUP_GAME_MIN, WARMUP_TICKS } from '../../simmode/time';
 import { useServices, useStore } from '../context';
@@ -65,6 +66,7 @@ const EVENT_BUTTONS: { kind: EventKind; label: string; hint: string }[] = [
   { kind: 'surge', label: '행사·수요 급증', hint: '건물을 클릭하세요' },
   { kind: 'fire', label: '화재', hint: '불을 낼 건물을 클릭하세요' },
   { kind: 'medical', label: '응급 환자', hint: '환자가 생길 건물을 클릭하세요' },
+  { kind: 'blackout', label: '정전', hint: '변전소를 클릭하거나(담당 구역 정전), 구역 정전은 땅을 클릭하세요' },
 ];
 
 function NumField({ label, value, min, max, onChange, id }: { label: string; value: number; min: number; max: number; onChange: (v: number) => void; id: string }) {
@@ -103,6 +105,11 @@ function emergencyRowText(e: EventRow, tick: number, fatal: boolean): string {
   return [...new Set(parts)].join(' · ');
 }
 
+/** Blackout row state: 정전 중 (남은 N분) → 복구됨. */
+function blackoutRowText(e: EventRow, tick: number, fatal: boolean): string {
+  return blackoutState(e, tick, ticksToGameMin) ?? remainingText(e, tick, fatal);
+}
+
 function Palette() {
   const s = useSimMode((x) => x);
   const c = simModeController();
@@ -124,7 +131,21 @@ function Palette() {
       </div>
       {armed && (
         <div className="sim-params">
-          {armed.kind === 'fire' || armed.kind === 'medical' ? null : armed.kind !== 'surge' ? (
+          {armed.kind === 'blackout' && (
+            <>
+              <div className="sim-blackout-mode" role="group" aria-label="정전 방식">
+                <button data-simmode-blackout-mode="substation" className={armed.blackoutMode === 'substation' ? 'active' : ''} onClick={() => upd({ blackoutMode: 'substation' })}>
+                  변전소
+                </button>
+                <button data-simmode-blackout-mode="area" className={armed.blackoutMode === 'area' ? 'active' : ''} onClick={() => upd({ blackoutMode: 'area' })}>
+                  구역
+                </button>
+              </div>
+              {armed.blackoutMode === 'area' && <NumField id="radius" label="반경(m)" value={armed.radius} min={10} max={20000} onChange={(v) => upd({ radius: v })} />}
+              <NumField id="duration" label="기간(게임 분)" value={armed.durationMin} min={1} max={600} onChange={(v) => upd({ durationMin: v })} />
+            </>
+          )}
+          {armed.kind === 'fire' || armed.kind === 'medical' || armed.kind === 'blackout' ? null : armed.kind !== 'surge' ? (
             <NumField id="duration" label="기간(게임 분)" value={armed.durationMin} min={1} max={600} onChange={(v) => upd({ durationMin: v })} />
           ) : (
             <>
@@ -137,6 +158,11 @@ function Palette() {
           <span className="muted" data-simmode-arm-hint>
             {EVENT_BUTTONS.find((b) => b.kind === armed.kind)!.hint}
           </span>
+          {armed.kind === 'blackout' && armed.blackoutMode === 'substation' && facilityHint('blackout', s.facilities) && (
+            <span className="sim-error" data-simmode-facility-hint role="status">
+              {facilityHint('blackout', s.facilities)}
+            </span>
+          )}
           {(armed.kind === 'fire' || armed.kind === 'medical') && facilityHint(armed.kind, s.facilities) && (
             <span className="sim-error" data-simmode-facility-hint role="status">
               {facilityHint(armed.kind, s.facilities)}
@@ -144,10 +170,13 @@ function Palette() {
           )}
         </div>
       )}
-      <span className="muted" data-simmode-facilities title="사본 도시의 시설 (설계의 service 종류 기준)">
+      <span className="muted" data-simmode-facilities title="사본 도시의 시설 (설계의 service 종류 기준) · 커버리지 기반 공급 모델">
         시설 · {FACILITY_SUMMARY(s.facilities)}
       </span>
-      <h3>스마트 대응: 우회 안내 + 긴급차량 신호 우선</h3>
+      <span className="sim-supply-note" data-simmode-supply-note>
+        {SUPPLY_MODEL_NOTE}
+      </span>
+      <h3>스마트 대응: 우회 안내 + 긴급차량 신호 우선 + 신호 배터리</h3>
       <label className="toggle" title={locked ? '사건을 넣은 뒤에는 바꿀 수 없습니다. 비교 실행이 반대 정책을 돌려 줍니다' : '정보를 가진 차량이 사건 시작·종료 때 경로를 다시 찾습니다'}>
         <input type="checkbox" data-simmode-policy checked={s.policy.reroute} disabled={!ready || locked} onChange={(e) => c.setPolicy({ ...s.policy, reroute: e.target.checked })} />
         스마트 대응 {s.policy.reroute ? 'ON' : 'OFF'}
@@ -181,7 +210,7 @@ function Palette() {
               onMouseLeave={() => hover.current && clearTimeout(hover.current)}
             >
               <span className="sim-ev-label">{e.label}</span>
-              <span className="muted">{e.kind === 'fire' || e.kind === 'medical' ? emergencyRowText(e, s.tick, s.fatal) : remainingText(e, s.tick, s.fatal)}</span>
+              <span className="muted">{e.kind === 'fire' || e.kind === 'medical' ? emergencyRowText(e, s.tick, s.fatal) : e.kind === 'blackout' ? blackoutRowText(e, s.tick, s.fatal) : remainingText(e, s.tick, s.fatal)}</span>
               {e.note && (
                 <span className="muted" data-simmode-note>
                   {e.note}
@@ -204,6 +233,11 @@ function Palette() {
           );
         })}
       </ul>
+      {(s.power.dark > 0 || s.power.battery > 0 || s.power.buildings > 0 || s.events.some((e) => e.kind === 'blackout' && e.active)) && (
+        <span className="sim-power-line" data-simmode-power title="사건별 수치가 아니라 도시 전체의 현재 값입니다">
+          {powerSummaryText(s.power)}
+        </span>
+      )}
       <div className="row wrap">
         {s.phase === 'comparing' ? (
           <button className="danger" data-simmode-compare-cancel onClick={() => c.cancelCompare()}>
@@ -261,6 +295,9 @@ function ComparePanel() {
         </td>
         <td>{k.dispatchFailed}</td>
         <td>
+          {k.darkJunctionMinutes.toFixed(1)} / {k.batteryJunctionMinutes.toFixed(1)}
+        </td>
+        <td>
           {k.inProgress} / {k.droppedTrips}
         </td>
       </tr>
@@ -291,6 +328,7 @@ function ComparePanel() {
             <th>대응 · 미도착</th>
             <th>진화/피해/이송</th>
             <th>출동 불가</th>
+            <th>정전/배터리 교차로·분</th>
             <th>미완료 / 포기</th>
           </tr>
         </thead>

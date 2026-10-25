@@ -46,6 +46,12 @@ export function installSimModeInput(
       const graph = controller.roadGraph();
       const spot = graph && accidentAt(idx, graph, p);
       if (spot) controller.placeAccident(spot.segmentId, spot.lane, spot.s, armed);
+    } else if (armed.kind === 'blackout') {
+      if (armed.blackoutMode === 'area') controller.placeBlackoutArea(p.x, p.z, armed);
+      else {
+        const id = buildingAt(idx, p);
+        if (id) controller.placeBlackoutSubstation(id, armed);
+      }
     } else {
       const id = buildingAt(idx, p);
       if (!id) return;

@@ -9,6 +9,12 @@ import type { SimulationStream } from '../sim/simStream';
 
 const LAMP_ON = [new THREE.Color('#ff3b30'), new THREE.Color('#ffcc00'), new THREE.Color('#34c759')];
 const LAMP_OFF = [new THREE.Color('#3a1512'), new THREE.Color('#3a3010'), new THREE.Color('#10301a')];
+/** Lit lamp of a head from the snapshot's color code: 0 red, 1 yellow, 2 green, 3 = dark (power cut: every lamp off). */
+export function headLit(code: number): 0 | 1 | 2 | 3 {
+  const c = code | 0;
+  return c >= 3 ? 3 : c <= 0 ? 0 : (c as 1 | 2);
+}
+
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _p = new THREE.Vector3();
@@ -37,6 +43,8 @@ export class SignalLayer {
   /** Pose (x, z, heading) and lit lamp written to each slot, so only changed slots are rewritten. */
   private pose = new Float32Array(64 * 3).fill(NaN);
   private litSlot = new Uint8Array(64).fill(255);
+  /** Heads currently drawn unlit (power cut). Test/debug. */
+  darkHeads = 0;
 
   constructor(private readonly stream: SimulationStream) {
     this.group.name = 'signals';
@@ -85,13 +93,16 @@ export class SignalLayer {
         for (const l of this.lamps) l.setMatrixAt(i, _m);
         moved = true;
       }
-      const lit = Math.min(2, Math.max(0, a[o + 3]! | 0));
+      const lit = headLit(a[o + 3]!);
       if (this.litSlot[i] !== lit) {
         this.litSlot[i] = lit;
         for (let k = 0; k < 3; k++) this.lamps[k]!.setColorAt(i, k === lit ? LAMP_ON[k]! : LAMP_OFF[k]!);
         recolored = true;
       }
     }
+    let dark = 0;
+    for (let i = 0; i < n; i++) if (this.litSlot[i] === 3) dark++;
+    this.darkHeads = dark;
     this.poles.count = n;
     if (moved) this.poles.instanceMatrix.needsUpdate = true;
     for (const l of this.lamps) {

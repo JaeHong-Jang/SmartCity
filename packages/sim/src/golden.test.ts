@@ -141,6 +141,10 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
   // all red and pedestrian clearance, then restart at their first phase. The crosswalk (400) and the
   // closure (1700) keep every identity; the removal at 2000 hits its two junctions in their last all-red tick.
   // Safety of the new behaviour: traffic/signalEdits.test.ts (same script under the per-tick checker).
+  // Re-recorded again (hashes 4–8) for clearance sufficiency (Sol 4c2-② R3): the node move at 900 lengthens
+  // crosswalks n_3_2|v_3_2 and n_3_3|v_3_2 (14 → 15 s) while they flash CLEARANCE (since 640); their
+  // clearance now runs to 940 instead of 920 (the junctions' clearings 20 ticks longer). Without the
+  // extension the checker reports both ("cleared 280 ticks, its length needs 300").
   it('dense grid: heavy traffic, signals, splits and node moves', () => {
     const doc = gridDoc(7, 120, 'road-4', 11);
     doc.meta.trafficDensity = 3;
@@ -158,6 +162,6 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
 });
 
 const SMALL_CITY = ["abd22600","7be520d5","3473c037","c963d2b5","d8785a55","77e12fe8","48845201","77c6691","f9cf5552","321bf933","f77774f3","8f7ec53e"];
-const DENSE_GRID = ["53671d38","a711768","93e5a844","3940202d","46fcfaf9","655badb2","716c9018","5550f920"];
+const DENSE_GRID = ["53671d38","a711768","93e5a844","6a1c978d","b2473e19","75df7052","2eecec38","dae04c0"];
 const NO_LINES = ["8863d04b","880f1ab2","b3af70f5","320000a9","8f7b1bf8","f0b3eb82","a1ceba0b","c55fdc77"];
 const BUS_CORRIDOR = ["fc6cbbff","e9d05de9","64ae7cb2","4ad71dff","e532dcbe","159290f4","c0bd4582","78bbdad6","6fb1e2a0","65af2598"];

@@ -2,7 +2,7 @@
 
 import { applyCommand, createEmptyDoc, type CityDoc, type Command, type Rng } from '@smartcity/shared';
 import type { Simulation } from './simulation.js';
-import { headColor } from './traffic/signals.js';
+import { clearanceTicks, headColor } from './traffic/signals.js';
 import type { World } from './traffic/world.js';
 import { PedSignal } from './types.js';
 import { PREEMPT_MIN_GREEN } from './scenario/preempt.js';
@@ -325,7 +325,7 @@ export function checkIncidentInvariants(sim: Simulation): string[] {
   return problems;
 }
 
-type Shown = { kind: 'G' | 'Y' | 'R' | 'F'; key: string; since: number; need: number; yellow: number; allRed: number; redNeed: number };
+type Shown = { kind: 'G' | 'Y' | 'R' | 'F'; key: string; since: number; need: number; yellow: number; allRed: number; redNeed: number; dark: boolean; fromDark: boolean };
 
 /**
  * Observes every junction that is (or was) signalized, tick by tick, by stable ids, and reports safety
@@ -341,6 +341,13 @@ export class SignalWatch {
   private shown = new Map<string, Shown>();
   private ped = new Map<string, { sig: number; since: number; clearance: number }>();
   private edits = new Map<string, number>();
+  private mid = new Map<string, { color: number; since: number; yellow: number }>();
+  /** Crosswalks that left WALK: when, and the most clearance their geometry required while flashing. */
+  private exit = new Map<string, { start: number; need: number }>();
+  /** WALK exits whose clearance was checked against the crosswalk's (current, longest) length. */
+  clearanceChecks = 0;
+  /** Junction-ticks and crosswalk-ticks seen dark. */
+  darkTicks = 0;
   readonly problems: string[] = [];
   controlledTicks = 0;
   clearingTicks = 0;
@@ -385,8 +392,11 @@ export class SignalWatch {
       if (w.signalClearing.has(nodeId)) this.clearingTicks++;
       const green = new Set<string>();
       const yellow = new Set<string>();
-      let free = false;
-      if (p) {
+      // Dark (power cut): the junction runs as an all-way stop ('F'); a power cut may end any interval at once.
+      const dark = p?.ctl?.color === 'off' || (w.dark !== null && w.dark.junctions.has(nodeId));
+      if (dark) this.darkTicks++;
+      let free = dark;
+      if (p && !dark) {
         for (let h = 0; h < p.heads.length; h++) {
           if (w.laneGreen[p.heads[h]!.lane]) green.add(p.headSeg[h]!);
           if (headColor(p, h) === 'yellow') yellow.add(p.headSeg[h]!);
@@ -408,8 +418,9 @@ export class SignalWatch {
         if (prev) {
           const run = t - prev.since;
           if (prev.kind === 'G') {
-            if (kind === 'G' || kind === 'F') this.problems.push(`${where}: green ${prev.key} → ${kind} ${key} without clearance`);
-            const cut = (this.edits.get(nodeId) ?? -1) >= prev.since;
+            if (kind === 'G' || (kind === 'F' && !dark)) this.problems.push(`${where}: green ${prev.key} → ${kind} ${key} without clearance`);
+            // An edit or a power cut may end a green early.
+            const cut = (this.edits.get(nodeId) ?? -1) >= prev.since || (kind === 'F' && dark);
             if (run < prev.need && !cut) this.problems.push(`${where}: green ${prev.key} lasted ${run} ticks`);
             if (kind === 'R' && prev.yellow > 0) {
               // Yellow can only be shown on signal heads: a junction (or approach) that lost them must hold red for yellow + all-red.
@@ -418,19 +429,22 @@ export class SignalWatch {
             }
           }
           if (prev.kind === 'Y') {
-            if (kind !== 'R') this.problems.push(`${where}: yellow → ${kind}`);
+            if (kind !== 'R' && !(kind === 'F' && dark)) this.problems.push(`${where}: yellow → ${kind}`);
             // Signal heads gone mid-yellow: the rest of the yellow must be held as red.
-            if (run < prev.yellow && p) this.problems.push(`${where}: yellow lasted ${run} ticks`);
+            if (run < prev.yellow && p && !dark) this.problems.push(`${where}: yellow lasted ${run} ticks`);
           }
-          if (prev.kind === 'R' && (kind === 'G' || kind === 'F') && run < prev.redNeed) this.problems.push(`${where}: all red lasted ${run} ticks before ${kind}`);
+          // All-way stop (dark) → all red → unsignalized again (an edit removed the signal while dark): no green involved.
+          if (prev.kind === 'R' && (kind === 'G' || (kind === 'F' && !dark && !prev.fromDark)) && run < prev.redNeed) this.problems.push(`${where}: all red lasted ${run} ticks before ${kind}`);
           if (prev.kind === 'Y' || prev.kind === 'G') timing.yellow = prev.yellow;
           if (prev.kind === 'Y' || prev.kind === 'G') timing.allRed = prev.allRed;
           if (prev.kind === 'Y') redNeed = prev.allRed + (p ? 0 : Math.max(0, prev.yellow - (t - prev.since)));
+          // Power back: the all-way-stop traffic is cleared under all red (yellow + all-red) before any green.
+          if (prev.kind === 'F' && kind === 'R') redNeed = timing.yellow + timing.allRed;
         }
         if (kind === 'G' && w.sc !== null && w.sc.ctl.has(nodeId)) this.controlledGreens++;
         const ph = phaseOf(green);
         const need = kind === 'G' && p && ph >= 0 ? Math.min(minGreen, p.greenTicks[ph]!) : 0;
-        this.shown.set(nodeId, { kind, key, since: t, need, yellow: kind === 'G' && p ? p.yellowTicks : timing.yellow, allRed: kind === 'G' && p ? p.allRedTicks : timing.allRed, redNeed });
+        this.shown.set(nodeId, { fromDark: kind === 'R' && prev?.kind === 'F' && prev.dark === true, dark, kind, key, since: t, need, yellow: kind === 'G' && p ? p.yellowTicks : timing.yellow, allRed: kind === 'G' && p ? p.allRedTicks : timing.allRed, redNeed });
       }
       const heads = new Map<number, number>();
       if (p) for (const hd of p.peds) heads.set(hd.ci, hd.clearance);
@@ -438,10 +452,12 @@ export class SignalWatch {
         const cr = w.graph.crossings[ci]!;
         if (cr.nodeId !== nodeId) continue;
         const sig = w.zs.pedSig[ci]!;
-        if (sig === PedSignal.walk || sig === PedSignal.clearance) {
+        // At a dark junction no lane has a signal green (laneGreen = all-way stop): nothing to check against.
+        if ((sig === PedSignal.walk || sig === PedSignal.clearance) && !dark) {
           for (const l of this.lanesAgainst(ci, p?.scramble ?? false, nodeId)) if (w.laneGreen[l]) this.problems.push(`${where}: crossing ${cr.id} ${sig === PedSignal.walk ? 'WALK' : 'CLEARANCE'} with lane ${l} green`);
         }
         const pp = this.ped.get(cr.id);
+        this.sufficient(w, cr.id, ci, pp?.sig, sig, t, where);
         if (!pp || pp.sig !== sig) {
           if (pp && pp.sig === PedSignal.walk && sig !== PedSignal.clearance) this.problems.push(`${where}: crossing ${cr.id} WALK → ${sig} without clearance`);
           if (pp && pp.sig === PedSignal.clearance && t - pp.since < pp.clearance) this.problems.push(`${where}: crossing ${cr.id} clearance lasted ${t - pp.since} ticks`);
@@ -451,13 +467,71 @@ export class SignalWatch {
         }
       }
     }
+    this.observeMids(w, t);
+  }
+
+  /**
+   * Clearance sufficiency: a crosswalk that left WALK flashes CLEARANCE for at least ⌈length / 1.0 m/s⌉ of its
+   * longest geometry during the clearance (edits may lengthen it) before it turns red / unsignalized. Together
+   * with "no conflicting green during WALK / CLEARANCE" this is the clearance-before-conflicting-green rule.
+   */
+  private sufficient(w: World, id: string, ci: number, prev: number | undefined, sig: number, t: number, where: string): void {
+    const geo = clearanceTicks(w.zones.length[ci]!, w.tickRate);
+    const x = this.exit.get(id);
+    if (sig === PedSignal.clearance) {
+      if (x) x.need = Math.max(x.need, geo);
+      else if (prev === PedSignal.walk) this.exit.set(id, { start: t, need: geo });
+      return;
+    }
+    // Any exit from the clearance — to red, unsignalized, or straight back to WALK — is checked.
+    if (!x) return;
+    this.clearanceChecks++;
+    if (t - x.start < x.need) this.problems.push(`${where}: crosswalk ${id} cleared ${t - x.start} ticks, its length needs ${x.need} (then ${sig === PedSignal.walk ? 'WALK' : sig === PedSignal.none ? 'unsignalized' : 'red'})`);
+    this.exit.delete(id);
+  }
+
+  /**
+   * Mid-block crosswalks (signalized or not, by id): WALK and CLEARANCE only with vehicles red; vehicles go
+   * green → yellow (≥ its yellow) → red, never green → red; WALK ends in a full CLEARANCE (the longer of the
+   * old and new crosswalk's when an edit changed it).
+   */
+  private observeMids(w: World, t: number): void {
+    const mids = new Map(w.signals.mids.map((m) => [m.id, m]));
+    for (const cr of w.graph.crossings) {
+      if (cr.kind !== 'midblock') continue;
+      const ci = cr.index;
+      const color = w.zs.midColor[ci]!;
+      const sig = w.zs.pedSig[ci]!;
+      const m = mids.get(cr.id);
+      if (m?.ctl === 'off') this.darkTicks++;
+      if (w.midClearing.has(cr.id)) this.clearingTicks++;
+      const where = `${cr.id}@${t}`;
+      if ((sig === PedSignal.walk || sig === PedSignal.clearance) && color !== 0) this.problems.push(`${where}: ${sig === PedSignal.walk ? 'WALK' : 'CLEARANCE'} with vehicles ${color === 2 ? 'green' : 'yellow'}`);
+      const prev = this.mid.get(cr.id);
+      if (!prev || prev.color !== color) {
+        if (prev && prev.color === 2 && color === 0) this.problems.push(`${where}: vehicles green → red without yellow`);
+        // A yellow must run in full before red; it may end early only into unsignalized operation (switched off / dark).
+        if (prev && prev.color === 1 && color === 0 && t - prev.since < prev.yellow) this.problems.push(`${where}: yellow lasted ${t - prev.since} ticks`);
+        if (prev && prev.color === 1 && color === 2 && m && m.ctl !== 'off') this.problems.push(`${where}: yellow → green`);
+        this.mid.set(cr.id, { color, since: t, yellow: m?.yellow ?? prev?.yellow ?? 0 });
+      }
+      const pp = this.ped.get(cr.id);
+      this.sufficient(w, cr.id, ci, pp?.sig, sig, t, where);
+      if (!pp || pp.sig !== sig) {
+        if (pp && pp.sig === PedSignal.walk && sig !== PedSignal.clearance) this.problems.push(`${where}: WALK → ${sig} without clearance`);
+        if (pp && pp.sig === PedSignal.clearance && t - pp.since < pp.clearance) this.problems.push(`${where}: clearance lasted ${t - pp.since} ticks`);
+        const owed = pp && pp.sig === PedSignal.walk ? Math.max(pp.clearance, m?.clearance ?? 0) : (m?.clearance ?? pp?.clearance ?? 0);
+        this.ped.set(cr.id, { sig, since: t, clearance: sig === PedSignal.walk ? (m?.clearance ?? owed) : owed });
+      }
+    }
   }
 }
 
 /**
  * A random plan or network edit for junction `node` (state: which edits were made once). Plan edits: back to
  * signal, reversed phases, one phase per approach (added), automatic phases (removed), scramble toggled,
- * allStop / uncontrolled, the approach `deletable` deleted; unrelated recompiles / rebuilds: a mid-block
+ * allStop / uncontrolled, the approach `deletable` deleted, a mid-block signal crosswalk `mx` on `far` switched
+ * on / off; unrelated recompiles / rebuilds: a mid-block
  * crosswalk on `far`, a building and a road far away.
  */
 export function randomPlanEdit(w: World, rng: Rng, node: string, deletable: string, far: string, state: { deleted: boolean; n: number }): [string, Command] {
@@ -477,6 +551,16 @@ export function randomPlanEdit(w: World, rng: Rng, node: string, deletable: stri
   if (r === 6 && !state.deleted) {
     state.deleted = true;
     return [`delete ${deletable}`, { type: 'segment.remove', id: deletable }];
+  }
+  if (r === 9 && rng.next() < 0.3) {
+    // Widen / narrow an approach: its crosswalks get longer / shorter (possibly under pedestrians).
+    const seg = w.graph.segments.get(far);
+    const wide = seg?.roadType.id === 'road-6';
+    return [wide ? 'narrow' : 'widen', { type: 'segment.setType', id: far, roadTypeId: wide ? 'road-2' : 'road-6' }];
+  }
+  if (r === 9 && rng.next() < 0.5) {
+    const on = !w.signals.mids.some((m) => m.id === 'mx');
+    return [on ? 'mid signal on' : 'mid signal off', { type: 'feature.upsert', feature: { id: 'mx', segmentId: far, kind: 'crosswalk', t: 0.5, signal: on } }];
   }
   if (r === 7) return ['far building', { type: 'building.place', building: { id: `fb${k}`, typeId: 'house', pos: { x: 1500 + 30 * (k % 20), z: 1500 + 30 * Math.floor(k / 20) }, rotation: 0 } }];
   if (r === 8)

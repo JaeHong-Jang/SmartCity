@@ -81,6 +81,8 @@ function collectRequests(w: World): Map<string, Request[]> {
       if (e < nLanes && nxt >= nLanes) {
         const node = net.connNode[nxt - nLanes]!;
         if (net.nodeSignalized[node]) {
+          // A dark (unpowered) signal cannot be pre-empted: the vehicle takes the all-way stop like everyone.
+          if (w.dark !== null && w.dark.nodeDark[node]) break;
           const nodeId = net.nodeIds[node]!;
           const p = planOf(w, nodeId);
           const seg = w.graph.lanes[e]!.segmentId;
@@ -173,6 +175,8 @@ const bestRequest = (list: Request[] | undefined, keep: number): Request | undef
   return r;
 };
 
+const darkCrossing = (w: World) => (id: string): boolean => w.dark !== null && w.dark.crossings.has(id);
+
 /** Per tick, after updateSignals: clearances, then requests → controllers (create, advance, hand back) → outputs. */
 export function updatePreemption(w: World): void {
   const sc = w.sc!;
@@ -188,7 +192,7 @@ export function updatePreemption(w: World): void {
     sc.ctl.set(p.nodeId, c);
     write(w, p, c);
     return true;
-  });
+  }, darkCrossing(w));
   const nodes = new Set<string>([...reqs.keys(), ...sc.ctl.keys()]);
   for (const nodeId of [...nodes].sort()) {
     if (clearing.has(nodeId)) continue;

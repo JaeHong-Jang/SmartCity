@@ -3,7 +3,7 @@ import type { ScenarioKpi } from '@smartcity/sim';
 import { alignKpiSeries, inclusiveResponseTime, KPI_EVERY, KPI_METRICS, KpiCollector, rebaseSeries, sinceBase } from './kpiSeries';
 
 const kpi = (tick: number, over: Partial<ScenarioKpi> = {}): ScenarioKpi => ({
-  tick, since: 0, completed: tick / 10, avgTravelTime: 60, inProgress: 3, noRoute: 1, droppedTrips: 0, waitingToDepart: 2, removed: 0, congestionLength: 100, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0, avgResponseTime: 0, maxResponseTime: 0, responses: 0, extinguished: 0, damaged: 0, medicalCompleted: 0, dispatchFailed: 0, respondingNow: 0, respondingElapsedSum: 0, oldestPendingMinutes: 0, ...over,
+  tick, since: 0, completed: tick / 10, avgTravelTime: 60, inProgress: 3, noRoute: 1, droppedTrips: 0, waitingToDepart: 2, removed: 0, congestionLength: 100, rerouted: 0, detoured: 0, recovered: 0, activeEvents: 0, avgResponseTime: 0, maxResponseTime: 0, responses: 0, extinguished: 0, damaged: 0, medicalCompleted: 0, dispatchFailed: 0, respondingNow: 0, respondingElapsedSum: 0, oldestPendingMinutes: 0, unpoweredSignals: 0, darkSignals: 0, unpoweredBuildings: 0, darkJunctionMinutes: 0, batteryJunctionMinutes: 0, darkQueueVehicleMinutes: 0, ...over,
 });
 
 describe('KpiCollector', () => {
@@ -36,7 +36,7 @@ describe('alignKpiSeries', () => {
     expect(rows.map((r) => r.off?.tick)).toEqual([0, 60, 60, 60]);
   });
   it('metrics read the five compared quantities, stuck = no route + waiting to depart', () => {
-    expect(KPI_METRICS.map((m) => m.id)).toEqual(['completed', 'avgTravelTime', 'congestionLength', 'stuck', 'rerouted', 'avgResponseTime']);
+    expect(KPI_METRICS.map((m) => m.id)).toEqual(['completed', 'avgTravelTime', 'congestionLength', 'stuck', 'rerouted', 'avgResponseTime', 'darkQueue']);
     const stuck = KPI_METRICS.find((m) => m.id === 'stuck')!;
     expect(stuck.get(kpi(0, { noRoute: 4, waitingToDepart: 5 }))).toBe(9);
     // 60 sim seconds = 10 game minutes
@@ -115,5 +115,22 @@ describe('response time without survivorship bias', () => {
     expect(inclusiveResponseTime(kpi(60))).toBe(0);
     expect(inclusiveResponseTime(kpi(60, { respondingNow: 0, respondingElapsedSum: 0 }))).toBe(0);
     expect(KPI_METRICS.find((m) => m.id === 'avgResponseTime')!.label).toContain('미도착 포함');
+  });
+});
+
+describe('blackout KPI deltas', () => {
+  const base = kpi(1200, { darkJunctionMinutes: 2, batteryJunctionMinutes: 1, darkQueueVehicleMinutes: 5 });
+  it('cumulative minutes are rebased at the end of warm-up; instantaneous counts stay as they are', () => {
+    const d = sinceBase(kpi(1800, { darkJunctionMinutes: 12.5, batteryJunctionMinutes: 4, darkQueueVehicleMinutes: 45, unpoweredSignals: 6, darkSignals: 2, unpoweredBuildings: 9 }), base);
+    expect(d.darkJunctionMinutes).toBeCloseTo(10.5, 9);
+    expect(d.batteryJunctionMinutes).toBeCloseTo(3, 9);
+    expect(d.darkQueueVehicleMinutes).toBeCloseTo(40, 9);
+    expect([d.unpoweredSignals, d.darkSignals, d.unpoweredBuildings]).toEqual([6, 2, 9]);
+  });
+  it('the dark-queue chart reads vehicle-minutes', () => {
+    const m = KPI_METRICS.find((x) => x.id === 'darkQueue')!;
+    expect(m.label).toBe('정전 교차로 대기');
+    expect(m.unit).toBe('차량·분');
+    expect(m.get(kpi(60, { darkQueueVehicleMinutes: 7 }))).toBe(7);
   });
 });

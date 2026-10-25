@@ -72,7 +72,7 @@ export function inclusiveResponseTime(k: ScenarioKpi): number {
 
 /** Metrics drawn as charts, with a getter from a KPI point. */
 export interface KpiMetric {
-  id: 'completed' | 'avgTravelTime' | 'congestionLength' | 'stuck' | 'rerouted' | 'avgResponseTime';
+  id: 'completed' | 'avgTravelTime' | 'congestionLength' | 'stuck' | 'rerouted' | 'avgResponseTime' | 'darkQueue';
   label: string;
   unit: string;
   get(k: ScenarioKpi): number;
@@ -87,6 +87,7 @@ export const KPI_METRICS: KpiMetric[] = [
   // Game minutes, call → arrival; vehicles still on their way count with their elapsed time (a lower bound).
   // 0 while there is no response at all (flat zero line).
   { id: 'avgResponseTime', label: '평균 대응 시간 (미도착 포함)', unit: '게임 분', get: inclusiveResponseTime },
+  { id: 'darkQueue', label: '정전 교차로 대기', unit: '차량·분', get: (k) => k.darkQueueVehicleMinutes },
 ];
 
 /**
@@ -116,6 +117,10 @@ export function sinceBase(k: ScenarioKpi, base: ScenarioKpi): ScenarioKpi {
     damaged: k.damaged - base.damaged,
     medicalCompleted: k.medicalCompleted - base.medicalCompleted,
     dispatchFailed: k.dispatchFailed - base.dispatchFailed,
+    // Blackout cumulative counters (game minutes); the unpowered / dark counts are instantaneous.
+    darkJunctionMinutes: k.darkJunctionMinutes - base.darkJunctionMinutes,
+    batteryJunctionMinutes: k.batteryJunctionMinutes - base.batteryJunctionMinutes,
+    darkQueueVehicleMinutes: k.darkQueueVehicleMinutes - base.darkQueueVehicleMinutes,
   };
 }
 

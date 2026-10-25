@@ -58,6 +58,11 @@ describe('inputShapeError / toWorkerError', () => {
     expect(inputShapeError(policy)).toBeNull();
     expect(inputShapeError({ ...policy, params: { ...policy.params, preempt: 0 } })).toBeNull();
     expect(inputShapeError({ ...policy, params: { ...policy.params, preempt: 2 } })).toMatch(/preempt/);
+    expect(inputShapeError({ ...policy, params: { ...policy.params, battery: 1 } })).toBeNull();
+    expect(inputShapeError({ ...policy, params: { ...policy.params, battery: 0.5 } })).toMatch(/battery/);
+    expect(inputShapeError({ eventId: 'b', tick: 1, order: 0, kind: 'blackout.start', target: {}, params: { x: 0, z: 0, radius: 100, durationTicks: 50 } })).toBeNull();
+    expect(inputShapeError({ eventId: 'b', tick: 1, order: 0, kind: 'blackout.start', target: { buildingId: 's' }, params: { treatTicks: 5 } })).toMatch(/treatTicks/);
+    expect(inputShapeError({ eventId: 'e', tick: 1, order: 0, kind: 'blackout.end', target: { eventId: 'b' }, params: {} })).toBeNull();
   });
 
   it('checks target.eventId (ending one specific event) and top-level messages', () => {

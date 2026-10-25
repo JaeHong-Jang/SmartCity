@@ -172,6 +172,9 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
           run = null;
         }
         return;
+      case 'coverage':
+        if (sim) post({ t: 'coverage', coverage: sim.powerCoverage() });
+        return;
       case 'scenario':
       case 'policy':
       case 'kpi': {

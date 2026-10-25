@@ -17,6 +17,7 @@ import { OverlayLayer } from './overlays';
 import { PedestrianLayer } from './pedestrians';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer, Y_WALK } from './roads';
+import { BlackoutLayer } from './blackout';
 import { EmergencyLayer } from './emergency';
 import { ScenarioLayer } from './scenario';
 import { configureRenderer, createSun } from './sceneKit';
@@ -49,6 +50,9 @@ export class CityRenderer {
   private highlights = new HighlightLayer();
   readonly scenario: ScenarioLayer;
   readonly emergency: EmergencyLayer;
+  readonly blackout: BlackoutLayer;
+  /** Night factor 0..1 of the last frame (blackout veil strength). */
+  private night = 0;
   private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
   private dirty = { roads: true, buildings: true, vehicleTypes: true };
   private raf = 0;
@@ -98,7 +102,8 @@ export class CityRenderer {
     this.overlays = new OverlayLayer(store, stream, labelRoot, () => this.network);
     this.scenario = new ScenarioLayer(stream);
     this.emergency = new EmergencyLayer(stream);
-    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group);
+    this.blackout = new BlackoutLayer(stream);
+    this.scene.add(this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group, this.blackout.group);
 
     this.unsubs.push(
       store.onApplied((cmd) => {
@@ -115,6 +120,11 @@ export class CityRenderer {
         this.overlays.invalidateAll();
       }),
     );
+
+    if (import.meta.env?.DEV && typeof window !== 'undefined') {
+      // Test/debug hook (dev server only): what the blackout and signal layers currently draw.
+      (window as unknown as { __smartcityBlackout: unknown }).__smartcityBlackout = { stats: () => this.blackout.stats(), darkHeads: () => this.signals.darkHeads };
+    }
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -241,6 +251,7 @@ export class CityRenderer {
     (this.scene.background as THREE.Color).copy(dn.sky);
     (this.scene.fog as THREE.Fog).color.copy(dn.sky);
     this.buildings.setNight(dn.night);
+    this.night = dn.night;
   }
 
   private frame = (): void => {
@@ -262,6 +273,7 @@ export class CityRenderer {
     this.highlights.update(Date.now(), s.doc, s.highlights, s.docVersion);
     this.scenario.update(now);
     this.emergency.update(now);
+    this.blackout.update(now, this.night, this.cam.controls.distance);
     this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.renderer.render(this.scene, this.cam.camera);
@@ -306,6 +318,7 @@ export class CityRenderer {
     this.highlights.dispose();
     this.scenario.dispose();
     this.emergency.dispose();
+    this.blackout.dispose();
     this.ground.dispose();
     this.renderer.dispose();
   }

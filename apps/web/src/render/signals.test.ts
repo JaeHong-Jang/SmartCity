@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Color } from 'three';
 import { CROSSING_STRIDE, crossingSignature, PedSignal, type Crossing, type SimSnapshot } from '@smartcity/sim';
 import type { SimulationStream } from '../sim/simStream';
 import { pedLampState, PedSignalLayer, pedSignalHeads } from './signals';
@@ -67,5 +68,41 @@ describe('pedestrian signal layer', () => {
     layer.setCrossings([{ ...old[1]!, index: 0 }]);
     layer.update(0, 0.2);
     expect(greens()).toBe(0);
+  });
+});
+
+describe('signal head colors', () => {
+  it('codes 0..2 are red / yellow / green and 3 is dark (power cut)', async () => {
+    const { headLit } = await import('./signals');
+    expect([0, 1, 2, 3].map(headLit)).toEqual([0, 1, 2, 3]);
+    expect(headLit(-1)).toBe(0);
+    expect(headLit(7)).toBe(3); // never clamped to green
+  });
+
+  it('a dark head lights no lamp; a green head lights only the green one', async () => {
+    const { SignalLayer } = await import('./signals');
+    const heads = (codes: number[]): SimSnapshot => {
+      const a = new Float32Array(codes.length * 4);
+      codes.forEach((c, i) => a.set([i * 10, 0, 0, c], i * 4));
+      return { signals: a, signalCount: codes.length } as unknown as SimSnapshot;
+    };
+    let cur = heads([3, 2]);
+    const stream = { latest: () => cur, previous: () => null, latestAt: () => 0, previousAt: () => 0, subscribe: () => () => {} } as SimulationStream;
+    const layer = new SignalLayer(stream);
+    layer.update();
+    const lamps = layer.group.children.slice(1) as import('three').InstancedMesh[];
+    const lit = (head: number): boolean[] =>
+      lamps.map((l) => {
+        const col = new Color();
+        l.getColorAt(head, col);
+        return col.r + col.g + col.b > 0.4; // lit lamps are bright, unlit ones near black (linear color)
+      });
+    expect(layer.darkHeads).toBe(1);
+    expect(lit(0)).toEqual([false, false, false]);
+    expect(lit(1)).toEqual([false, false, true]);
+    cur = heads([2, 2]); // power back: the dark head shows its plan color again
+    layer.update();
+    expect(layer.darkHeads).toBe(0);
+    expect(lit(0)).toEqual([false, false, true]);
   });
 });

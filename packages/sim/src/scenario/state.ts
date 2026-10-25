@@ -7,6 +7,7 @@
 import { hash01 } from '../citizens/schedule.js';
 import type { Access } from '../traffic/demand.js';
 import type { Goal, Vehicle, World } from '../traffic/world.js';
+import type { Blackout } from './blackout.js';
 import type { SignalCtl } from './preempt.js';
 import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioInput } from './types.js';
 
@@ -132,6 +133,17 @@ export interface ScenarioState {
   damaged: string[];
   /** Signal controllers driving a junction now (by node id; never a junction in `World.signalClearing`). */
   ctl: Map<string, SignalCtl>;
+  /** Active blackouts (application order). */
+  blackouts: Blackout[];
+  /** Battery charge (ticks left) of unpowered signals (`n:`node / `c:`crosswalk id); removed = full. */
+  battery: Map<string, number>;
+  /** Dark signal → the blackout that darkened it. */
+  darkBy: Map<string, string>;
+  unpoweredBuildings: string[];
+  unpoweredSignals: number;
+  darkJunctionTicks: number;
+  batteryTicks: number;
+  darkQueueTicks: number;
   // ----- composed over the current network -----
   /** Per edge: new entry forbidden (closed lanes and every connector into them). Null = no closure. */
   ban: Uint8Array | null;
@@ -183,6 +195,14 @@ export function newScenarioState(w: World): ScenarioState {
     missions: [],
     damaged: [],
     ctl: new Map(),
+    blackouts: [],
+    battery: new Map(),
+    darkBy: new Map(),
+    unpoweredBuildings: [],
+    unpoweredSignals: 0,
+    darkJunctionTicks: 0,
+    batteryTicks: 0,
+    darkQueueTicks: 0,
     ban: null,
     obs: null,
     obsRear: null,
@@ -300,5 +320,5 @@ export function scenarioHolds(w: World, v: Vehicle): boolean {
 export function activeEvents(sc: ScenarioState): number {
   const surges = new Set<string>();
   for (const t of sc.surgeQueue) surges.add(t.eventId);
-  return sc.effects.length + sc.incidents.length + surges.size;
+  return sc.effects.length + sc.incidents.length + sc.blackouts.length + surges.size;
 }

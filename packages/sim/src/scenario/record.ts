@@ -12,7 +12,7 @@ export interface ReplayOptions {
   warmup?: boolean;
   /**
    * ON/OFF comparison of the smart response: replace `reroute` in the initial policy and in every recorded
-   * `policy.set` input and drop any explicit `preempt` (so pre-emption follows it), keeping everything else
+   * `policy.set` input and drop any explicit `preempt` / `battery` (so they follow it), keeping everything else
    * (inputs, informed share, ticks) identical.
    */
   reroute?: boolean;
@@ -44,12 +44,13 @@ export function simulationFromRecord(record: ScenarioRecord, opts: Omit<SimOptio
     // The initial policy is state, not an input: `record.inputs` may already hold the `policy.set` inputs of
     // the recorded run (ids `policy@…`), and a second recorded one would collide with them.
     const policy = reroute === undefined ? record.policy : { reroute, informedShare: record.policy.informedShare };
-    ensureScenario((sim as unknown as { w: World }).w).policy = { reroute: policy.reroute, informedShare: policy.informedShare, ...(policy.preempt !== undefined ? { preempt: policy.preempt } : {}) };
+    ensureScenario((sim as unknown as { w: World }).w).policy = { reroute: policy.reroute, informedShare: policy.informedShare, ...(policy.preempt !== undefined ? { preempt: policy.preempt } : {}), ...(policy.battery !== undefined ? { battery: policy.battery } : {}) };
     for (const input of record.inputs) {
       let copy = input;
       if (input.kind === 'policy.set' && reroute !== undefined) {
         const params: Record<string, number> = { ...input.params, reroute: reroute ? 1 : 0 };
         delete params.preempt;
+        delete params.battery;
         copy = { ...input, params };
       }
       const r = sim.scenarioInput(copy);

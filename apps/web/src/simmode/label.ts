@@ -46,3 +46,13 @@ export function emergencyPlace(doc: CityDoc, buildingId: string, kind: 'fire' | 
   const pos = b?.pos ?? { x: 0, z: 0 };
   return { label: kind === 'fire' ? `${name} 건물 화재 ${at(pos)}` : `${name} 응급 환자 ${at(pos)}`, pos };
 }
+
+export function blackoutSubstationPlace(doc: CityDoc, buildingId: string): Place {
+  const b = doc.buildings[buildingId];
+  const name = b ? (doc.buildingTypes[b.typeId]?.name ?? '변전소') : '변전소';
+  return { label: `${name} 담당 구역 정전`, pos: b?.pos ?? { x: 0, z: 0 } };
+}
+
+export function blackoutAreaPlace(x: number, z: number, radius: number): Place {
+  return { label: `구역 정전 ${at({ x, z })} 반경 ${Math.round(radius)} m`, pos: { x, z } };
+}

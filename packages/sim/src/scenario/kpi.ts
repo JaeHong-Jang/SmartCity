@@ -2,6 +2,7 @@
 
 import { CLOCK_SCALE } from '../types.js';
 import type { World } from '../traffic/world.js';
+import { minutesOf } from './blackout.js';
 import { gameMinutes } from './emergency.js';
 import { NO_ROUTE } from './reroute.js';
 import { activeEvents } from './state.js';
@@ -67,6 +68,12 @@ export function scenarioKpi(w: World): ScenarioKpi {
     medicalCompleted: sc.medicalCompleted,
     dispatchFailed: sc.dispatchFailed,
     ...respondingNow(w),
+    unpoweredSignals: sc.unpoweredSignals,
+    darkSignals: w.dark !== null ? w.dark.junctions.size + w.dark.crossings.size : 0,
+    unpoweredBuildings: sc.unpoweredBuildings.length,
+    darkJunctionMinutes: minutesOf(w, sc.darkJunctionTicks),
+    batteryJunctionMinutes: minutesOf(w, sc.batteryTicks),
+    darkQueueVehicleMinutes: minutesOf(w, sc.darkQueueTicks),
   };
 }
 
@@ -116,6 +123,12 @@ export function inactiveKpi(w: World): ScenarioKpi {
     respondingNow: 0,
     respondingElapsedSum: 0,
     oldestPendingMinutes: 0,
+    unpoweredSignals: 0,
+    darkSignals: 0,
+    unpoweredBuildings: 0,
+    darkJunctionMinutes: 0,
+    batteryJunctionMinutes: 0,
+    darkQueueVehicleMinutes: 0,
   };
 }
 

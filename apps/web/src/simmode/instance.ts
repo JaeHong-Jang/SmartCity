@@ -12,3 +12,8 @@ export function simModeController(): SimModeController {
   if (!controller) throw new Error('SimModeController missing');
   return controller;
 }
+
+/** The controller if main.tsx has set one (render layers use it without throwing before that). */
+export function tryController(): SimModeController | null {
+  return controller;
+}

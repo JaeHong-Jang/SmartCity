@@ -63,6 +63,8 @@ function grantRequests(w: World): void {
   const nLanes = net.nLanes;
   const conns = w.graph.connectors;
   const ban = w.sc !== null ? w.sc.ban : null;
+  // Dark (unpowered) signals run as an all-way stop: first come, first served, no turn priority.
+  const dark = w.dark !== null ? w.dark.nodeDark : null;
   let n = 0;
   for (let l = 0; l < nLanes; l++) {
     const list = w.onEdge[l]!;
@@ -96,7 +98,7 @@ function grantRequests(w: World): void {
     r.v = v;
     r.c = c;
     r.node = node;
-    r.pri = net.nodeSignalized[node] ? net.connPri[c]! : 0;
+    r.pri = net.nodeSignalized[node] && (dark === null || !dark[node]) ? net.connPri[c]! : 0;
     r.order = stopReq ? v.stopTick : v.reqTick;
     reqs[n++] = r;
   }

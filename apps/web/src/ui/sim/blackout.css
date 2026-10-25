@@ -1,0 +1,23 @@
+/* Blackout (정전) tool and rows. Uses the app's CSS tokens; kept apart from ui/styles.css. */
+.sim-blackout-mode {
+  display: flex;
+  gap: 6px;
+}
+
+.sim-blackout-mode button {
+  flex: 1;
+}
+
+.sim-power-line {
+  color: var(--warn);
+  font-size: 11px;
+}
+
+.sim-power-line b {
+  color: var(--text);
+}
+
+.sim-supply-note {
+  font-size: 10px;
+  color: var(--text-dim);
+}

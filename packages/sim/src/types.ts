@@ -138,6 +138,7 @@ export interface SimStats {
 }
 
 export const VEHICLE_STRIDE = 6;
+/** Signal head: x, z, heading, color (0 red, 1 yellow, 2 green, 3 dark = power cut, unlit). */
 export const SIGNAL_STRIDE = 4;
 /** Per pedestrian: x, z, heading, speed (m/s), gaitPhase (radians, from walked distance), style (0..15), state (PedState), elevation (m). */
 export const PED_STRIDE = 8;
@@ -178,7 +179,7 @@ export interface SimSnapshot {
   vehicleCount: number;
   /** typeIndex → vehicleTypeId, in sorted id order. */
   vehicleTypeIds: string[];
-  /** Per signal head (one per incoming lane at a signalized node): x, z, heading, color (0 red, 1 yellow, 2 green). */
+  /** Per signal head (one per incoming lane at a signalized node): x, z, heading, color (0 red, 1 yellow, 2 green, 3 dark: power cut, unlit). */
   signals: Float32Array;
   signalCount: number;
   /** Per lane (RoadGraph.lanes order): mean speed / speed limit in [0,1], or -1 when empty. For the flow overlay. */
@@ -274,4 +275,6 @@ export interface SignalView {
   cycle: number;
   /** The pedestrian-only phase (`IntersectionControl.scramble`) is active; false when ignored (ADR 0009 §3). */
   scramble: boolean;
+  /** Signal dark (power cut, ADR 0010 §4): heads unlit, the junction runs as all-way stop; `color` is then 'red'. */
+  dark?: true;
 }

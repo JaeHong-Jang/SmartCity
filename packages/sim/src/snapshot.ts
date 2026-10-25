@@ -59,7 +59,7 @@ export function writeSnapshot(w: World, scratch: SnapshotScratch, stats: SimStat
         sb[o++] = head.x;
         sb[o++] = head.z;
         sb[o++] = head.heading;
-        sb[o++] = colorCode(headColor(p, h));
+        sb[o++] = p.ctl?.color === 'off' ? 3 : colorCode(headColor(p, h));
       }
     }
     // Mid-block crossing signals: one vehicle head per lane at its stop line.
@@ -68,7 +68,8 @@ export function writeSnapshot(w: World, scratch: SnapshotScratch, stats: SimStat
         sb[o++] = head.x;
         sb[o++] = head.z;
         sb[o++] = head.heading;
-        sb[o++] = colorCode(m.color);
+        // 3 = dark (power cut): renderers show the head unlit.
+        sb[o++] = m.ctl === 'off' ? 3 : m.ctl === 'red' ? 0 : colorCode(m.color);
       }
     }
     const nLanes = w.net.nLanes;

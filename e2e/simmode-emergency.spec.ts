@@ -172,8 +172,8 @@ test('phase 4c2: fire and medical call with a station and a hospital, preemption
   await page.locator('.speed button').first().click();
   await page.locator('[data-simmode-compare]').click();
   await expect(page.locator('[data-simmode-result]')).toBeVisible({ timeout: 240_000 });
-  expect(await page.locator('[data-simmode-line="on"]').count()).toBe(6);
-  expect(await page.locator('[data-simmode-line="off"]').count()).toBe(6);
+  expect(await page.locator('[data-simmode-line="on"]').count()).toBe(7);
+  expect(await page.locator('[data-simmode-line="off"]').count()).toBe(7);
   const resp = page.locator('[data-metric="avgResponseTime"]');
   await expect(resp).toBeVisible();
   for (const side of ['on', 'off']) {

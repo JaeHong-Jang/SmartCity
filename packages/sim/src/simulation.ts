@@ -26,6 +26,8 @@ import { emergencyArrived, fireProgress, processEmergency, recheckIncidents } fr
 import { inactiveKpi, scenarioKpi } from './scenario/kpi.js';
 import { controlledJunctions, rebindSignalControl, updatePreemption, writeSignalControl } from './scenario/preempt.js';
 import { reconcileSignals, stepClearings, writeClearings } from './traffic/signalClearing.js';
+import { reapplyDark, writeDark } from './traffic/signalDark.js';
+import { minutesOf, powerCoverage, updatePower, type PowerCoverage } from './scenario/blackout.js';
 import { processReroutes } from './scenario/reroute.js';
 import { scenarioHolds } from './scenario/state.js';
 import { processSurge } from './scenario/surge.js';
@@ -129,7 +131,9 @@ export class Simulation {
       types: new Map(),
       signals: { plans: [], mids: [] },
       signalClearing: new Map(),
+      midClearing: new Map(),
       signalOffsets: new Map(),
+      dark: null,
       demand: buildDemand(d, net),
       lines: [],
       nextId: 1,
@@ -180,11 +184,15 @@ export class Simulation {
     const w = this.w;
     this.flush();
     if (w.sc !== null) applyDueInputs(w);
+    // Blackouts (ADR 0010 §3): power, batteries, DARK / restore — only while a blackout runs or a signal is dark.
+    // …and once more after the last one ended: restores, refills batteries, clears the unpowered state.
+    if (w.sc !== null && (w.sc.blackouts.length > 0 || w.dark !== null || w.sc.battery.size > 0 || w.sc.unpoweredSignals > 0 || w.sc.unpoweredBuildings.length > 0)) updatePower(w);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
     // Signal control state machine (ADR 0010 §4): only while emergency vehicles are out or a junction is driven.
-    if (w.sc !== null && (w.sc.missions.length > 0 || w.sc.ctl.size > 0 || w.signalClearing.size > 0)) updatePreemption(w);
-    // Junctions entering a changed signal plan (every mode): yellow, all red, pedestrian clearance first.
-    else if (w.signalClearing.size > 0) stepClearings(w);
+    if (w.sc !== null && (w.sc.missions.length > 0 || w.sc.ctl.size > 0 || w.signalClearing.size > 0 || w.midClearing.size > 0)) updatePreemption(w);
+    // Signals entering a changed plan (every mode): yellow, all red, pedestrian clearance first.
+    else if (w.signalClearing.size > 0 || w.midClearing.size > 0) stepClearings(w, undefined, (id) => w.dark !== null && w.dark.crossings.has(id));
+    if (w.dark !== null) writeDark(w);
     processCitizenEvents(w);
     if (w.demandOn) generateTrips(w);
     maintainBuses(w);
@@ -272,6 +280,14 @@ export class Simulation {
    */
   scenarioActivatedAt(): number | null {
     return this.w.sc !== null ? this.w.sc.since : null;
+  }
+
+  /**
+   * Power supply coverage (ADR 0010 §8, "커버리지 기반 공급 모델"): each signalized junction, mid-block signal
+   * crosswalk and building → the closest substation within 400 m (ties: id). Derived from the document; read-only.
+   */
+  powerCoverage(): PowerCoverage {
+    return powerCoverage(this.w);
   }
 
   /**
@@ -384,6 +400,7 @@ export class Simulation {
       activeEvents.push({ eventId: id, kind: 'surge', startTick: s.startTick, endTick: s.endTick });
     }
     for (const inc of sc.incidents) activeEvents.push({ eventId: inc.eventId, kind: inc.kind, startTick: inc.startTick, endTick: null });
+    for (const b of sc.blackouts) activeEvents.push({ eventId: b.eventId, kind: 'blackout', startTick: b.startTick, endTick: b.endTick });
     activeEvents.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
     const recentLog = sc.log.slice(-RECENT_LOG_SIZE).map((e) => ({ eventId: e.eventId, tick: e.tick, kind: e.kind, applied: e.applied, ...(e.note !== undefined ? { reason: e.note } : {}) }));
     const byEvent = <T extends { eventId: string }>(list: T[]): T[] => list.sort((a, b) => (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0));
@@ -403,6 +420,16 @@ export class Simulation {
       damagedBuildings: sc.damaged.slice(),
       dispatches,
       preempted,
+      blackouts: [...sc.blackouts]
+        .sort((a, b) => (a.eventId < b.eventId ? -1 : 1))
+        .map((b) => ({ eventId: b.eventId, substationId: b.substationId, x: b.x, z: b.z, radius: b.radius, startTick: b.startTick, endTick: b.endTick })),
+      darkJunctions: w.dark !== null ? [...w.dark.junctions.keys()].sort() : [],
+      darkCrossings: w.dark !== null ? [...w.dark.crossings].sort() : [],
+      battery: [...sc.battery.entries()]
+        .filter(([id, ticks]) => ticks > 0 && !sc.darkBy.has(id))
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([signalId, ticks]) => ({ signalId, remainingMinutes: minutesOf(w, ticks) })),
+      unpoweredBuildings: sc.unpoweredBuildings.slice(),
     };
   }
 
@@ -498,13 +525,19 @@ export class Simulation {
     w.signals.builtAt = w.tick;
     // A changed plan is entered safely (traffic/signalClearing.ts); controllers first turn into clearances.
     if (w.sc !== null) rebindSignalControl(w);
-    reconcileSignals(w, oldSignals, (nodeId) => w.sc !== null && w.sc.ctl.has(nodeId));
+    reconcileSignals(
+      w,
+      oldSignals,
+      (nodeId) => (w.sc !== null && w.sc.ctl.has(nodeId)) || (w.dark !== null && w.dark.junctions.has(nodeId)),
+      (id) => w.dark !== null && w.dark.crossings.has(id),
+    );
     w.laneGreen.fill(1);
     w.zs.pedSig.fill(PedSignal.none);
     w.zs.midColor.fill(2);
     updateSignals(w.signals, w.tick, w.laneGreen, w.zs.pedSig, w.zs.midColor);
     if (w.sc !== null && w.sc.ctl.size > 0) writeSignalControl(w);
-    if (w.signalClearing.size > 0) writeClearings(w);
+    if (w.signalClearing.size > 0 || w.midClearing.size > 0) writeClearings(w);
+    if (w.dark !== null) writeDark(w);
     w.demand = buildDemand(w.doc, w.net);
     // Incidents whose building, and dispatches whose facility, an edit removed (ADR 0010 §3).
     if (w.sc !== null && (w.sc.incidents.length > 0 || w.sc.missions.length > 0)) recheckIncidents(w);
@@ -519,6 +552,8 @@ export class Simulation {
     const oldPg = this.w.ped.pg;
     const oldIds = this.w.graph.crossings.map((c) => c.id);
     recompileWorld(this.w);
+    // New lane / node indexes: the dark junctions' all-way stop applies to the new network.
+    if (this.w.dark !== null) reapplyDark(this.w);
     this.buildingSig = this.buildingSignature();
     this.rebuildPeds(oldPg, oldIds);
     this.refreshDerived();
