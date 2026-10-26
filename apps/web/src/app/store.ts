@@ -36,9 +36,12 @@ export type Selection =
   | { kind: 'busStop'; id: string }
   | { kind: 'parcel'; id: string };
 
+export type RoadMode = 'straight' | 'curve' | 'free';
+
 export interface ToolOptions {
   roadTypeId: string;
-  curve: boolean;
+  /** Road tool drawing mode (ADR 0012 §2): straight pieces, tangent curves, or free-hand strokes. */
+  roadMode: RoadMode;
   /** Road tool: round the corners of a newly drawn road automatically (ADR 0012 §1; remembered per browser). */
   autoFillet: boolean;
   /** Shared by every placing tool and by moves (G cycles it). */
@@ -93,6 +96,8 @@ export interface ConnectWait {
   retryAt: number | null;
   /** Refusal the server sent for this room (e.g. its city file cannot be read). */
   error: string | null;
+  /** The server refused this app's version: no more retries, the overlay asks for a reload. */
+  refresh?: boolean;
 }
 
 /** A city this browser saved in offline solo mode under the same room name, differing from the server's. */
@@ -194,6 +199,8 @@ const ERROR_KO: [RegExp, string][] = [
   [/building overlaps a road/, '건물이 도로와 겹칩니다'],
   [/building extends beyond the map/, '건물이 지도 경계를 벗어납니다'],
   [/the moved road would cross another road/, '옮긴 도로가 다른 도로와 교차합니다'],
+  [/could not be checked against nearby roads \(contact check limit\)/, '주변 도로와의 간격을 끝까지 확인하지 못했습니다 (검사 한도). 조금 떨어뜨려 다시 그리세요'],
+  [/the new road would cross another road without a junction/, '다른 도로와 교차점 없이 겹칩니다 (도시가 바뀌었습니다. 다시 그리세요)'],
   [/parcels overlap/, '다른 필지와 겹칩니다'],
   [/parcel smaller than/, '필지가 너무 작습니다 (16㎡ 미만)'],
   [/parcel\.polygon must be a simple polygon/, '필지 경계가 스스로 교차합니다'],
@@ -229,6 +236,7 @@ const ERROR_KO: [RegExp, string][] = [
   [/cannot round the corner: a lot faces the corner/, '모서리에 접한 필지가 있습니다'],
   [/cannot round the corner: the curve would cross a building/, '곡선이 건물과 겹칩니다'],
   [/cannot round the corner: the curve would cross a zoned lot/, '곡선이 자동 필지와 겹칩니다'],
+  [/cannot round the corner: the curve could not be checked against nearby roads/, '주변 도로와의 간격을 끝까지 확인하지 못했습니다 (검사 한도)'],
   [/cannot round the corner: the curve would cross another road/, '곡선이 다른 도로와 교차합니다'],
   [/cannot round the corner: the corner changed since it was planned/, '다른 사용자가 이 모서리를 먼저 바꿨습니다. 다시 시도하세요'],
   [/fillet radius out of range/, '반경이 허용 범위를 벗어났습니다'],
@@ -263,7 +271,7 @@ export function initialState(room: string, name: string): ClientState {
     offlineCity: null,
     offlineError: null,
     tool: 'select',
-    toolOptions: { roadTypeId: 'road-2', curve: false, autoFillet: true, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
+    toolOptions: { roadTypeId: 'road-2', roadMode: 'straight', autoFillet: true, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
     toolHint: '',
     selection: null,
     phaseHighlight: null,

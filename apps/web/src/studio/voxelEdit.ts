@@ -204,7 +204,7 @@ export function removeCells(doc: StudioDoc, cells: readonly Cell[]): Patch {
 }
 
 /** What a paint stroke changes on each painted cell's style. */
-export type PaintChannel = 'all' | 'color' | 'roofColor' | 'facade' | 'use' | 'roof';
+export type PaintChannel = 'all' | 'color' | 'roofColor' | 'facade' | 'use' | 'roof' | 'round';
 
 export function paintStyle(base: VoxelStyle, brush: VoxelStyle, channel: PaintChannel): VoxelStyle {
   const next: VoxelStyle = { ...base, ...(base.facade ? { facade: { ...base.facade } } : {}) };
@@ -228,6 +228,16 @@ export function paintStyle(base: VoxelStyle, brush: VoxelStyle, channel: PaintCh
       break;
     case 'roof':
       next.roof = brush.roof;
+      break;
+    case 'round':
+      // The volume tag travels with the radius: a rounded volume never merges with a touching twin.
+      if (brush.round) {
+        next.round = brush.round;
+        if (brush.volume !== undefined) next.volume = brush.volume;
+      } else {
+        delete next.round;
+        delete next.volume;
+      }
       break;
   }
   return next;

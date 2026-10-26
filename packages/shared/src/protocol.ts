@@ -4,7 +4,13 @@ import type { Command } from './commands.js';
 import type { Vec2 } from './geometry.js';
 import type { CityDoc } from './model.js';
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * Bumped when clients of different versions must not edit together: v2 = rounded volumes (a v1 client
+ * would ignore `round` and judge collisions on other outlines). The server refuses other versions.
+ */
+export const PROTOCOL_VERSION = 2;
+/** Shown when the server refuses the client's protocol version (sent as `error` with code 'protocol'). */
+export const PROTOCOL_MISMATCH = '앱을 새로고침하세요 — 버전이 다릅니다';
 export const MAX_MESSAGE_BYTES = 512 * 1024;
 export const ROOM_ID_RE = /^[a-z0-9-]{1,32}$/;
 
@@ -53,7 +59,8 @@ export type ServerMessage =
   | { t: 'rejected'; ref: number; error: string }
   | { t: 'peers'; peers: Peer[] }
   | { t: 'presence'; clientId: string; presence: Presence }
-  | { t: 'error'; error: string }
+  /** `code: 'protocol'` = refused hello of another protocol version: retrying cannot help, reload the app. */
+  | { t: 'error'; error: string; code?: 'protocol' }
   | { t: 'pong'; at: number }
   /** Sent on join: whether the assistant is available (server has an API key) and which model it uses. */
   | { t: 'ai.status'; enabled: boolean; model: string | null }

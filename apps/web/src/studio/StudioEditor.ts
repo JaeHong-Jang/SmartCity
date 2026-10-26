@@ -290,6 +290,7 @@ export class StudioEditor {
     if (!sel) return { ok: false, reason: '덩어리를 먼저 선택하세요' };
     const part = this.parts().parts[sel.part]!;
     if (part.footprint) return { ok: false, reason: '경사 지붕은 사각형 덩어리에만 올릴 수 있습니다' };
+    if (part.round) return { ok: false, reason: '모서리가 둥근 덩어리는 평지붕만 가능합니다' };
     if (sel.columns.some(([i, j]) => this.has(i, j, sel.top + 1))) return { ok: false, reason: '위에 블록이 있어 평지붕이 됩니다 — 옥상 장식을 써 보세요' };
     return { ok: true, reason: '' };
   }
@@ -299,6 +300,32 @@ export class StudioEditor {
     if (!sel) return false;
     if (roof !== 'flat' && !this.roofOptions().ok) return false;
     return this.commit(paintCells(this.doc, sel.cells, { ...this.style, roof }, 'roof'));
+  }
+
+  /**
+   * Corner rounding of the selected volume (ADR 0012 §4: per rectangular volume): its radius, the
+   * largest one (half its shorter side) and, when it cannot be rounded, why.
+   */
+  roundOptions(): { ok: boolean; value: number; max: number; reason: string } {
+    const sel = this.selection();
+    if (!sel) return { ok: false, value: 0, max: 0, reason: '덩어리를 먼저 선택하세요' };
+    const part = this.parts().parts[sel.part]!;
+    if (part.footprint) return { ok: false, value: 0, max: 0, reason: '모서리는 사각형 덩어리만 둥글게 할 수 있습니다' };
+    return { ok: true, value: part.round ?? 0, max: Math.min(part.width, part.depth) / 2, reason: '' };
+  }
+
+  /** Round the selected volume's corners (r in metres, clamped to its largest radius; 0 = square corners). */
+  setRound(r: number): boolean {
+    const o = this.roundOptions();
+    const sel = this.selection();
+    if (!sel || !o.ok) return false;
+    const v = Math.max(0, Math.min(r, o.max));
+    const { round: _old, volume: _tag, ...brush } = this.style;
+    // A rounded volume keeps (or gets) its own tag so it stays apart from touching volumes of the same look.
+    const styles = this.doc.model.styles;
+    const own = styles[this.doc.model.cells.get(voxelKey(...sel.cells[0]!))!]?.volume;
+    const volume = own ?? styles.reduce((m, s) => Math.max(m, s.volume ?? -1), -1) + 1;
+    return this.commit(paintCells(this.doc, sel.cells, v > 0 ? { ...brush, round: v, volume } : brush, 'round'));
   }
 
   /** Start dragging the floor handle of the selection. */

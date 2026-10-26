@@ -4,7 +4,7 @@ import { checkDesign, fromBuildingType, toBuildingType } from './design';
 import { DICE_SIZES, DICE_STYLES, rollDesign } from './dice';
 import { pickVoxel, planeCell, type V3 } from './picking';
 import { mirrorProps, propBox, snapProp } from './props';
-import { StudioEditor } from './StudioEditor';
+import { DEFAULT_STYLE, StudioEditor } from './StudioEditor';
 import { brushCells, connectedRegion, newStudioDoc, rectCells, withSymmetry, type StudioDoc } from './voxelEdit';
 
 const ground = (i: number, j: number) => ({ kind: 'plane' as const, i, j, k: 0, normal: [0, 1, 0] as V3, t: 0, point: [0, 0, 0] as V3 });
@@ -164,6 +164,68 @@ describe('StudioEditor edits and undo', () => {
     ed.click(face(0, 0, 0, [0, 1, 0]));
     ed.select(face(1, 1, 0, [0, 1, 0]));
     expect(ed.roofOptions()).toMatchObject({ ok: false, reason: expect.stringMatching(/위에 블록/) });
+  });
+
+  it('rounds the corners of the selected rectangular volume only, as one undo step, and saves the radius', () => {
+    const ed = new StudioEditor(newStudioDoc());
+    ed.apply('add', ed.rectTargets('add', [0, 0, 0], { i: 2, j: 3 }));
+    ed.apply('add', ed.rectTargets('add', [6, 0, 0], { i: 8, j: 3 }));
+    ed.select(face(0, 0, 0, [0, 1, 0]));
+    // 3 × 4 cells of 2 m: 6 × 8 m, so at most 3 m.
+    expect(ed.roundOptions()).toMatchObject({ ok: true, value: 0, max: 3 });
+    expect(ed.setRound(2)).toBe(true);
+    expect(ed.roundOptions().value).toBe(2);
+    expect(ed.roofOptions()).toMatchObject({ ok: false, reason: expect.stringMatching(/둥근/) });
+    const parts = voxelsToParts(ed.doc.model).parts;
+    expect(parts.map((p) => p.round ?? 0).sort()).toEqual([0, 2]);
+    const t = toBuildingType(ed.doc, meta);
+    accepted(t);
+    // Reopening the saved design keeps the radius on that volume.
+    const back = voxelsToParts(fromBuildingType(t).doc.model).parts;
+    expect(back.map((p) => p.round ?? 0).sort()).toEqual([0, 2]);
+    expect(ed.setRound(99)).toBe(true);
+    expect(ed.roundOptions().value).toBe(3);
+    ed.undo();
+    ed.undo();
+    expect(voxelsToParts(ed.doc.model).parts.every((p) => p.round === undefined)).toBe(true);
+    // An L shape cannot be rounded (drawn footprints stay square).
+    ed.click(face(2, 3, 0, [1, 0, 0]));
+    ed.select(face(0, 0, 0, [0, 1, 0]));
+    expect(ed.roundOptions()).toMatchObject({ ok: false, reason: expect.stringMatching(/사각형/) });
+    expect(ed.setRound(2)).toBe(false);
+  });
+
+  // Sol P5d review #3: rounding two touching volumes of the same look must not merge them into one
+  // rounded box; a rounded volume edited into a non-rectangle is reported, not silently squared.
+  it('keeps touching rounded volumes apart and reports a rounded volume that is no longer a rectangle', () => {
+    const ed = new StudioEditor(newStudioDoc());
+    // Two 4 × 4-cell blocks side by side, same style: one volume of 8 × 4 cells.
+    ed.apply('add', ed.rectTargets('add', [0, 0, 0], { i: 7, j: 3 }));
+    expect(voxelsToParts(ed.doc.model).parts).toHaveLength(1);
+    // Paint the right half another colour, round both halves, paint it back: still two rounded volumes.
+    ed.style = { ...ed.style, color: '#123456' };
+    ed.channel = 'color';
+    ed.apply('paint', ed.rectTargets('paint', [4, 0, 0], { i: 7, j: 3 }));
+    ed.select(face(0, 0, 0, [0, 1, 0]));
+    expect(ed.setRound(4)).toBe(true);
+    ed.select(face(4, 0, 0, [0, 1, 0]));
+    expect(ed.setRound(4)).toBe(true);
+    ed.style = { ...ed.style, color: DEFAULT_STYLE.color };
+    ed.apply('paint', ed.rectTargets('paint', [4, 0, 0], { i: 7, j: 3 }));
+    const parts = voxelsToParts(ed.doc.model).parts;
+    expect(parts.map((p) => [p.width, p.round])).toEqual([
+      [8, 4],
+      [8, 4],
+    ]);
+    // Reopening the saved design keeps them apart too.
+    const back = voxelsToParts(fromBuildingType(toBuildingType(ed.doc, meta)).doc.model).parts;
+    expect(back.map((p) => [p.width, p.round])).toEqual([
+      [8, 4],
+      [8, 4],
+    ]);
+    // Removing a corner block of the left volume makes it an L: its radius is dropped and reported.
+    ed.apply('erase', [[0, 0, 0]]);
+    expect(ed.parts().unrounded).toEqual([0]);
   });
 
   it('places props with symmetry and removes the mirrored group together', () => {

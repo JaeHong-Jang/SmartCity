@@ -153,3 +153,31 @@ describe('LocalTransport', () => {
     expect(storage.getItem(offlineStorageKey('r'))).toBe(raw);
   });
 });
+
+// Sol P5d review #4: an offline save and a command agree on what a rounded volume may be.
+describe('rounded volumes in an offline save', () => {
+  const withRound = (round: unknown, extra: Record<string, unknown> = {}) => {
+    const doc = createEmptyDoc() as unknown as { buildingTypes: Record<string, { parts: Record<string, unknown>[] }> };
+    const p = doc.buildingTypes.house!.parts[0]!;
+    Object.assign(p, { width: 20, depth: 20, roof: 'flat', round, ...extra });
+    return JSON.stringify({ seq: 1, doc });
+  };
+
+  it('opens round: null (as no radius) and refuses radii a command refuses', () => {
+    const storage = new MemStorage();
+    storage.setItem(offlineStorageKey('r'), withRound(null));
+    const ok = readOfflineSave(storage, 'r');
+    expect(ok.status).toBe('ok');
+    if (ok.status === 'ok') expect('round' in ok.doc.buildingTypes.house!.parts[0]!).toBe(false);
+    for (const [what, raw] of [
+      ['negative', withRound(-1)],
+      ['above half the side', withRound(11)],
+      ['with a pitched roof', withRound(4, { roof: 'gable' })],
+    ] as const) {
+      storage.setItem(offlineStorageKey('r'), raw);
+      expect(readOfflineSave(storage, 'r').status, what).toBe('unreadable');
+    }
+    storage.setItem(offlineStorageKey('r'), withRound(10));
+    expect(readOfflineSave(storage, 'r').status).toBe('ok');
+  });
+});

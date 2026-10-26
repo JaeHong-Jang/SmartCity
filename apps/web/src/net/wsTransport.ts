@@ -15,6 +15,9 @@ export const MAX_WELCOME_DEADLINE_MS = 60_000;
 /** A timer this late means the page was busy (first shader compile), not that the server is slow. */
 const LATE_MS = 250;
 
+/** A refusal of the hello's protocol version (this server; servers before v2 only sent the text). */
+const protocolRefused = (m: Extract<ServerMessage, { t: 'error' }>): boolean => m.code === 'protocol' || /^unsupported protocol/.test(m.error);
+
 export class WsTransport implements Transport {
   private ws: WebSocket | null = null;
   private messages = new Emitter<ServerMessage>();
@@ -32,6 +35,11 @@ export class WsTransport implements Transport {
   attempts = 0;
   /** Epoch ms of the next automatic attempt while waiting for it, else null. */
   retryAt: number | null = null;
+  /**
+   * The server refused this app's protocol version: retrying cannot help, so the transport stops and
+   * the connect overlay asks for a reload instead.
+   */
+  outdated = false;
 
   constructor(
     private readonly url: string,
@@ -79,6 +87,11 @@ export class WsTransport implements Transport {
         return;
       }
       // Only a welcome proves the room is served: a server that opens and then refuses keeps backing off.
+      if (msg.t === 'error' && protocolRefused(msg)) {
+        this.outdated = true;
+        this.closed = true;
+        this.retryAt = null;
+      }
       if (msg.t === 'welcome') {
         this.backoff = 500;
         this.attempts = 0;

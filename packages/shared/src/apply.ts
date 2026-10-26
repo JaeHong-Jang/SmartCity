@@ -31,7 +31,7 @@ import {
   validateVehicleType,
 } from './apply/validate.js';
 import { buildingOverlapsBuildings } from './editing/buildings.js';
-import { checkRoadClear, dropCrosswalks, filletCorner, planNodeFillet, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment, type FilletGeometry } from './apply/roads.js';
+import { checkRoadClear, checkSegmentCrossings, nearRoads, dropCrosswalks, filletCorner, planNodeFillet, pruneAutoLots, pruneFeatures, removeSegment, removeStop, splitSegment, type FilletGeometry } from './apply/roads.js';
 
 export { LIMITS } from './apply/limits.js';
 export { segmentLength, segmentsAtNode } from './apply/validate.js';
@@ -103,7 +103,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       const n = cmd.node;
       checkId(n?.id, 'node');
       if (has(doc.nodes, n.id)) fail('node exists');
-      checkCapacity(doc.nodes, n.id, LIMITS.nodes, 'nodes');
+      checkCapacity(doc.nodes, n.id, LIMITS.nodes, 'nodes', tx);
       checkPos(doc, n.pos, 'node.pos');
       tx.set(doc.nodes, n.id, { id: n.id, pos: { x: n.pos.x, z: n.pos.z } });
       return;
@@ -113,23 +113,26 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!n) fail('unknown node');
       checkPos(doc, cmd.pos, 'pos');
       tx.set(doc.nodes, n.id, { id: n.id, pos: { x: cmd.pos.x, z: cmd.pos.z } });
-      for (const s of segmentsAtNode(doc, n.id)) checkSegmentShape(doc, s);
-      checkNoNewCrossings(doc, n.id);
+      // The transaction's spatial index: the moved roads, and only the roads near them (budgeted).
+      const near = nearRoads(doc, tx);
+      const moved = near.at(n.id);
+      for (const s of moved) checkSegmentShape(doc, s);
+      checkNoNewCrossings(doc, n.id, near);
       // Moving a node stretches its roads: features that no longer fit are removed with the move.
-      for (const s of segmentsAtNode(doc, n.id)) pruneFeatures(doc, s.id, tx);
-      pruneAutoLots(doc, segmentsAtNode(doc, n.id).map((s) => s.id), tx);
+      for (const s of moved) pruneFeatures(doc, s.id, tx);
+      pruneAutoLots(doc, moved.map((s) => s.id), tx);
       return;
     }
     case 'segment.add': {
       const s = cmd.segment;
       checkId(s?.id, 'segment');
       if (has(doc.segments, s.id)) fail('segment exists');
-      checkCapacity(doc.segments, s.id, LIMITS.segments, 'segments');
+      checkCapacity(doc.segments, s.id, LIMITS.segments, 'segments', tx);
       if (!has(doc.nodes, s.a) || !has(doc.nodes, s.b)) fail('unknown node');
       if (s.a === s.b) fail('segment must connect two different nodes');
       if (!has(doc.roadTypes, s.roadTypeId)) fail('unknown road type');
       if (s.control !== undefined) checkPos(doc, s.control, 'control');
-      for (const o of segmentsAtNode(doc, s.a)) {
+      for (const o of nearRoads(doc, tx).at(s.a)) {
         if ((o.a === s.a && o.b === s.b) || (o.a === s.b && o.b === s.a)) fail('nodes already connected');
       }
       const seg: RoadSegment = { id: s.id, a: s.a, b: s.b, roadTypeId: s.roadTypeId };
@@ -137,8 +140,9 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (s.schoolZone !== undefined && typeof s.schoolZone !== 'boolean') fail('invalid schoolZone flag');
       if (s.schoolZone) seg.schoolZone = true;
       checkSegmentShape(doc, seg);
+      checkSegmentCrossings(doc, seg, tx);
       if (cmd.ifClear !== undefined && cmd.ifClear !== true) fail('invalid ifClear flag');
-      if (cmd.ifClear) checkRoadClear(doc, seg);
+      if (cmd.ifClear) checkRoadClear(doc, seg, tx);
       tx.set(doc.segments, seg.id, seg);
       pruneAutoLots(doc, [seg.id], tx);
       return;
@@ -201,11 +205,11 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       const b = cmd.building;
       checkId(b?.id, 'building');
       if (has(doc.buildings, b.id)) fail('building exists');
-      checkCapacity(doc.buildings, b.id, LIMITS.buildings, 'buildings');
+      checkCapacity(doc.buildings, b.id, LIMITS.buildings, 'buildings', tx);
       if (!has(doc.buildingTypes, b.typeId)) fail('unknown building type');
       checkPos(doc, b.pos, 'building.pos');
       checkNum(b.rotation, -Math.PI * 4, Math.PI * 4, 'rotation');
-      checkBuildingClear(doc, b.typeId, b.pos, b.rotation);
+      checkBuildingClear(doc, b.typeId, b.pos, b.rotation, tx);
       if (b.auto !== undefined && b.auto !== true) fail('invalid auto flag');
       if (cmd.ifClear !== undefined && cmd.ifClear !== true) fail('invalid ifClear flag');
       if (cmd.ifClear && buildingOverlapsBuildings(doc, b, doc.buildingTypes[b.typeId]!)) fail('overlaps another building');
@@ -221,7 +225,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!b) fail('unknown building');
       checkPos(doc, cmd.pos, 'pos');
       checkNum(cmd.rotation, -Math.PI * 4, Math.PI * 4, 'rotation');
-      checkBuildingClear(doc, b.typeId, cmd.pos, cmd.rotation);
+      checkBuildingClear(doc, b.typeId, cmd.pos, cmd.rotation, tx);
       // A user move takes the building out of automatic management (auto is dropped).
       tx.set(doc.buildings, b.id, { id: b.id, typeId: b.typeId, pos: { x: cmd.pos.x, z: cmd.pos.z }, rotation: cmd.rotation });
       return;
@@ -230,7 +234,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (cmd.ifAbsent !== undefined && cmd.ifAbsent !== true) fail('invalid ifAbsent flag');
       if (cmd.ifAbsent && has(doc.parcels, cmd.parcel?.id)) fail('parcel exists');
       validateParcel(doc, cmd.parcel);
-      checkCapacity(doc.parcels, cmd.parcel.id, LIMITS.parcels, 'parcels');
+      checkCapacity(doc.parcels, cmd.parcel.id, LIMITS.parcels, 'parcels', tx);
       const pc = cmd.parcel;
       tx.set(doc.parcels, pc.id, {
         id: pc.id,
@@ -273,6 +277,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
           color: p.color,
           roofColor: p.roofColor,
           ...(p.footprint ? { footprint: p.footprint.map((v) => ({ x: v.x, z: v.z })) } : {}),
+          ...(p.round ? { round: p.round } : {}),
           ...(p.use ? { use: p.use } : {}),
           ...(p.facade ? { facade: { style: p.facade.style, windowRatio: p.facade.windowRatio, ground: p.facade.ground } } : {}),
         })),
@@ -330,7 +335,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
     case 'busStop.add':
       validateStop(doc, cmd.stop);
       if (has(doc.busStops, cmd.stop.id)) fail('bus stop exists');
-      checkCapacity(doc.busStops, cmd.stop.id, LIMITS.busStops, 'bus stops');
+      checkCapacity(doc.busStops, cmd.stop.id, LIMITS.busStops, 'bus stops', tx);
       tx.set(doc.busStops, cmd.stop.id, { id: cmd.stop.id, segmentId: cmd.stop.segmentId, t: cmd.stop.t, dir: cmd.stop.dir });
       return;
     case 'busStop.remove':
@@ -365,7 +370,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
     case 'feature.upsert': {
       const f = cmd.feature;
       validateFeature(doc, f);
-      checkCapacity(doc.features, f.id, LIMITS.features, 'road features');
+      checkCapacity(doc.features, f.id, LIMITS.features, 'road features', tx);
       const out: RoadFeature = { id: f.id, segmentId: f.segmentId, kind: f.kind, t: f.t };
       if (f.kind === 'crosswalk' && f.signal !== undefined) out.signal = f.signal;
       tx.set(doc.features, f.id, out);

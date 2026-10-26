@@ -13,9 +13,12 @@ import {
   polylineIntersections,
   polylineLength,
   sampleSegmentCurve,
+  type Bounds,
   type Vec2,
 } from '../geometry.js';
-import { buildingBlocksRoad, buildingFootprints, partOutline } from '../editing/buildings.js';
+import { buildingBlocksRoad, buildingFootprints, partOutline, polygonsBlockRoad } from '../editing/buildings.js';
+import { roadHalfWidth } from '../roads.js';
+import { TxIndex } from './spatial.js';
 import type {
   BuildingType,
   BusLine,
@@ -29,7 +32,7 @@ import type {
   VehicleType,
 } from '../model.js';
 import { LIMITS } from './limits.js';
-import { fail, policy } from './tx.js';
+import { fail, policy, type Tx } from './tx.js';
 
 const ID_RE = /^[A-Za-z0-9_\-:.]+$/;
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
@@ -72,8 +75,9 @@ export function checkPos(doc: CityDoc, p: unknown, what: string): asserts p is V
  * Capacity is admission control for new edits. A trusted (already sequenced) command passed it when
  * it was accepted; replaying it must not fail because a doc migration since added presets (ADR 0011).
  */
-export function checkCapacity(rec: Record<string, unknown>, id: string, max: number, what: string): void {
-  if (policy.enforce && !(id in rec) && Object.keys(rec).length >= max) fail(`too many ${what}`);
+export function checkCapacity(rec: Record<string, unknown>, id: string, max: number, what: string, tx?: Tx): void {
+  // With the transaction, the size is counted once and then kept (large batches stay linear).
+  if (policy.enforce && !(id in rec) && (tx ? tx.count(rec) : Object.keys(rec).length) >= max) fail(`too many ${what}`);
 }
 
 /** Own-property lookup for ids that come from commands (never trusts the prototype or non-strings). */
@@ -150,6 +154,13 @@ export function validateBuildingType(bt: BuildingType): void {
       if (!isOrthogonal(p.footprint)) fail('part footprint must be orthogonal');
       if (polygonArea(p.footprint) < 1) fail('part footprint too small');
       if (p.roof !== 'flat') fail('drawn footprints need a flat roof');
+    }
+    // null and 0 mean "not rounded" (normalized away on upsert).
+    const round = p.round as unknown;
+    if (round !== undefined && round !== null) {
+      checkNum(round, 0, Math.min(p.width, p.depth) / 2, 'part.round');
+      if (round > 0 && p.footprint !== undefined) fail('rounded corners need a rectangular volume (no drawn footprint)');
+      if (round > 0 && p.roof !== 'flat') fail('rounded volumes need a flat roof');
     }
     if (p.use !== undefined && !ZONES.includes(p.use)) fail('invalid part use');
     if (p.facade !== undefined) {
@@ -238,7 +249,12 @@ export function validateParcel(doc: CityDoc, pc: Parcel): void {
 
 /** Segments at a moved node must not cross any other road (only meet at shared nodes). */
 /** Segments at a moved node must not cross or run along any other road (only meet at shared nodes). */
-export function checkNoNewCrossings(doc: CityDoc, nodeId: string): void {
+export function checkNoNewCrossings(
+  doc: CityDoc,
+  nodeId: string,
+  /** The transaction's spatial index: only roads near the moved ones are compared (and charged to its budget). */
+  near?: { at: (nodeId: string) => RoadSegment[]; roads: (box: Bounds) => RoadSegment[] | null },
+): void {
   if (!policy.enforce) return;
   // Each road is sampled once per call, however many moved segments it is compared against.
   const samples = new Map<string, { curve: Vec2[]; box: ReturnType<typeof bounds> }>();
@@ -251,9 +267,11 @@ export function checkNoNewCrossings(doc: CityDoc, nodeId: string): void {
     }
     return e;
   };
-  for (const s of segmentsAtNode(doc, nodeId)) {
+  for (const s of near ? near.at(nodeId) : segmentsAtNode(doc, nodeId)) {
     const { curve, box } = sampled(s);
-    for (const o of Object.values(doc.segments)) {
+    const candidates = near ? near.roads({ minX: box.minX - 1, minZ: box.minZ - 1, maxX: box.maxX + 1, maxZ: box.maxZ + 1 }) : Object.values(doc.segments);
+    if (!candidates) fail('the moved road could not be checked against nearby roads (contact check limit)');
+    for (const o of candidates) {
       if (o.id === s.id) continue;
       const { curve: other, box: otherBox } = sampled(o);
       if (!boundsOverlap(box, otherBox, 1)) continue;
@@ -274,14 +292,26 @@ export function checkNoNewCrossings(doc: CityDoc, nodeId: string): void {
   }
 }
 
-export function checkBuildingClear(doc: CityDoc, typeId: string, pos: Vec2, rotation: number): void {
+export function checkBuildingClear(doc: CityDoc, typeId: string, pos: Vec2, rotation: number, tx?: Tx): void {
   if (!policy.enforce) return;
   const type = doc.buildingTypes[typeId]!;
   const h = doc.meta.halfSize;
-  for (const poly of buildingFootprints({ pos, rotation }, type)) {
+  const polys = buildingFootprints({ pos, rotation }, type);
+  for (const poly of polys) {
     if (poly.some((c) => Math.abs(c.x) > h || Math.abs(c.z) > h)) fail('building extends beyond the map');
   }
-  if (buildingBlocksRoad(doc, { pos, rotation }, type)) fail('building overlaps a road');
+  if (!tx) {
+    if (buildingBlocksRoad(doc, { pos, rotation }, type)) fail('building overlaps a road');
+    return;
+  }
+  // With the transaction: only roads whose center line comes within the widest road's half width of the
+  // footprint box can reach it (the transaction's index, charged to its budget).
+  const box = bounds(polys.flat());
+  let hw = 0;
+  for (const rt of Object.values(doc.roadTypes)) hw = Math.max(hw, roadHalfWidth(rt));
+  const near = TxIndex.of(doc, tx).roadsNear([{ minX: box.minX - hw - 1, minZ: box.minZ - hw - 1, maxX: box.maxX + hw + 1, maxZ: box.maxZ + hw + 1 }], tx.contact);
+  if (!near) fail('the building could not be checked against nearby roads (contact check limit)');
+  if (polygonsBlockRoad(doc, polys, near)) fail('building overlaps a road');
 }
 
 export function validateVehicleType(vt: VehicleType): void {

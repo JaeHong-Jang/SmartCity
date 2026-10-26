@@ -27,6 +27,18 @@ export const DOC_COLLECTIONS = [
   'features',
 ] as const;
 
+/**
+ * A rounded volume (v7) is well formed: radius 0 ≤ round ≤ min(width, depth)/2 on a rectangle with a flat
+ * roof — the same shape rules as `buildingType.upsert`, without its placement policy (null is dropped
+ * by normalizeDoc). The radius feeds every outline (collision, area, mesh), so a bad one refuses the doc.
+ */
+function roundOk(p: unknown): boolean {
+  if (!isObj(p) || p.round === undefined) return true;
+  const r = p.round;
+  if (!num(r) || !num(p.width) || !num(p.depth) || (r as number) < 0 || (r as number) > Math.min(p.width as number, p.depth as number) / 2) return false;
+  return r === 0 || (p.footprint === undefined && p.roof === 'flat');
+}
+
 /** First structural problem of `doc`, or null when it is a usable city. */
 export function docProblem(doc: unknown): string | null {
   if (!isObj(doc)) return 'doc is not an object';
@@ -40,7 +52,7 @@ export function docProblem(doc: unknown): string | null {
     ['nodes', 'id', (e) => vec(e.pos)],
     ['segments', 'id', (e) => has('nodes', e.a) && has('nodes', e.b) && has('roadTypes', e.roadTypeId)],
     ['roadTypes', 'id', (e) => str(e.name) && num(e.lanesForward) && num(e.lanesBackward) && num(e.laneWidth) && num(e.speedLimit)],
-    ['buildingTypes', 'id', (e) => str(e.name) && Array.isArray(e.parts)],
+    ['buildingTypes', 'id', (e) => str(e.name) && Array.isArray(e.parts) && e.parts.every(roundOk)],
     ['buildings', 'id', (e) => has('buildingTypes', e.typeId) && vec(e.pos) && num(e.rotation)],
     ['vehicleTypes', 'id', (e) => str(e.name) && num(e.length) && Array.isArray(e.parts)],
     ['intersections', 'nodeId', (e) => has('nodes', e.nodeId) && str(e.kind)],

@@ -75,3 +75,18 @@ describe('GhostBuilding', () => {
     }
   });
 });
+
+describe('GhostBuilding of a rounded volume (ADR 0012 §4)', () => {
+  it('extrudes the shared rounded outline (a round tower ghost stays inside its circle)', () => {
+    const house = crossDoc().doc.buildingTypes['house']!;
+    const tower: BuildingType = { ...house, id: 'tower', rev: 1, parts: [{ ...house.parts[0]!, width: 20, depth: 20, roof: 'flat', round: 10 }] };
+    const ghost = new GhostBuilding();
+    ghost.set(tower, { ...pb, typeId: 'tower' });
+    const pos = (ghost.group.children[0] as import('three').Mesh).geometry.getAttribute('position');
+    let max = 0;
+    for (let i = 0; i < pos.count; i++) max = Math.max(max, Math.hypot(pos.getX(i), pos.getZ(i)));
+    expect(max).toBeLessThanOrEqual(10 + 1e-5);
+    // Rim vertices sit on the circle (no square corners at 14.1 m).
+    expect(max).toBeGreaterThan(9.99);
+  });
+});

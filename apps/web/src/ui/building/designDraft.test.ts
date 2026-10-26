@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cellKey, cloneJson, createEmptyDoc, polygonArea, type BuildingType, type CellKey } from '@smartcity/shared';
-import { applyPaint, besideParts, CONFLICT_KO, designEstimates, newPart, partCells, preflight, roofBudget, stackOn, toRectangle } from './designDraft';
+import { applyPaint, besideParts, CONFLICT_KO, designEstimates, maxRound, newPart, partCells, preflight, roofBudget, stackOn, toRectangle, translateDesignError, withRound } from './designDraft';
 
 const rectCells = (i0: number, j0: number, i1: number, j1: number, into = new Set<CellKey>()): Set<CellKey> => {
   for (let i = i0; i < i1; i++) for (let j = j0; j < j1; j++) into.add(cellKey(i, j));
@@ -88,5 +88,31 @@ describe('designEstimates', () => {
     expect(m.jobs).toBeGreaterThan(0);
     expect(m.solar).toBeGreaterThan(0);
     expect(m.energy).toBeGreaterThan(m.solar);
+  });
+});
+
+describe('corner rounding of a volume (ADR 0012 §4)', () => {
+  it('clamps to half the shorter side, flattens the roof, drops the field at 0', () => {
+    const p = newPart({ width: 20, depth: 12, roof: 'gable' });
+    expect(maxRound(p)).toBe(6);
+    expect(withRound(p, 4)).toMatchObject({ round: 4, roof: 'flat' });
+    expect(withRound(p, 99).round).toBe(6);
+    expect(withRound(withRound(p, 4), 0)).not.toHaveProperty('round');
+    expect(withRound(p, -3)).not.toHaveProperty('round');
+  });
+
+  it('reopens a rounded volume in the painter as its full rectangle; painting drops the radius', () => {
+    const p = withRound(newPart({ width: 8, depth: 8, offset: { x: 4, z: 4 } }), 4);
+    expect(partCells(p, 2).size).toBe(16);
+    const painted = applyPaint(p, rectCells(0, 0, 4, 3), 2).part;
+    expect(painted.footprint).toBeDefined();
+    expect(painted).not.toHaveProperty('round');
+    expect(maxRound(painted)).toBe(0);
+  });
+
+  it('translates the server refusals', () => {
+    expect(translateDesignError('part.round out of range [0, 6]')).toMatch(/모서리 둥글기/);
+    expect(translateDesignError('rounded volumes need a flat roof')).toMatch(/둥근 볼륨은 평지붕/);
+    expect(translateDesignError('rounded corners need a rectangular volume (no drawn footprint)')).toMatch(/둥글게 할 수 없습니다/);
   });
 });

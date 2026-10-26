@@ -158,7 +158,7 @@ if (params.get('offline') === '1') {
   const showWait = (): void => {
     const s = store.getState();
     if (s.ready) return;
-    store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: s.connectWait?.error ?? null } });
+    store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: s.connectWait?.error ?? null, refresh: ws.outdated } });
   };
   let noticed = false;
   ws.onMessage((m) => {
@@ -166,8 +166,11 @@ if (params.get('offline') === '1') {
       noticed = true;
       noticeOfflineCity();
     }
-    // A refusal before welcome (e.g. unreadable city file) is shown on the overlay; the transport keeps retrying.
-    if (m.t === 'error' && !store.getState().ready) store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: m.error } });
+    // A refusal before welcome (e.g. unreadable city file) is shown on the overlay; the transport keeps
+    // retrying. A protocol refusal (another app version) stops the transport and asks for a reload, also
+    // in a tab that was already in the city (a reconnect to an upgraded server): the city stays shown,
+    // editing stays blocked (connection 'reconnecting').
+    if (m.t === 'error' && (!store.getState().ready || ws.outdated)) store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: m.error, refresh: ws.outdated } });
   });
   ws.onStatus((st) => {
     const s = store.getState();

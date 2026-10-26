@@ -3,7 +3,7 @@ import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
 import type { StreetMode, ToolId } from '../app/store';
 import { ZONE_COLORS } from '../app/zoneColors';
 import { PARCEL_ZONES } from '../tools/parcelTool';
-import { setAutoFillet } from '../tools/roadTool';
+import { ROAD_MODE_LABEL, setAutoFillet } from '../tools/roadTool';
 import { TOOL_META } from '../tools/toolMeta';
 import { AiBadge } from './AiBadge';
 import { useSimMode } from '../simmode/store';
@@ -89,15 +89,23 @@ export function ToolOptions() {
             </button>
           ))}
         </div>
+        <div className="row wrap" role="group" aria-label="그리기 모드">
+          {(['straight', 'curve', 'free'] as const).map((m) => (
+            <button key={m} data-road-mode={m} className={opts.roadMode === m ? 'active' : ''} aria-pressed={opts.roadMode === m} onClick={() => store.setToolOptions({ roadMode: m })}>
+              {ROAD_MODE_LABEL[m]} {m === 'curve' ? '(C)' : m === 'free' ? '(B)' : ''}
+            </button>
+          ))}
+        </div>
         <div className="row wrap">
-          <button className={opts.curve ? 'active' : ''} onClick={() => store.setToolOptions({ curve: !opts.curve })}>
-            곡선 (C)
-          </button>
           <button data-auto-fillet className={opts.autoFillet ? 'active' : ''} aria-pressed={opts.autoFillet} onClick={() => setAutoFillet(store, !opts.autoFillet)}>
-            모서리 자동 둥글게 (F)
+            모서리 자동 둥글게 (T)
+          </button>
+          {/* Same path as the Enter key: the active road tool finishes its stroke. */}
+          <button data-road-finish onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }))}>
+            완료 (Enter)
           </button>
         </div>
-        <span className="muted">클릭으로 이어 그리기 · 격자 스냅은 하단 바/G · 우클릭/Esc 취소</span>
+        <span className="muted">클릭/드래그로 이어 그리기 · C 곡선 · B 자유 · Enter·더블클릭 완료 · Esc 취소 · Shift 스냅 끔 · 격자 G</span>
       </section>
     );
   }

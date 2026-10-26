@@ -3,7 +3,7 @@
 
 import { polygonArea, type Vec2 } from '../geometry.js';
 import type { BuildingPart, Facade, RoofShape, Zone } from '../model.js';
-import { partOutline } from './buildings.js';
+import { partBaseOutline } from './buildings.js';
 import { cellKey, cellsToOutline, outlineToCells, parseCell, type CellKey } from './footprint.js';
 
 /** Look of a group of cells; cells with equal styles merge into one volume. */
@@ -14,6 +14,17 @@ export interface VoxelStyle {
   roof: RoofShape;
   use?: Zone;
   facade?: Facade;
+  /**
+   * Corner radius (m) wanted for the volumes of this style: applied to rectangular volumes only
+   * (clamped to half their shorter side, roof forced flat), dropped on other shapes.
+   */
+  round?: number;
+  /**
+   * Tag that keeps one rounded volume apart from touching cells of the same look (cells of different
+   * styles never merge, and two rounded boxes merged into one would change shape: Sol P5d #3). Set
+   * when a volume is rounded in the studio and when a rounded design is reopened.
+   */
+  volume?: number;
 }
 
 export interface VoxelModel {
@@ -35,7 +46,9 @@ export function parseVoxel(key: string): [number, number, number] {
 }
 
 const styleKey = (s: VoxelStyle): string =>
-  [s.color, s.roofColor, s.roof, s.use ?? '', s.facade ? `${s.facade.style}/${s.facade.windowRatio}/${s.facade.ground}` : ''].join('|');
+  [s.color, s.roofColor, s.roof, s.use ?? '', s.facade ? `${s.facade.style}/${s.facade.windowRatio}/${s.facade.ground}` : ''].join('|') +
+  (s.round ? `|r${s.round}` : '') +
+  (s.volume !== undefined ? `|v${s.volume}` : '');
 
 /** Index of an equal style in the list, appending it when new. */
 export function internStyle(styles: VoxelStyle[], s: VoxelStyle): number {
@@ -50,6 +63,8 @@ export interface VoxelPartsResult {
   parts: BuildingPart[];
   /** Per part: the cells it came from (for highlighting problems in the studio). */
   sources: string[][];
+  /** Parts whose style asks for rounded corners but whose shape is not a rectangle: saved square (to tell the user). */
+  unrounded: number[];
 }
 
 /**
@@ -104,6 +119,7 @@ export function voxelsToParts(m: VoxelModel, maxVertices = 32): VoxelPartsResult
 
   const parts: BuildingPart[] = [];
   const sources: string[][] = [];
+  const unrounded: number[] = [];
   for (const o of done) {
     const s = m.styles[o.style]!;
     // A pitched roof only on a rectangle with nothing standing on it.
@@ -112,7 +128,6 @@ export function voxelsToParts(m: VoxelModel, maxVertices = 32): VoxelPartsResult
       return m.cells.has(voxelKey(i, j, o.k1 + 1));
     });
     const rect = o.outline.length === 4;
-    const roof: RoofShape = rect && !covered ? s.roof : 'flat';
     let x0 = Infinity;
     let z0 = Infinity;
     let x1 = -Infinity;
@@ -123,6 +138,9 @@ export function voxelsToParts(m: VoxelModel, maxVertices = 32): VoxelPartsResult
       x1 = Math.max(x1, v.x);
       z1 = Math.max(z1, v.z);
     }
+    const round = rect && s.round ? Math.min(s.round, (x1 - x0) / 2, (z1 - z0) / 2) : 0;
+    if (s.round && !rect) unrounded.push(parts.length);
+    const roof: RoofShape = rect && !covered && !(round > 0) ? s.roof : 'flat';
     const part: BuildingPart = {
       offset: { x: (x0 + x1) / 2, z: (z0 + z1) / 2 },
       width: x1 - x0,
@@ -135,6 +153,7 @@ export function voxelsToParts(m: VoxelModel, maxVertices = 32): VoxelPartsResult
       roofColor: s.roofColor,
     };
     if (!rect) part.footprint = o.outline;
+    if (round > 0) part.round = round;
     if (s.use) part.use = s.use;
     if (s.facade) part.facade = { ...s.facade };
     parts.push(part);
@@ -142,7 +161,7 @@ export function voxelsToParts(m: VoxelModel, maxVertices = 32): VoxelPartsResult
     for (let k = o.k0; k <= o.k1; k++) for (const c of [...o.cells].sort()) src.push(`${c},${k}`);
     sources.push(src);
   }
-  return { parts, sources };
+  return { parts, sources, unrounded };
 }
 
 function firstCell(cells: Set<CellKey>): string {
@@ -213,7 +232,10 @@ function components(cells: Set<CellKey>): Set<CellKey>[] {
 
 export interface PartsVoxelsResult {
   model: VoxelModel;
-  /** True when reopening changes the design: off the cell grid, mixed floor heights, or roofs that would merge. */
+  /**
+   * True when reopening changes the design: off the cell grid, mixed floor heights, roofs that would
+   * merge, or a rounded volume that does not come back as the same rounded volume.
+   */
   lossy: boolean;
   /** The design exceeds the studio limits (VOXEL_LIMITS); the model is left empty. */
   tooLarge: boolean;
@@ -226,7 +248,8 @@ const sameVolume = (a: BuildingPart, b: BuildingPart): boolean =>
   Math.abs(a.offset.x - b.offset.x) < 1e-6 &&
   Math.abs(a.offset.z - b.offset.z) < 1e-6 &&
   Math.abs(a.width - b.width) < 1e-6 &&
-  Math.abs(a.depth - b.depth) < 1e-6;
+  Math.abs(a.depth - b.depth) < 1e-6 &&
+  Math.abs((a.round ?? 0) - (b.round ?? 0)) < 1e-6;
 
 /** Reopen a stored design as cells. Volumes are snapped to the grid and to whole floors. */
 export function partsToVoxels(parts: readonly BuildingPart[], cell = 2): PartsVoxelsResult {
@@ -238,21 +261,24 @@ export function partsToVoxels(parts: readonly BuildingPart[], cell = 2): PartsVo
   let count = 0;
   for (const p of parts) {
     const top = (p.baseHeight + p.floors * p.floorHeight) / floorHeight;
-    const out = partOutline(p).some((v) => Math.abs(v.x) > reach || Math.abs(v.z) > reach);
+    const out = partBaseOutline(p).some((v) => Math.abs(v.x) > reach || Math.abs(v.z) > reach);
     if (out || top > VOXEL_LIMITS.floors + 1e-6) return { model, lossy: true, tooLarge: true };
-    count += outlineToCells(partOutline(p), cell).size * Math.max(1, Math.round((p.floors * p.floorHeight) / floorHeight));
+    count += outlineToCells(partBaseOutline(p), cell).size * Math.max(1, Math.round((p.floors * p.floorHeight) / floorHeight));
     if (count > VOXEL_LIMITS.cells) return { model, lossy: true, tooLarge: true };
   }
   let lossy = false;
-  for (const p of parts) {
+  for (const [index, p] of parts.entries()) {
     const style = internStyle(model.styles, {
       color: p.color,
       roofColor: p.roofColor,
       roof: p.roof,
       ...(p.use ? { use: p.use } : {}),
       ...(p.facade ? { facade: { ...p.facade } } : {}),
+      // Each rounded volume gets its own style, so it never merges with a touching twin.
+      ...(p.round ? { round: p.round, volume: index } : {}),
     });
-    const outline = partOutline(p);
+    // Cells cover the rectangle; the rounding stays a style of those cells.
+    const outline = partBaseOutline(p);
     const cells = outlineToCells(outline, cell);
     // An orthogonal outline is covered exactly by its cells iff every corner lies on the grid
     // (equal area alone misses a shifted shape).
@@ -272,11 +298,12 @@ export function partsToVoxels(parts: readonly BuildingPart[], cell = 2): PartsVo
       }
     }
   }
-  // Pitched roofs survive only if converting back yields the same volume (adjacent equal-style
-  // volumes would otherwise merge under one roof).
-  if (!lossy && parts.some((p) => p.roof !== 'flat')) {
+  // Pitched roofs and rounded corners survive only if converting back yields the same volume
+  // (adjacent equal-style volumes would otherwise merge under one roof or into one rounded box).
+  const special = (p: BuildingPart): boolean => p.roof !== 'flat' || !!p.round;
+  if (!lossy && parts.some(special)) {
     const again = voxelsToParts(model).parts;
-    if (parts.some((p) => p.roof !== 'flat' && !again.some((q) => sameVolume(p, q)))) lossy = true;
+    if (parts.some((p) => special(p) && !again.some((q) => sameVolume(p, q)))) lossy = true;
   }
   return { model, lossy, tooLarge: false };
 }

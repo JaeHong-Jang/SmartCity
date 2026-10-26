@@ -2,13 +2,15 @@
 // extruded walls from each volume's outline, flat or pitched roofs, and rooftop smart equipment.
 // Facade patterns are drawn by the shared material from per-vertex attributes:
 //   aWall   = (u, v, w): walls: u = metres along the wall from its corner, v = metres above the
-//             volume base, w = wall length (> 0). Other surfaces: (x, z) local position and a
+//             volume base, w = wall length (> 0); on a rounded corner the "wall" is the whole run of
+//             arc chords (u = length along the arc). Other surfaces: (x, z) local position and a
 //             negative surface flag (SURFACE).
 //   aFacade = (floorHeight, styleId, windowRatio, groundId).
 
 import * as THREE from 'three';
 import {
   partOutline,
+  partOutlineEdges,
   polygonsOverlap,
   signedArea,
   type BuildingPart,
@@ -117,27 +119,73 @@ function ccw(poly: readonly Vec2[]): Vec2[] {
   return signedArea(poly) < 0 ? [...poly].reverse() : [...poly];
 }
 
-function walls(gb: GeometryBuilder, outline: Vec2[], y0: number, h: number): void {
+/**
+ * Walls along an outline. Edges flagged in `curved` (chords of a rounded corner) form runs of
+ * consecutive curved edges: inside a run u is the length from the run's start and w the run's
+ * length (window bays spread evenly over the chords, corner pillars only at the run's ends), and a
+ * vertex shared by two chords of the run gets their average normal. Elsewhere (flat walls, the ends
+ * of a run, roofs, floors) normals stay sharp. Without curved edges the output is unchanged.
+ */
+function walls(gb: GeometryBuilder, outline: Vec2[], y0: number, h: number, curved: readonly boolean[] = []): void {
   const y1 = y0 + h;
-  for (let i = 0; i < outline.length; i++) {
+  const n = outline.length;
+  const len: number[] = [];
+  const nor: V3[] = [];
+  for (let i = 0; i < n; i++) {
     const a = outline[i]!;
-    const b = outline[(i + 1) % outline.length]!;
+    const b = outline[(i + 1) % n]!;
     const dx = b.x - a.x;
     const dz = b.z - a.z;
-    const len = Math.hypot(dx, dz);
-    if (len < 1e-6) continue;
+    const l = Math.hypot(dx, dz);
+    len.push(l);
     // Counter-clockwise in (x, z): the outside is on the right of a → b.
-    const n: V3 = [dz / len, 0, -dx / len];
+    nor.push(l < 1e-6 ? [0, 0, 0] : [dz / l, 0, -dx / l]);
+  }
+  const inRun = (i: number): boolean => {
+    const k = (i + n) % n;
+    return !!curved[k] && len[k]! >= 1e-6;
+  };
+  const u0 = new Array<number>(n).fill(0);
+  const total = len.slice();
+  const closed = n > 0 && len.every((_, i) => inRun(i));
+  for (let s = 0; s < n; s++) {
+    if (!inRun(s) || (!closed && inRun(s - 1)) || (closed && s > 0)) continue;
+    const run: number[] = [];
+    let acc = 0;
+    for (let k = s; inRun(k) && run.length < n; k = (k + 1) % n) {
+      run.push(k);
+      u0[k] = acc;
+      acc += len[k]!;
+    }
+    for (const k of run) total[k] = acc;
+  }
+  const avg = (p: V3, q: V3): V3 => {
+    const x = p[0] + q[0];
+    const z = p[2] + q[2];
+    const l = Math.hypot(x, z) || 1;
+    return [x / l, 0, z / l];
+  };
+  for (let i = 0; i < n; i++) {
+    const l = len[i]!;
+    if (l < 1e-6) continue;
+    const a = outline[i]!;
+    const b = outline[(i + 1) % n]!;
+    const own = nor[i]!;
+    const na = inRun(i) && inRun(i - 1) ? avg(nor[(i - 1 + n) % n]!, own) : own;
+    const nb = inRun(i) && inRun(i + 1) ? avg(own, nor[(i + 1) % n]!) : own;
+    const ua = u0[i]!;
+    const ub = ua + l;
+    const w = total[i]!;
     const a0: V3 = [a.x, y0, a.z];
     const b0: V3 = [b.x, y0, b.z];
     const a1: V3 = [a.x, y1, a.z];
     const b1: V3 = [b.x, y1, b.z];
-    gb.vertex(a0, n, [0, 0, len]);
-    gb.vertex(b1, n, [len, h, len]);
-    gb.vertex(b0, n, [len, 0, len]);
-    gb.vertex(a0, n, [0, 0, len]);
-    gb.vertex(a1, n, [0, h, len]);
-    gb.vertex(b1, n, [len, h, len]);
+    gb.vertex(a0, na, [ua, 0, w]);
+    gb.vertex(b1, nb, [ub, h, w]);
+    gb.vertex(b0, nb, [ub, 0, w]);
+    gb.vertex(a0, na, [ua, 0, w]);
+    gb.vertex(a1, na, [ua, h, w]);
+    gb.vertex(b1, nb, [ub, h, w]);
   }
 }
 
@@ -530,11 +578,13 @@ export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' 
     const f = p.facade ?? DEFAULT_FACADE;
     const ground = p.baseHeight < 0.5 ? GROUND_ID[f.ground] : 0;
     gb.setFacade([p.floorHeight, FACADE_STYLE_ID[f.style], f.windowRatio, ground]);
-    const outline = ccw(partOutline(p));
+    // Rounded outlines are already counter-clockwise, so their per-edge arc flags line up with `outline`.
+    const edges = partOutlineEdges(p);
+    const outline = ccw(edges.outline);
     const h = wallHeight(p);
     const top = p.baseHeight + h;
     gb.color(p.color);
-    walls(gb, outline, p.baseHeight, h);
+    walls(gb, outline, p.baseHeight, h, outline[0] === edges.outline[0] ? edges.arcCorner.map((c) => c >= 0) : []);
     if (p.baseHeight > 0.01) cap(gb, outline, p.baseHeight, false);
     // Drawn footprints always get a flat roof (the contract forbids pitched roofs on them).
     if (p.roof === 'flat' || hasFootprint(p)) {

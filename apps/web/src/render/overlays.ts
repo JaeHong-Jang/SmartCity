@@ -143,6 +143,9 @@ export class OverlayLayer {
   private peerTags: PeerTag[] = [];
   private stopBadges = new Map<string, StopBadge>();
   private labels = new Map<string, HTMLDivElement>();
+  /** Drawing label of the tool preview (length · angle · snap), placed next to the cursor every frame. */
+  private drawLabel: HTMLDivElement | null = null;
+  private drawLabelPos: Vec2 | null = null;
   private prev: Partial<ClientState> = {};
   private flowGraph: unknown = null;
   /** Per lane: [first vertex, vertex count] in the flow geometry. */
@@ -187,9 +190,31 @@ export class OverlayLayer {
       this.preview.set(b);
     }
 
+    this.setDrawLabel(p.label);
+
     // Translucent 3D ghost for building placement and moves (geometry cached per design revision).
     const pb = p.building;
     this.ghost.set(pb ? this.store.getState().doc.buildingTypes[pb.typeId] : undefined, pb);
+  }
+
+  private setDrawLabel(l: ToolPreview['label']): void {
+    if (!l) {
+      this.drawLabelPos = null;
+      if (this.drawLabel) this.drawLabel.style.display = 'none';
+      return;
+    }
+    let el = this.drawLabel;
+    if (!el) {
+      el = this.drawLabel = document.createElement('div');
+      el.className = 'draw-label';
+      el.dataset.drawLabel = '';
+      // Inline style: one small element, positioned by update() like the peer labels.
+      Object.assign(el.style, { position: 'absolute', left: '0', top: '0', margin: '18px 0 0 14px', padding: '2px 7px', borderRadius: '6px', font: '600 12px system-ui, sans-serif', whiteSpace: 'nowrap', pointerEvents: 'none', color: '#f8fafc' });
+      this.labelRoot.appendChild(el);
+    }
+    if (el.textContent !== l.text) el.textContent = l.text;
+    el.style.background = l.error ? 'rgba(185, 28, 28, 0.85)' : 'rgba(11, 16, 22, 0.72)';
+    this.drawLabelPos = l.pos;
   }
 
   /** Whether the line/point geometry equals the last drawn preview (no allocation). */
@@ -551,6 +576,12 @@ export class OverlayLayer {
       if (visible) label.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
     }
     this.parcels.frame(camera, cameraDistance, width, height);
+    if (this.drawLabel && this.drawLabelPos) {
+      _v.set(this.drawLabelPos.x, 0, this.drawLabelPos.z).project(camera);
+      const visible = _v.z < 1 && _v.x > -1.05 && _v.x < 1.05 && _v.y > -1.05 && _v.y < 1.05;
+      this.drawLabel.style.display = visible ? '' : 'none';
+      if (visible) this.drawLabel.style.transform = `translate(${((_v.x + 1) / 2) * width}px, ${((1 - _v.y) / 2) * height}px)`;
+    }
     const waiting = s.transit?.waiting;
     for (const [id, badge] of this.stopBadges) {
       const n = waiting?.[id] ?? 0;
@@ -596,6 +627,7 @@ export class OverlayLayer {
     (this.cursorMesh.material as THREE.Material).dispose();
     this.cursorMesh.dispose();
     this.ghost.dispose();
+    this.drawLabel?.remove();
     this.parcels.dispose();
     this.proposal.dispose();
     for (const badge of this.stopBadges.values()) badge.el.remove();

@@ -16,7 +16,7 @@ export interface LoadInfo {
   lossy: boolean;
 }
 
-const CHANNEL_KO = { all: '스타일 전체', color: '벽 색', roofColor: '지붕 색', facade: '재질', use: '용도', roof: '지붕 형태' } as const;
+const CHANNEL_KO = { all: '스타일 전체', color: '벽 색', roofColor: '지붕 색', facade: '재질', use: '용도', roof: '지붕 형태', round: '모서리 둥글기' } as const;
 const ROOF_KO = { flat: '평지붕', gable: '박공', pyramid: '피라미드' } as const;
 const PROP_SIZES = [0.5, 0.75, 1, 1.5, 2, 3, 4];
 
@@ -46,6 +46,7 @@ export function StudioPanel({ editor, onLoad }: { editor: StudioEditor; onLoad: 
   };
   const sel = ed.tool === 'select' ? ed.selection() : null;
   const roofOk = ed.roofOptions();
+  const roundOk = ed.roundOptions();
   const roll = (s: number) => {
     setSeed(s);
     const r = rollDesign(s, diceStyle, diceSize);
@@ -157,6 +158,25 @@ export function StudioPanel({ editor, onLoad }: { editor: StudioEditor; onLoad: 
                 ))}
               </div>
               {!roofOk.ok && <div className="muted st-reason">{roofOk.reason}</div>}
+              <div className="row st-row" role="group" aria-label="모서리 둥글기">
+                <span className="muted">모서리</span>
+                <input
+                  type="range"
+                  data-studio-round
+                  min={0}
+                  max={roundOk.max}
+                  step={0.5}
+                  value={roundOk.value}
+                  disabled={!roundOk.ok}
+                  title={roundOk.ok ? '0 = 직각 · 최대 = 원형(정사각형) 또는 캡슐형' : roundOk.reason}
+                  onChange={(e) => ed.setRound(Number(e.target.value))}
+                />
+                <span data-studio-round-value>{roundOk.value}m</span>
+                <button data-studio-round-max disabled={!roundOk.ok} title="짧은 변의 절반: 정사각형은 원형, 직사각형은 캡슐형" onClick={() => ed.setRound(roundOk.max)}>
+                  최대
+                </button>
+              </div>
+              {!roundOk.ok && <div className="muted st-reason">{roundOk.reason}</div>}
             </>
           ) : (
             <div className="muted">건물 덩어리를 클릭해 선택하세요</div>

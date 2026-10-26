@@ -114,7 +114,7 @@ describe('doc v4 migration and growth presets', () => {
   it('new cities and v3 docs get the growth presets; a deleted preset does not come back', () => {
     const fresh = createEmptyDoc();
     expect(fresh.version).toBe(DOC_VERSION);
-    expect(DOC_VERSION).toBe(6);
+    expect(DOC_VERSION).toBe(7);
     for (const t of GROWTH_PRESETS) expect(fresh.buildingTypes[t.id]).toMatchObject({ growth: { level: 1 }, rev: 1 });
 
     const v3 = createEmptyDoc();

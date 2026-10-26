@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
-import { PROTOCOL_VERSION } from '@smartcity/shared';
+import { PROTOCOL_MISMATCH, PROTOCOL_VERSION } from '@smartcity/shared';
 import type { Command, ServerMessage } from '@smartcity/shared';
 import { startServer } from './server.js';
 import { AiService } from './ai/service.js';
@@ -272,6 +272,18 @@ describe('server', () => {
     b.send({ t: 'hello', protocol: 999, room: 'ok', name: 'x' });
     await b.next('error');
     await b.closed;
+  });
+
+  it('refuses a v1 client (before rounded volumes) with a reload notice and never lets it join', async () => {
+    expect(PROTOCOL_VERSION).toBe(2);
+    const old = await TestClient.open(srv.port);
+    old.send({ t: 'hello', protocol: 1, room: 'room-a', name: 'old' });
+    const e = await old.next('error');
+    expect(e.code).toBe('protocol');
+    expect(e.error).toContain(PROTOCOL_MISMATCH);
+    expect(e.error).toContain('앱을 새로고침하세요');
+    expect(await old.closed).toBe(1002);
+    expect(old.msgs.some((m) => m.t === 'welcome')).toBe(false);
   });
 
   it('answers malformed JSON with error and keeps the connection open', async () => {

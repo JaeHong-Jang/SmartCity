@@ -106,7 +106,7 @@ export const TOOLS: Anthropic.Beta.BetaTool[] = [
   {
     name: 'create_building_design',
     description:
-      'Create a new building design from blocks on a 2 m grid (x, z = cell offsets from the center, may be negative; y = floor index from 0; w, d = cells; h = floors). Blocks with the same look (colors, facade) merge. Facade fields (nullable) set the wall style of that block; for a building seen in a picture use curtain/ribbon/grid with a matching window_ratio. The roof applies to the top of plain rectangular blocks. Returns the new design id to use with place_buildings.',
+      'Create a new building design from blocks on a 2 m grid (x, z = cell offsets from the center, may be negative; y = floor index from 0; w, d = cells; h = floors). Blocks with the same look (colors, facade) merge. Facade fields (nullable) set the wall style of that block; for a building seen in a picture use curtain/ribbon/grid with a matching window_ratio. The roof applies to the top of plain rectangular blocks. corner_radius (meters, nullable) rounds the corners of a rectangular block: w = d with corner_radius = w (cells) gives a round tower (a cylinder), w ≠ d gives a capsule; rounded blocks get a flat roof. Returns the new design id to use with place_buildings.',
     strict: true,
     input_schema: {
       type: 'object',
@@ -132,8 +132,12 @@ export const TOOLS: Anthropic.Beta.BetaTool[] = [
               facade_style: { anyOf: [{ type: 'string', enum: [...FACADE_STYLES] }, { type: 'null' }], description: 'Wall look: grid (punched windows), ribbon (window bands), curtain (glass wall), none; null = building default' },
               window_ratio: { type: ['number', 'null'], description: 'Share of the wall that is glass, 0.1..0.95; null = default 0.4' },
               ground: { anyOf: [{ type: 'string', enum: [...GROUND_FLOORS] }, { type: 'null' }], description: 'Use of the ground floor: none, shop, lobby, pilotis; null = none' },
+              corner_radius: {
+                anyOf: [{ type: 'number' }, { type: 'null' }],
+                description: 'Corner radius in meters (cells are 2 m), up to half the shorter side (larger is clamped); null or 0 = square corners',
+              },
             },
-            required: ['x', 'y', 'z', 'w', 'd', 'h', 'color', 'roof_color', 'facade_style', 'window_ratio', 'ground'],
+            required: ['x', 'y', 'z', 'w', 'd', 'h', 'color', 'roof_color', 'facade_style', 'window_ratio', 'ground', 'corner_radius'],
             additionalProperties: false,
           },
         },
@@ -445,15 +449,30 @@ function createDesign(sb: Sandbox, input: Record<string, unknown>): unknown {
     const roofColor = b.roof_color === null || b.roof_color === undefined ? '#5f646b' : str(b.roof_color, `block ${n}.roof_color`, 7);
     if (!/^#[0-9a-fA-F]{6}$/.test(roofColor)) bad(`block ${n}.roof_color must be #rrggbb`);
     const facade = blockFacade(b, n);
-    const style = internStyle(model.styles, { color: color.toLowerCase(), roofColor: roofColor.toLowerCase(), roof, use: zone, ...(facade ? { facade } : {}) });
+    // null / missing / 0 = square corners; the radius is clamped to the block's volume and checked again by applyCommand.
+    const round = b.corner_radius === null || b.corner_radius === undefined ? 0 : num(b.corner_radius, 0, CELL * lim, `block ${n}.corner_radius`);
+    const style = internStyle(model.styles, {
+      color: color.toLowerCase(),
+      roofColor: roofColor.toLowerCase(),
+      roof,
+      use: zone,
+      ...(facade ? { facade } : {}),
+      ...(round > 0 ? { round } : {}),
+    });
     for (let i = x; i < x + w; i++) for (let j = z; j < z + d; j++) for (let k = y; k < y + h; k++) model.cells.set(voxelKey(i, j, k), style);
   }
   recenter(model);
-  const { parts } = voxelsToParts(model);
+  const { parts, unrounded } = voxelsToParts(model);
   const id = newId(sb, 'design');
   const err = propose(sb, { type: 'buildingType.upsert', buildingType: { id, name, zone, parts, origin: 'ai' }, expectedRev: 0 });
   if (err) bad(`design rejected: ${err}`);
-  return { type_id: id, parts: parts.length, footprint: footprintOf(sb.doc.buildingTypes[id]!) };
+  return {
+    type_id: id,
+    parts: parts.length,
+    footprint: footprintOf(sb.doc.buildingTypes[id]!),
+    // Rounded blocks that merged with same-look blocks into a non-rectangle lose the radius: say so.
+    ...(unrounded.length ? { warnings: [`${unrounded.length} rounded volume(s) are not rectangles after merging same-look blocks and were kept square; give them different colors or make them rectangles`] } : {}),
+  };
 }
 
 function placeBuildings(sb: Sandbox, input: Record<string, unknown>): unknown {

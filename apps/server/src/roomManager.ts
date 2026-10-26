@@ -12,8 +12,14 @@ export class RoomManager {
   get(id: string): Room {
     let room = this.rooms.get(id);
     if (!room) {
-      const { doc, seq } = loadRoom(this.dataDir, id);
+      const { doc, seq, stale, migrated } = loadRoom(this.dataDir, id);
       room = new Room(id, this.dataDir, doc, seq);
+      room.stale = stale;
+      // A migrated city is written at the current version right away (atomically, with the usual backup
+      // of the old file), so an older server refuses it rather than replaying newer commands. If that
+      // fails, the room still opens but refuses commands until the write succeeds (Room.commit retries).
+      // A room without any checkpoint yet writes one before its first command, not on a mere visit.
+      if (migrated) room.stampVersion();
       this.rooms.set(id, room);
     }
     return room;

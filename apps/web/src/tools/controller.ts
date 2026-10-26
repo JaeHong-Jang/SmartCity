@@ -124,7 +124,10 @@ export class ToolController {
   private pointer(e: PointerEvent): ToolPointer | null {
     const pos = this.pickGround(e.clientX, e.clientY);
     if (!pos) return null;
-    return { pos, client: { x: e.clientX, y: e.clientY }, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey };
+    // Ground distance of 10 px at the pointer: screen-pixel snap radii (ADR 0012 §2).
+    const q = this.pickGround(e.clientX + 10, e.clientY);
+    const mPerPx = q ? Math.hypot(q.x - pos.x, q.z - pos.z) / 10 : undefined;
+    return { pos, client: { x: e.clientX, y: e.clientY }, button: e.button, shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, mPerPx };
   }
 
   private down = (e: PointerEvent): void => {

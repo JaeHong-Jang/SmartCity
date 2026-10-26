@@ -359,6 +359,13 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
             <button onClick={() => setLossyNote(null)}>확인</button>
           </div>
         )}
+        {conv.unrounded.length > 0 && (
+          <div className="panel st-banner warn" data-studio-unrounded>
+            <span>
+              둥근 모서리는 직사각형 덩어리에만 적용됩니다 — 덩어리 {conv.unrounded.length}개가 직각으로 저장됩니다. 직사각형으로 되돌리면 다시 둥글어집니다.
+            </span>
+          </div>
+        )}
         {error && (
           <div className="panel st-banner error" data-studio-error>
             <span>{error}</span>

@@ -24,6 +24,24 @@ describe('import/export', () => {
     expect(Object.keys(fresh.segments).sort()).toEqual(Object.keys(doc.segments).sort());
   });
 
+  it('exports and imports rounded volumes (v7) and imports a v6 file unchanged but for the version', () => {
+    const { doc } = crossDoc();
+    const house = doc.buildingTypes['house']!;
+    const tower = { ...house, id: 'tower', parts: [{ ...house.parts[0]!, width: 16, depth: 16, roof: 'flat' as const, round: 8 }] };
+    expect(applyCommand(doc, { type: 'buildingType.upsert', buildingType: tower }).ok).toBe(true);
+    const parsed = parseImport(exportDoc(doc));
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const fresh = createEmptyDoc();
+    for (const c of parsed.commands) expect(applyCommand(fresh, c).ok).toBe(true);
+    expect(fresh.buildingTypes['tower']!.parts[0]!.round).toBe(8);
+    const v6 = JSON.parse(exportDoc(crossDoc().doc)) as Record<string, unknown>;
+    v6.version = 6;
+    const old = parseImport(JSON.stringify(v6));
+    expect(old.ok).toBe(true);
+    if (old.ok) expect(JSON.stringify(old.commands)).toBe(JSON.stringify((parseImport(exportDoc(crossDoc().doc)) as { commands: Command[] }).commands));
+  });
+
   it('rejects garbage and docs from a newer version', () => {
     expect(parseImport('not json').ok).toBe(false);
     expect(parseImport('{"version":2}').ok).toBe(false);

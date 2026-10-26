@@ -12,6 +12,7 @@ import {
   GREEN_ROOF_SAVING,
   LIMITS,
   outlineToCells,
+  partBaseOutline,
   partOutline,
   SOLAR_YIELD,
   type BuildingMetrics,
@@ -32,11 +33,14 @@ const DESIGN_ERRORS_KO: [RegExp, string][] = [
   [/must be orthogonal/, '평면은 가로·세로 선으로만 이루어져야 합니다'],
   [/footprint must be a simple polygon/, '평면 외곽선이 스스로 교차합니다'],
   [/footprint too small/, '평면이 너무 작습니다 (1㎡ 이상)'],
+  [/rounded corners need a rectangular/, '직접 그린 평면은 모서리를 둥글게 할 수 없습니다'],
+  [/rounded volumes need a flat roof/, '모서리가 둥근 볼륨은 평지붕만 가능합니다'],
   [/need a flat roof/, '직접 그린 평면은 평지붕만 가능합니다'],
   [/volumes overlap/, '볼륨끼리 겹칩니다 — 시작 높이나 평면을 조정하세요'],
   [/roof equipment exceeds/, '지붕 설비(태양광+녹화+드론 포트)가 지붕 면적을 넘습니다'],
   [/invalid building type name/, `이름은 ${LIMITS.nameLength}자 이하여야 합니다`],
   [/invalid building parts/, `볼륨은 1~${LIMITS.buildingParts}개여야 합니다`],
+  [/^part\.round out of range/, '모서리 둥글기는 0부터 짧은 변의 절반까지입니다'],
   [/^part\.(\w+)(?:\.\w)? out of range/, '볼륨 값이 허용 범위를 벗어났습니다'],
   [/out of range|must be an integer/, '허용 범위를 벗어난 값이 있습니다'],
   [/color/, '색 값이 올바르지 않습니다'],
@@ -106,7 +110,7 @@ export interface PaintResult {
 }
 
 /** Cells (of `size`) covered by a volume's current plan, to reopen it in the painter. */
-export const partCells = (p: BuildingPart, size: number): Set<CellKey> => outlineToCells(partOutline(p), size);
+export const partCells = (p: BuildingPart, size: number): Set<CellKey> => outlineToCells(partBaseOutline(p), size);
 
 /** Painted cells → orthogonal footprint; bounding box into offset/width/depth, roof forced flat. */
 export function applyPaint(p: BuildingPart, cells: ReadonlySet<CellKey>, size: number): PaintResult {
@@ -127,13 +131,29 @@ export function applyPaint(p: BuildingPart, cells: ReadonlySet<CellKey>, size: n
   for (const k of cells) if (!kept.has(k)) excluded++;
   let filled = 0;
   for (const k of kept) if (!cells.has(k)) filled++;
+  // A drawn footprint cannot be rounded (ADR 0012 §4): painting drops the corner radius.
+  const { round: _dropped, ...rest } = p;
   return {
-    part: { ...p, footprint: outline, offset: { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2 }, width: maxX - minX, depth: maxZ - minZ, roof: 'flat' },
+    part: { ...rest, footprint: outline, offset: { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2 }, width: maxX - minX, depth: maxZ - minZ, roof: 'flat' },
     empty: false,
     excluded,
     filled,
     corners: outline.length,
   };
+}
+
+/** Largest corner radius of a volume: half its shorter side; 0 for a drawn footprint (cannot be rounded). */
+export const maxRound = (p: BuildingPart): number => (p.footprint && p.footprint.length >= 3 ? 0 : Math.min(p.width, p.depth) / 2);
+
+/** The volume with corner radius `r` (clamped to 0..maxRound): rounded volumes get a flat roof, 0 drops the field. */
+export function withRound(p: BuildingPart, r: number): BuildingPart {
+  const next = cloneJson(p);
+  const v = Math.max(0, Math.min(Number.isFinite(r) ? r : 0, maxRound(p)));
+  if (v > 0) {
+    next.round = v;
+    next.roof = 'flat';
+  } else delete next.round;
+  return next;
 }
 
 /** Back to a plain rectangle (the footprint's bounding box). */

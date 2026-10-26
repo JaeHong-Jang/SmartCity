@@ -76,6 +76,12 @@ export interface BuildingPart {
    * the offset/width/depth rectangle, which then only describes the bounding box.
    */
   footprint?: Vec2[];
+  /**
+   * Corner radius (m) of a rounded rectangle, 0 ≤ round ≤ min(width, depth)/2: the maximum gives a
+   * circle (square) or a capsule. Only without `footprint` and with a flat roof; omitted = 0. The
+   * outline is derived by `partOutline` (ADR 0012 §4).
+   */
+  round?: number;
   /** Use of this volume; defaults to the building type's zone (mixed-use buildings set it per volume). */
   use?: Zone;
   facade?: Facade;
@@ -300,7 +306,7 @@ export interface CityMeta {
 }
 
 /** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
-export const DOC_VERSION = 6;
+export const DOC_VERSION = 7;
 
 export interface CityDoc {
   version: number;
@@ -325,6 +331,7 @@ export interface CityDoc {
  * v2 → v3: road features collection. v3 → v4: growth presets (only added by this migration, so a
  * user who deletes one does not get it back). v4 → v5: the growth preset variants (same rule; existing ids are never touched).
  * v5 → v6: the facility designs (fire station, hospital, substation, power plant; same rule).
+ * v6 → v7: rounded volumes (`BuildingPart.round`); no data changes, every v6 shape stays as it was.
  */
 export function normalizeDoc(doc: CityDoc): CityDoc {
   // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
@@ -351,6 +358,13 @@ export function normalizeDoc(doc: CityDoc): CityDoc {
   if (doc.version < 6) {
     for (const t of FACILITY_PRESETS) if (!doc.buildingTypes[t.id]) doc.buildingTypes[t.id] = { ...cloneJson(t), rev: 1 };
     doc.version = 6;
+  }
+  if (doc.version < 7) doc.version = 7;
+  // A stored `round: null` or `0` means "not rounded", as in an upsert (which drops the key): drop it so
+  // load and command validation agree. Malformed collections are left for docProblem to report.
+  for (const t of Object.values(doc.buildingTypes ?? {})) {
+    if (!t || !Array.isArray(t.parts)) continue;
+    for (const p of t.parts) if (p && typeof p === 'object' && ((p.round as unknown) === null || p.round === 0)) delete p.round;
   }
   return doc;
 }

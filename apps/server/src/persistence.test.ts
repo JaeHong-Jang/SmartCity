@@ -35,6 +35,7 @@ vi.mock('node:fs', async (importOriginal) => {
 const { appendLog, backupCheckpoint, backupDir, loadRoom, LogCorruptedError, pruneBackups, RoomLoadError, writeCheckpoint } = await import('./persistence.js');
 const { cloneJson, createEmptyDoc, DOC_VERSION, FACILITY_PRESETS, GROWTH_PRESETS, BASE_GROWTH_PRESET_IDS, LIMITS } = await import('@smartcity/shared');
 const { Client, Room } = await import('./room.js');
+const { RoomManager } = await import('./roomManager.js');
 
 function fakeClient() {
   const msgs: { t: string; seq?: number; error?: string }[] = [];
@@ -387,4 +388,77 @@ describe('Sol recheck #6: logs written before a migration still replay', () => {
       expect(() => loadRoom(dir, 'r')).toThrow(LogCorruptedError);
     });
   }
+});
+
+describe('v7 rounded volumes (ADR 0012 §4)', () => {
+  it('loads a v6 checkpoint as v7 with every design unchanged, then replays a logged rounded design', () => {
+    const doc = { ...cloneJson(createEmptyDoc()), version: 6 };
+    const types = JSON.stringify(doc.buildingTypes);
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 2, doc }));
+    const tower = { ...cloneJson(createEmptyDoc().buildingTypes.house!), id: 'tower', parts: [{ ...cloneJson(createEmptyDoc().buildingTypes.house!.parts[0]!), width: 12, depth: 12, roof: 'flat', round: 6 }] };
+    writeFileSync(log, `${JSON.stringify({ seq: 3, cmd: { type: 'buildingType.upsert', buildingType: tower } })}\n`);
+    const r = loadRoom(dir, 'r');
+    expect(DOC_VERSION).toBe(7);
+    expect(r.doc.version).toBe(7);
+    const { tower: added, ...rest } = r.doc.buildingTypes;
+    expect(JSON.stringify(rest)).toBe(types);
+    expect(added!.parts[0]!.round).toBe(6);
+  });
+
+  // Sol P5d review #1: a v6 room opened by the v7 server, a rounded design accepted, then a crash before
+  // the next checkpoint and a rollback to the v6 server. The v6 server's loader (HEAD before P5d) refuses
+  // a checkpoint whose doc.version is above its DOC_VERSION 6, and otherwise replays the log onto its
+  // own doc, dropping `round` without a word.
+  const OLD_DOC_VERSION = 6;
+  const oldServerOpens = (room: string): boolean => {
+    const cp = JSON.parse(readFileSync(join(dir, `${room}.json`), 'utf8')) as { doc: { version: number } };
+    return !(cp.doc.version > OLD_DOC_VERSION);
+  };
+  const roundDesign = () => {
+    const house = cloneJson(createEmptyDoc().buildingTypes.house!);
+    return { type: 'buildingType.upsert' as const, buildingType: { ...house, id: 'tower', rev: undefined, parts: [{ ...house.parts[0]!, width: 20, depth: 20, roof: 'flat' as const, round: 10 }] } };
+  };
+
+  it('a migrated room is on disk at v7 before it logs a rounded design, so the v6 server refuses it', () => {
+    const v6 = { ...cloneJson(createEmptyDoc()), version: 6 };
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: v6 }));
+    expect(oldServerOpens('r')).toBe(true);
+    const rooms = new RoomManager(dir);
+    const room = rooms.get('r');
+    // Written right at load, before any command (with the usual backup of the v6 file).
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(7);
+    expect(readdirSync(join(dir, 'backups', 'r'))).toHaveLength(1);
+    expect(room.system(roundDesign())).toMatchObject({ ok: true, seq: 1 });
+    // Crash: no further checkpoint. The log holds the rounded design...
+    expect(readFileSync(log, 'utf8')).toContain('"round":10');
+    // ...but the v6 server refuses the room instead of replaying it without the radius,
+    expect(oldServerOpens('r')).toBe(false);
+    // while the v7 server gets it back.
+    expect(loadRoom(dir, 'r').doc.buildingTypes.tower!.parts[0]!.round).toBe(10);
+    room.dispose();
+  });
+
+  it('a room with no checkpoint yet writes a v7 one before its first command (log kept)', () => {
+    const room = new RoomManager(dir).get('r');
+    expect(existsSync(join(dir, 'r.json'))).toBe(false); // a mere visit writes nothing
+    expect(room.system(roundDesign()).ok).toBe(true);
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8'))).toMatchObject({ seq: 0, doc: { version: 7 } });
+    expect(oldServerOpens('r')).toBe(false);
+    room.dispose();
+  });
+
+  it('refuses commands while the version checkpoint cannot be written, and logs nothing', () => {
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: { ...cloneJson(createEmptyDoc()), version: 6 } }));
+    fault.failWrite = (path) => path.endsWith('r.json.tmp');
+    const room = new RoomManager(dir).get('r');
+    expect(room.system(roundDesign())).toEqual({ ok: false, error: 'storage error' });
+    expect(existsSync(log) ? readFileSync(log, 'utf8') : '').toBe('');
+    expect(room.doc.buildingTypes.tower).toBeUndefined();
+    expect(oldServerOpens('r')).toBe(true); // still the untouched v6 file
+    // Once the disk recovers, the next command first stamps v7, then is logged.
+    fault.failWrite = null;
+    expect(room.system(roundDesign()).ok).toBe(true);
+    expect(oldServerOpens('r')).toBe(false);
+    room.dispose();
+  });
 });

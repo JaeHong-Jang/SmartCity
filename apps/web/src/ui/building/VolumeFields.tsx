@@ -3,7 +3,7 @@
 import { partArea, type BuildingPart, type Facade, type FacadeStyle, type GroundFloor, type RoofShape, type Zone } from '@smartcity/shared';
 import { clampInt, clampNum } from '../RoadTypeEditor';
 import { ZONE_KO } from '../Toolbar';
-import { partTop, toRectangle } from './designDraft';
+import { maxRound, partTop, toRectangle, withRound } from './designDraft';
 
 const ROOF_KO: Record<RoofShape, string> = { flat: '평지붕', gable: '박공', pyramid: '모임' };
 const STYLE_KO: Record<FacadeStyle, string> = { grid: '격자창', ribbon: '띠창', curtain: '커튼월', none: '무창' };
@@ -18,10 +18,17 @@ interface Props {
 }
 
 export function VolumeFields({ part: p, zone, onChange }: Props) {
-  const set = (patch: Partial<BuildingPart>) => onChange({ ...p, ...patch });
+  // A smaller plan keeps the corner radius within half its shorter side.
+  const set = (patch: Partial<BuildingPart>) => {
+    const next = { ...p, ...patch };
+    onChange(next.round ? withRound(next, next.round) : next);
+  };
   const facade = p.facade ?? DEFAULT_FACADE;
   const setFacade = (patch: Partial<Facade>) => set({ facade: { ...facade, ...patch } });
   const drawn = !!p.footprint && p.footprint.length >= 3;
+  const round = p.round ?? 0;
+  const rounded = round > 0;
+  const roundMax = maxRound(p);
   return (
     <div className="part-card bp-volume">
       {drawn ? (
@@ -65,9 +72,9 @@ export function VolumeFields({ part: p, zone, onChange }: Props) {
         시작 높이
         <input type="number" min={0} step={0.5} value={p.baseHeight} onChange={(e) => set({ baseHeight: clampNum(e.target.value, 0, 1000) })} />
       </label>
-      <label title={drawn ? '직접 그린 평면은 평지붕만 가능합니다' : undefined}>
+      <label title={drawn ? '직접 그린 평면은 평지붕만 가능합니다' : rounded ? '모서리가 둥근 볼륨은 평지붕만 가능합니다' : undefined}>
         지붕
-        <select value={drawn ? 'flat' : p.roof} disabled={drawn} onChange={(e) => set({ roof: e.target.value as RoofShape })}>
+        <select value={drawn || rounded ? 'flat' : p.roof} disabled={drawn || rounded} onChange={(e) => set({ roof: e.target.value as RoofShape })}>
           {Object.entries(ROOF_KO).map(([k, v]) => (
             <option key={k} value={k}>
               {v}
@@ -75,6 +82,25 @@ export function VolumeFields({ part: p, zone, onChange }: Props) {
           ))}
         </select>
       </label>
+      <div className="bp-wide row" title={drawn ? '직접 그린 평면은 모서리를 둥글게 할 수 없습니다' : '0 = 직각 · 최대(짧은 변의 절반) = 원형(정사각형) 또는 캡슐형'}>
+        <label className="row" style={{ flex: 1 }}>
+          모서리 둥글기(m)
+          <input
+            type="number"
+            data-round
+            min={0}
+            max={roundMax}
+            step={0.5}
+            value={round}
+            disabled={drawn}
+            onChange={(e) => onChange(withRound(p, clampNum(e.target.value, 0, roundMax)))}
+          />
+          <span className="muted">최대 {round1(roundMax)}</span>
+        </label>
+        <button data-round-circle disabled={drawn} onClick={() => onChange(withRound(p, roundMax))} title="짧은 변의 절반: 정사각형은 원형, 직사각형은 캡슐형">
+          {p.width === p.depth ? '원형' : '캡슐형'}
+        </button>
+      </div>
       <label className="bp-span2">
         용도
         <select value={p.use ?? ''} onChange={(e) => onChange(withUse(p, e.target.value as Zone | ''))}>

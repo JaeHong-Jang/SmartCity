@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import type { WebSocket } from 'ws';
-import { MAX_MESSAGE_BYTES, PROTOCOL_VERSION, ROOM_ID_RE, parseClientMessage } from '@smartcity/shared';
+import { MAX_MESSAGE_BYTES, PROTOCOL_MISMATCH, PROTOCOL_VERSION, ROOM_ID_RE, parseClientMessage } from '@smartcity/shared';
 import type { ServerMessage } from '@smartcity/shared';
 import { createHttpHandler } from './http.js';
 import { ROOM_UNREADABLE, RoomLoadError } from './persistence.js';
@@ -79,7 +79,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
           if (msg.t !== 'hello') return fail('expected hello');
           clearTimeout(helloTimer);
           if (msg.protocol !== PROTOCOL_VERSION) {
-            send(ws, { t: 'error', error: `unsupported protocol ${msg.protocol}` });
+            send(ws, { t: 'error', code: 'protocol', error: `${PROTOCOL_MISMATCH} (앱 ${msg.protocol}, 서버 ${PROTOCOL_VERSION})` });
             ws.close(1002, 'protocol');
             return;
           }

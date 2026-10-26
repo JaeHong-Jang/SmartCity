@@ -11,6 +11,8 @@ export interface ToolPointer {
   shift: boolean;
   ctrl: boolean;
   alt: boolean;
+  /** World meters per screen pixel at the pointer (for pixel-based snapping); absent in tests. */
+  mPerPx?: number;
 }
 
 export interface PreviewLine {
@@ -38,6 +40,8 @@ export interface PreviewBuilding {
 export interface ToolPreview {
   lines: PreviewLine[];
   points: PreviewPoint[];
+  /** Short text next to the cursor (length, angle, snap kind, refusal reason). */
+  label?: { pos: Vec2; text: string; error?: boolean };
   building?: PreviewBuilding;
 }
 

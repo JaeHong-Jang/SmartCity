@@ -8,6 +8,7 @@
 import {
   buildingBlocksRoad,
   buildingFootprints,
+  MAX_GHOST_POINTS,
   parcelCompliance,
   partOutline,
   pointInPolygon,
@@ -241,8 +242,12 @@ export class BuildingTool implements Tool {
     const type = this.type();
     if (!type || !this.placement) return [];
     const polys = buildingFootprints(this.placement, type);
-    const first = polys[0]!;
-    return closedRing(first);
+    const ring = closedRing(polys[0]!);
+    // A rounded outline can have up to 128 corners: thin it evenly (closing point kept) so the presence
+    // message stays within the protocol's limit (Sol P5d #2); peers only draw it as a hint.
+    if (ring.length <= MAX_GHOST_POINTS) return ring;
+    const step = (ring.length - 1) / (MAX_GHOST_POINTS - 1);
+    return Array.from({ length: MAX_GHOST_POINTS }, (_, i) => ring[Math.round(i * step)]!);
   }
 
   preview(): ToolPreview {

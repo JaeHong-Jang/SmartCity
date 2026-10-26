@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TransportStatus } from './transport';
+import { PROTOCOL_MISMATCH, PROTOCOL_VERSION } from '@smartcity/shared';
 import { MAX_WELCOME_DEADLINE_MS, WELCOME_DEADLINE_MS, WsTransport } from './wsTransport';
 
 /** Minimal stand-in for the browser WebSocket: tests open, message and close it by hand. */
@@ -199,5 +200,46 @@ describe('WsTransport retry info (connect overlay)', () => {
     vi.advanceTimersByTime(WELCOME_DEADLINE_MS);
     expect(drops.slice(7)).toEqual([WELCOME_DEADLINE_MS]);
     t.close();
+  });
+});
+
+describe('WsTransport protocol refusal (ADR 0012 §4)', () => {
+  it('sends the current protocol and stops retrying once the server refuses this app version', () => {
+    const t = new WsTransport('ws://x/ws', 'main', () => 'me');
+    const seen: TransportStatus[] = [];
+    const errors: string[] = [];
+    t.onStatus((st) => seen.push(st));
+    t.onMessage((m) => {
+      if (m.t === 'error') errors.push(m.error);
+    });
+    t.connect();
+    last().open();
+    expect(JSON.parse(last().sent[0]!)).toMatchObject({ t: 'hello', protocol: PROTOCOL_VERSION });
+    last().onmessage?.({ data: JSON.stringify({ t: 'error', code: 'protocol', error: `${PROTOCOL_MISMATCH} (앱 1, 서버 2)` }) });
+    expect(t.outdated).toBe(true);
+    expect(errors).toEqual([`${PROTOCOL_MISMATCH} (앱 1, 서버 2)`]);
+    last().drop();
+    expect(seen.at(-1)).toBe('closed');
+    expect(t.retryAt).toBeNull();
+    const sockets = FakeSocket.all.length;
+    vi.advanceTimersByTime(120_000);
+    t.retryNow();
+    expect(FakeSocket.all.length).toBe(sockets);
+  });
+
+  it('also stops on the refusal text of a server from before v2, but keeps retrying other refusals', () => {
+    const t = new WsTransport('ws://x/ws', 'main', () => 'me');
+    t.connect();
+    last().open();
+    last().onmessage?.({ data: JSON.stringify({ t: 'error', error: '도시 파일을 읽을 수 없습니다 — 관리자 확인 필요' }) });
+    last().drop();
+    expect(t.outdated).toBe(false);
+    expect(t.retryAt).not.toBeNull();
+    vi.advanceTimersByTime(t.retryAt! - Date.now());
+    last().open();
+    last().onmessage?.({ data: JSON.stringify({ t: 'error', error: 'unsupported protocol 2' }) });
+    last().drop();
+    expect(t.outdated).toBe(true);
+    expect(t.retryAt).toBeNull();
   });
 });

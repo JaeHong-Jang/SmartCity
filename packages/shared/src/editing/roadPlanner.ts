@@ -38,7 +38,7 @@ function segmentCurve(doc: CityDoc, s: RoadSegment): Vec2[] {
 }
 
 /** Bezier/linear parameter of the point on `s` closest to `p`. */
-function paramOn(doc: CityDoc, s: RoadSegment, p: Vec2): number {
+export function paramOn(doc: CityDoc, s: RoadSegment, p: Vec2): number {
   const a = doc.nodes[s.a]!.pos;
   const b = doc.nodes[s.b]!.pos;
   if (s.control) return closestTOnQuadBezier(a, s.control, b, p);
@@ -227,7 +227,7 @@ export function planRoad(doc: CityDoc, input: RoadPlanInput, ids: IdGen): RoadPl
 }
 
 /** Copy of the doc whose collections can be changed by road commands without touching `doc` (values are shared, never mutated). */
-function scratchDoc(doc: CityDoc): CityDoc {
+export function scratchDoc(doc: CityDoc): CityDoc {
   return {
     ...doc,
     nodes: { ...doc.nodes },
@@ -282,6 +282,110 @@ function addStartFillet(doc: CityDoc, plan: RoadPlan, commands: Command[], nodeI
   const g = r.geometry;
   const [onPrev, onNew] = g.segments[0].id === newId ? [g.p2, g.p0] : [g.p0, g.p2];
   plan.fillet = { curve: sampleSegmentCurve(onPrev, onNew, g.points[1]), onPrev, onNew };
+}
+
+export interface ChainPiece {
+  /** End of the piece: a new free node, or (with `road`) where the stroke crossed that existing road. */
+  pos: Vec2;
+  /** The road the stroke crossed at `pos`: the end is resolved on THIS road only. */
+  road?: SegmentId;
+  control?: Vec2;
+}
+
+/**
+ * The point of road `segId` at `pos` as a planner end point: a junction exactly there (split), or the
+ * road's own end node when `pos` is within the minimum road length of it. A road split by earlier pieces
+ * of the same stroke (`children`: original → its two pieces) is looked up among its pieces, the one nearest
+ * to `pos` (ties by id). Null if the road is gone for another reason (someone else's edit).
+ */
+function resolveOnRoad(doc: CityDoc, segId: SegmentId, pos: Vec2, children: ReadonlyMap<SegmentId, readonly SegmentId[]>): ResolvedPoint | null {
+  const leaves: SegmentId[] = [];
+  const walk = (id: SegmentId): void => {
+    if (doc.segments[id]) leaves.push(id);
+    else for (const c of children.get(id) ?? []) walk(c);
+  };
+  walk(segId);
+  let best: { seg: RoadSegment; c: ReturnType<typeof closestPointOnPolyline> } | null = null;
+  for (const id of leaves.sort()) {
+    const seg = doc.segments[id]!;
+    const c = closestPointOnPolyline(segmentCurve(doc, seg), pos);
+    if (!best || c.distance < best.c.distance) best = { seg, c };
+  }
+  if (!best) return null;
+  const { seg, c } = best;
+  const total = segmentLength(doc, seg);
+  if (c.s < LIMITS.minSegmentLength) return { kind: 'node', nodeId: seg.a, pos: doc.nodes[seg.a]!.pos };
+  if (total - c.s < LIMITS.minSegmentLength) return { kind: 'node', nodeId: seg.b, pos: doc.nodes[seg.b]!.pos };
+  return { kind: 'split', segmentId: seg.id, t: paramOn(doc, seg, c.point), pos: c.point };
+}
+
+export interface ChainPlan extends RoadPlan {
+  /** Index of the piece that failed (with `error`). */
+  failedPiece?: number;
+  /** Every segment the batch adds, in stroke order (for previews and curve checks). */
+  added: { a: Vec2; b: Vec2; control?: Vec2 }[];
+}
+
+/**
+ * Crossing-node policy: a piece end with `road` (where the stroke crossed that road) is resolved on that
+ * road only, never on another road or node nearby: a junction at that very point of the road, except within
+ * 8 m (minimum road length) of the road's end, where that road's end node is used (a bounded move along
+ * it). Callers check the FINAL geometry (`added`), not the stroke.
+ *
+ * Plan a road of several pieces drawn in one stroke (e.g. a free-hand spline) as ONE batch: each piece goes
+ * through planRoad on a scratch doc that already holds the pieces before it, so crossings, splits and
+ * the whole batch are checked exactly as applyCommand will. `end` is the resolved end of the last piece.
+ */
+export function planRoadChain(doc: CityDoc, input: { start: ResolvedPoint; pieces: ChainPiece[]; end: ResolvedPoint; roadTypeId: string }, ids: IdGen): ChainPlan {
+  const fail = (error: string, failedPiece?: number): ChainPlan => ({ command: null, error, junctions: [], added: [], ...(failedPiece !== undefined ? { failedPiece } : {}) });
+  if (input.pieces.length === 0) return fail('도로가 너무 짧습니다');
+  const work = scratchDoc(doc);
+  const commands: Command[] = [];
+  const junctions: Vec2[] = [input.start.pos];
+  const added: ChainPlan['added'] = [];
+  let cur = input.start;
+  /** Roads this stroke has split so far: original id → its two pieces. */
+  const children = new Map<SegmentId, SegmentId[]>();
+  for (let i = 0; i < input.pieces.length; i++) {
+    const piece = input.pieces[i]!;
+    const last = i === input.pieces.length - 1;
+    let end: ResolvedPoint;
+    if (last) {
+      // A split end is re-resolved on its own road: an earlier piece may already have split another one.
+      const e = input.end;
+      const onRoad = e.kind === 'split' ? resolveOnRoad(work, e.segmentId, e.pos, children) : e;
+      if (!onRoad) return fail('교차한 도로가 바뀌었습니다. 다시 그리세요', i);
+      end = onRoad;
+    } else if (piece.road) {
+      const onRoad = resolveOnRoad(work, piece.road, piece.pos, children);
+      if (!onRoad) return fail('교차한 도로가 바뀌었습니다. 다시 그리세요', i);
+      end = onRoad;
+    } else {
+      end = { kind: 'free', pos: piece.pos };
+    }
+    const plan = planRoad(work, { start: cur, end, control: piece.control, roadTypeId: input.roadTypeId }, ids);
+    if (!plan.command || plan.command.type !== 'batch') return fail(plan.error ?? '도로를 놓을 수 없습니다', i);
+    const r = tryApplyCommand(work, plan.command);
+    if (!r.ok) return fail(r.error, i);
+    commands.push(...plan.command.commands);
+    for (const c of plan.command.commands) if (c.type === 'segment.split') children.set(c.id, [...c.segmentIds]);
+    junctions.push(...plan.junctions.slice(1));
+    let endNode = '';
+    for (const c of plan.command.commands) {
+      if (c.type !== 'segment.add') continue;
+      const s = work.segments[c.segment.id]!;
+      added.push({ a: work.nodes[s.a]!.pos, b: work.nodes[s.b]!.pos, ...(s.control ? { control: s.control } : {}) });
+      endNode = s.b;
+    }
+    cur = { kind: 'node', nodeId: endNode, pos: work.nodes[endNode]!.pos };
+  }
+  // The pieces were checked one by one; the combined batch must also pass as ONE command (size limit,
+  // anything that only shows up together), checked on a fresh copy of `doc`.
+  if (commands.length > LIMITS.batchSize) return fail('도로가 너무 깁니다 (한 번에 그릴 수 있는 조각 수 초과)');
+  const command: Command = { type: 'batch', commands };
+  const whole = tryApplyCommand(scratchDoc(doc), command);
+  if (!whole.ok) return fail(whole.error);
+  return { command, junctions, added };
 }
 
 export interface FilletPlan {

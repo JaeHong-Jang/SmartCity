@@ -6,6 +6,15 @@ import type { CityDoc, Command } from '@smartcity/shared';
 export interface LoadedRoom {
   doc: CityDoc;
   seq: number;
+  /**
+   * No checkpoint of the current DOC_VERSION on disk (none yet, or an older version that was migrated in
+   * memory). Such a room must write a checkpoint before it logs any command: a server of the older
+   * version would otherwise replay the new commands onto its own doc and silently drop what it does not
+   * know (e.g. `round`, Sol P5d #1); a current-version checkpoint makes it refuse the room instead.
+   */
+  stale: boolean;
+  /** The checkpoint on disk is of an older DOC_VERSION (migrated in memory). */
+  migrated: boolean;
 }
 
 interface Checkpoint {
@@ -60,6 +69,7 @@ export function loadRoom(dir: string, room: string): LoadedRoom {
   knownLogSize.delete(logPath(dir, room));
   let doc: CityDoc | null = null;
   let seq = 0;
+  let migrated = false;
   const cp = checkpointPath(dir, room);
   if (existsSync(cp)) {
     let parsed: Checkpoint;
@@ -75,6 +85,7 @@ export function loadRoom(dir: string, room: string): LoadedRoom {
       console.error(`[persist] ${room}: checkpoint doc v${parsed.doc.version} is newer than v${DOC_VERSION}, room refused`);
       throw new RoomLoadError('이 도시 파일은 더 새로운 버전의 서버가 만들었습니다 — 관리자 확인 필요');
     }
+    migrated = parsed.doc.version < DOC_VERSION;
     let problem: string | null;
     try {
       doc = normalizeDoc(parsed.doc);
@@ -94,7 +105,7 @@ export function loadRoom(dir: string, room: string): LoadedRoom {
 
   const lp = logPath(dir, room);
   if (existsSync(lp)) seq = replayLog(lp, room, doc, seq);
-  return { doc, seq };
+  return { doc, seq, stale: migrated || !existsSync(cp), migrated };
 }
 
 /** The log could not be restored to a record boundary; the room must stop accepting writes. */
@@ -260,7 +271,12 @@ export function backupCheckpoint(dir: string, room: string, now: Date, prewipe =
  * Atomic checkpoint (tmp + rename), then clear the log. The file it replaces is backed up first;
  * a failed backup is logged and never blocks the checkpoint.
  */
-export function writeCheckpoint(dir: string, room: string, seq: number, doc: CityDoc, prewipe = false): void {
+/**
+ * Write the checkpoint atomically (tmp + rename, previous file backed up) and reset the log. With
+ * `keepLog` the log is left as it is: replay skips its records up to `seq`, so this only re-stamps the
+ * file (used to put a current-version checkpoint on disk before a room logs its first command).
+ */
+export function writeCheckpoint(dir: string, room: string, seq: number, doc: CityDoc, prewipe = false, keepLog = false): void {
   mkdirSync(dir, { recursive: true });
   const cp = checkpointPath(dir, room);
   const tmp = `${cp}.tmp`;
@@ -274,6 +290,7 @@ export function writeCheckpoint(dir: string, room: string, seq: number, doc: Cit
     console.error(`[persist] ${room}: backup failed (${(e as Error).message})`);
   }
   renameSync(tmp, cp);
+  if (keepLog) return;
   writeFileSync(lp, '');
   knownLogSize.set(lp, 0);
 }

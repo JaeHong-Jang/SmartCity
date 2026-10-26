@@ -45,10 +45,30 @@ function useSecondsUntil(at: number | null): number | null {
 
 export function ConnectOverlay() {
   const { retryConnect } = useServices();
-  const wait = useStore((s) => (s.ready || s.connection === 'offline' ? null : s.connectWait));
+  // The reload notice also covers a tab that was already in the city (refused on a reconnect).
+  const wait = useStore((s) => (s.connectWait?.refresh ? s.connectWait : s.ready || s.connection === 'offline' ? null : s.connectWait));
   const room = useStore((s) => s.room);
   const secs = useSecondsUntil(wait?.retryAt ?? null);
   if (!wait) return null;
+  if (wait.refresh) {
+    // Another app version: retrying cannot help, and the old page must not edit this city.
+    return (
+      <div className="connect-overlay" data-connect-overlay data-connect-outdated role="alertdialog" aria-modal="true" aria-labelledby="connect-title">
+        <div className="panel connect-card">
+          <h2 id="connect-title">앱을 새로고침하세요</h2>
+          <p className="connect-error" data-connect-error>
+            {wait.error}
+          </p>
+          <p className="muted">서버가 다른 버전의 앱을 쓰고 있어 연결하지 않았습니다. 새로고침하면 새 버전으로 다시 연결합니다.</p>
+          <div className="row connect-actions">
+            <button className="primary" data-connect-reload onClick={() => location.reload()}>
+              새로고침
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="connect-overlay" data-connect-overlay role="alertdialog" aria-modal="true" aria-labelledby="connect-title">
       <div className="panel connect-card">

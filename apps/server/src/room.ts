@@ -54,6 +54,11 @@ export class Room {
   private readonly growth: GrowthDirector;
   /** Buildings + roads in the last checkpoint (or the loaded doc), for the wipe warning. */
   private savedSize: number;
+  /**
+   * The file on disk is not a checkpoint of the current DOC_VERSION (LoadedRoom.stale): no command is
+   * logged until a checkpoint succeeds, so an older server never replays commands it cannot represent.
+   */
+  stale = false;
 
   constructor(
     readonly id: string,
@@ -132,6 +137,7 @@ export class Room {
    */
   private commit(cmd: Command, by: string, origin: Client | null, ref: number): CommitResult {
     if (!this.writable) return { ok: false, error: 'storage error' };
+    if (this.stale && !this.stampVersion()) return { ok: false, error: 'storage error' };
     // Serialize first: a command that cannot be logged or broadcast must never touch the doc.
     let cmdJson: string;
     try {
@@ -189,6 +195,22 @@ export class Room {
     }, wait);
   }
 
+  /**
+   * Put a checkpoint of the current DOC_VERSION on disk (log kept: replay skips what it covers). True
+   * when the file is current; false when the write failed — the caller must not log commands then.
+   */
+  stampVersion(): boolean {
+    if (!this.stale) return true;
+    try {
+      writeCheckpoint(this.dataDir, this.id, this.seq, this.doc, false, true);
+      this.stale = false;
+      return true;
+    } catch (e) {
+      console.error(`[room ${this.id}] version checkpoint failed, commands refused: ${(e as Error).message}`);
+      return false;
+    }
+  }
+
   checkpoint(): void {
     const size = citySize(this.doc);
     // Possibly a real teardown, so the write goes ahead; the city it replaces is kept as a protected backup.
@@ -199,6 +221,7 @@ export class Room {
       this.savedSize = size;
       this.sinceCheckpoint = 0;
       this.writable = true;
+      this.stale = false;
     } catch (e) {
       console.error(`[room ${this.id}] checkpoint failed: ${(e as Error).message}`);
     }

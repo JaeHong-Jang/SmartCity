@@ -168,3 +168,41 @@ describe('create_building_design centering', () => {
     for (const v of [...xs, ...zs]) expect(Math.abs(v % 2)).toBe(0);
   });
 });
+
+describe('create_building_design corner_radius (ADR 0012 §4)', () => {
+  const block = { x: -5, y: 0, z: -5, w: 10, d: 10, h: 8, color: '#c8d0d8', roof_color: null, facade_style: 'curtain', window_ratio: 0.7, ground: null };
+  const design = (blocks: unknown[], roof = 'gable') => {
+    const sb = newSandbox(town(), 't3', null, null);
+    const r = runTool(sb, 'create_building_design', { name: '원형 타워', zone: 'office', roof, blocks });
+    return { r, parts: r.isError ? [] : sb.doc.buildingTypes[(JSON.parse(r.content) as { type_id: string }).type_id]!.parts };
+  };
+
+  it('is a strict nullable number in the schema (anyOf null, required), with no enum next to a type array', () => {
+    const tool = TOOLS.find((t) => t.name === 'create_building_design')!;
+    const items = (tool.input_schema as { properties: { blocks: { items: { properties: Record<string, unknown>; required: string[] } } } }).properties.blocks.items;
+    expect(items.properties.corner_radius).toMatchObject({ anyOf: [{ type: 'number' }, { type: 'null' }] });
+    expect(items.required).toContain('corner_radius');
+  });
+
+  it('rounds a square block into a round tower (clamped to half its side, flat roof)', () => {
+    const tower = design([{ ...block, corner_radius: 10 }]);
+    expect(tower.r.isError).toBe(false);
+    expect(tower.parts).toHaveLength(1);
+    expect(tower.parts[0]).toMatchObject({ width: 20, depth: 20, round: 10, roof: 'flat' });
+    expect(design([{ ...block, corner_radius: 30 }]).parts[0]!.round).toBe(10);
+    expect(design([{ ...block, corner_radius: 3 }]).parts[0]!.round).toBe(3);
+  });
+
+  it('null, missing and 0 mean square corners (field omitted, roof kept)', () => {
+    for (const b of [{ ...block, corner_radius: null }, { ...block, corner_radius: 0 }, block]) {
+      const { r, parts } = design([b]);
+      expect(r.isError).toBe(false);
+      expect(parts[0]).not.toHaveProperty('round');
+      expect(parts[0]!.roof).toBe('gable');
+    }
+  });
+
+  it('refuses negative and non-numeric radii', () => {
+    for (const bad of [-1, 33, '5', Infinity]) expect(design([{ ...block, corner_radius: bad }]).r.isError, String(bad)).toBe(true);
+  });
+});

@@ -2,7 +2,7 @@
 // change is turned into an orthogonal outline by the parent (cellsToOutline) and stored as `footprint`.
 
 import { useEffect, useRef, useState } from 'react';
-import { cellKey, parseCell, partOutline, pointInPolygon, type BuildingPart, type CellKey, type Vec2 } from '@smartcity/shared';
+import { cellKey, parseCell, partBaseOutline, partOutline, pointInPolygon, type BuildingPart, type CellKey, type Vec2 } from '@smartcity/shared';
 import { partCells } from './designDraft';
 
 const CSS = 300;
@@ -165,13 +165,15 @@ export function FootprintPainter({ part, others, plot, resetKey, onPaint }: Prop
 
     // This volume: the stored outline, then the painted cells (red = left out, not connected).
     const outline = partOutline(part);
+    // Cells of a rounded volume cover its rectangle: corner cells are not "left out".
+    const cellArea = partBaseOutline(part);
     poly(outline);
     g.fillStyle = 'rgba(56,189,248,0.22)';
     g.fill();
     for (const k of cells) {
       const [i, j] = parseCell(k);
       const c = { x: (i + 0.5) * size, z: (j + 0.5) * size };
-      const inside = pointInPolygon(c, outline);
+      const inside = pointInPolygon(c, cellArea);
       g.fillStyle = inside ? 'rgba(56,189,248,0.75)' : 'rgba(248,113,113,0.8)';
       const [x, y] = toPx({ x: i * size, z: j * size });
       g.fillRect(x + 0.5, y + 0.5, size * scale - 1, size * scale - 1);

@@ -272,10 +272,11 @@ describe('add_road never damages buildings or lots (Sol 4b #1)', () => {
     autoLot(doc);
     const sb = newSandbox(cloneJson(doc), 't', null, null);
     run(sb, road(pts([48, -64], [48, 64]))); // rejected above; plan the same road without the flag:
+    // (Started south of road E: a segment crossing a road without a junction is refused for everyone, P5b.)
     const plain: Command = {
       type: 'batch',
       commands: [
-        { type: 'node.add', node: { id: 'q1', pos: { x: 48, z: -64 } } },
+        { type: 'node.add', node: { id: 'q1', pos: { x: 48, z: 8 } } },
         { type: 'node.add', node: { id: 'q2', pos: { x: 48, z: 64 } } },
         { type: 'segment.add', segment: { id: 'qs', a: 'q1', b: 'q2', roadTypeId: 'road-2' } },
       ],
