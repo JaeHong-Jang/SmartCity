@@ -243,3 +243,47 @@ describe('WsTransport protocol refusal (ADR 0012 §4)', () => {
     expect(t.retryAt).toBeNull();
   });
 });
+
+describe('WsTransport invite password', () => {
+  it('sends the invite only when there is one', () => {
+    let invite: string | null = null;
+    const t = new WsTransport('ws://x/ws', 'main', () => 'me', () => invite);
+    t.connect();
+    last().open();
+    expect(JSON.parse(last().sent[0]!)).not.toHaveProperty('invite');
+    invite = 'open sesame';
+    t.retryNow();
+    last().open();
+    expect(JSON.parse(last().sent[0]!)).toMatchObject({ t: 'hello', invite: 'open sesame' });
+    t.close();
+  });
+
+  it('waits after an auth refusal (no retries) until connect() is called with a new password', () => {
+    let invite: string | null = 'wrong';
+    const t = new WsTransport('ws://x/ws', 'main', () => 'me', () => invite);
+    const seen: TransportStatus[] = [];
+    t.onStatus((st) => seen.push(st));
+    t.connect();
+    last().open();
+    last().onmessage?.({ data: JSON.stringify({ t: 'error', code: 'auth', error: '초대 비밀번호가 틀렸습니다' }) });
+    expect(t.authRefused).toBe(true);
+    last().drop();
+    expect(seen.at(-1)).toBe('closed');
+    expect(t.retryAt).toBeNull();
+    const sockets = FakeSocket.all.length;
+    vi.advanceTimersByTime(120_000);
+    t.retryNow();
+    expect(FakeSocket.all.length).toBe(sockets);
+
+    invite = 'right';
+    t.connect();
+    expect(t.authRefused).toBe(false);
+    expect(FakeSocket.all.length).toBe(sockets + 1);
+    last().open();
+    expect(JSON.parse(last().sent[0]!)).toMatchObject({ invite: 'right' });
+    last().onmessage?.({ data: JSON.stringify({ t: 'welcome' }) });
+    last().drop();
+    expect(t.retryAt).not.toBeNull(); // an ordinary drop after joining retries as before
+    t.close();
+  });
+});

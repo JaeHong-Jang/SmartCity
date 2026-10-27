@@ -40,11 +40,18 @@ export class WsTransport implements Transport {
    * the connect overlay asks for a reload instead.
    */
   outdated = false;
+  /**
+   * The server refused the invite password (missing, wrong, or too many wrong ones): retrying with the
+   * same one cannot help, so the transport waits until `connect()` is called with a new one.
+   */
+  authRefused = false;
 
   constructor(
     private readonly url: string,
     private readonly room: string,
     private readonly name: () => string,
+    /** Invite password sent with `hello` (null = none). */
+    private readonly invite: () => string | null = () => null,
   ) {}
 
   static defaultUrl(): string {
@@ -54,6 +61,7 @@ export class WsTransport implements Transport {
 
   connect(): void {
     this.closed = false;
+    this.authRefused = false;
     this.open();
   }
 
@@ -74,7 +82,8 @@ export class WsTransport implements Transport {
     this.armDeadline(g, deadline);
     ws.onopen = () => {
       if (g !== this.gen) return;
-      ws.send(JSON.stringify({ t: 'hello', protocol: PROTOCOL_VERSION, room: this.room, name: this.name() } satisfies ClientMessage));
+      const invite = this.invite();
+      ws.send(JSON.stringify({ t: 'hello', protocol: PROTOCOL_VERSION, room: this.room, name: this.name(), ...(invite === null ? {} : { invite }) } satisfies ClientMessage));
       this.statuses.emit('open');
       this.pingTimer = setInterval(() => this.send({ t: 'ping', at: Date.now() }), PING_MS);
     };
@@ -89,6 +98,11 @@ export class WsTransport implements Transport {
       // Only a welcome proves the room is served: a server that opens and then refuses keeps backing off.
       if (msg.t === 'error' && protocolRefused(msg)) {
         this.outdated = true;
+        this.closed = true;
+        this.retryAt = null;
+      }
+      if (msg.t === 'error' && msg.code === 'auth') {
+        this.authRefused = true;
         this.closed = true;
         this.retryAt = null;
       }

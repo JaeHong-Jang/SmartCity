@@ -79,7 +79,8 @@ export function loadRoom(dir: string, room: string): LoadedRoom {
       // Starting empty here would let the next checkpoint replace the city: refuse the room.
       console.error(`[persist] ${room}: bad checkpoint, room refused (${(e as Error).message})`);
       preserveCorrupt(dir, room, cp);
-      throw new RoomLoadError(ROOM_UNREADABLE);
+      // The cause tells a read error (errno) from bad contents (the backup snapshot needs the difference).
+      throw new RoomLoadError(ROOM_UNREADABLE, { cause: e });
     }
     if (parsed.doc.version > DOC_VERSION) {
       console.error(`[persist] ${room}: checkpoint doc v${parsed.doc.version} is newer than v${DOC_VERSION}, room refused`);

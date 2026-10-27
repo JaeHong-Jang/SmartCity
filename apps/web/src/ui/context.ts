@@ -17,6 +17,8 @@ export interface AppServices {
   setName(name: string): void;
   /** Try the server again right now (connect overlay). */
   retryConnect(): void;
+  /** Remember the invite password and join with it (connect overlay, after an auth refusal). */
+  submitInvite(code: string): void;
 }
 
 export const ServicesContext = createContext<AppServices | null>(null);

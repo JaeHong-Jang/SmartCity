@@ -98,6 +98,8 @@ export interface ConnectWait {
   error: string | null;
   /** The server refused this app's version: no more retries, the overlay asks for a reload. */
   refresh?: boolean;
+  /** The server wants its invite password (missing or wrong): no more retries, the overlay asks for it. */
+  auth?: boolean;
 }
 
 /** A city this browser saved in offline solo mode under the same room name, differing from the server's. */
@@ -447,7 +449,8 @@ export class ClientStore {
         this.set({ presence: { ...s.presence, [msg.clientId]: msg.presence } });
         return;
       case 'error':
-        this.toast(`서버 오류: ${msg.error}`, 'error');
+        // An invite refusal is answered on the connect overlay, not as a server fault.
+        if (msg.code !== 'auth') this.toast(`서버 오류: ${msg.error}`, 'error');
         return;
       case 'ai.status':
       case 'ai.progress':

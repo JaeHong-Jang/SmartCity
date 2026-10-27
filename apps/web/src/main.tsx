@@ -29,6 +29,8 @@ import './ui/styles.css';
 const CONNECT_TIMEOUT_MS = 1500;
 const WELCOME_TIMEOUT_MS = 8000;
 const NAME_KEY = 'smartcity:name';
+/** Invite password of a server that requires one (SC_INVITE_CODE), remembered for the next visits. */
+const INVITE_KEY = 'smartcity:invite';
 
 function safeStorage(): Storage | null {
   try {
@@ -148,7 +150,8 @@ function noticeOfflineCity(): void {
   store.set({ offlineCity: { buildings, roads, savedAt: local.savedAt, seen, unreadable: null } });
 }
 
-const ws = new WsTransport(WsTransport.defaultUrl(), room, () => store.getState().name);
+let invite = storage?.getItem(INVITE_KEY) ?? null;
+const ws = new WsTransport(WsTransport.defaultUrl(), room, () => store.getState().name, () => invite);
 if (params.get('offline') === '1') {
   goOffline();
 } else {
@@ -158,7 +161,7 @@ if (params.get('offline') === '1') {
   const showWait = (): void => {
     const s = store.getState();
     if (s.ready) return;
-    store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: s.connectWait?.error ?? null, refresh: ws.outdated } });
+    store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: s.connectWait?.error ?? null, refresh: ws.outdated, auth: ws.authRefused } });
   };
   let noticed = false;
   ws.onMessage((m) => {
@@ -169,8 +172,10 @@ if (params.get('offline') === '1') {
     // A refusal before welcome (e.g. unreadable city file) is shown on the overlay; the transport keeps
     // retrying. A protocol refusal (another app version) stops the transport and asks for a reload, also
     // in a tab that was already in the city (a reconnect to an upgraded server): the city stays shown,
-    // editing stays blocked (connection 'reconnecting').
-    if (m.t === 'error' && (!store.getState().ready || ws.outdated)) store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: m.error, refresh: ws.outdated } });
+    // editing stays blocked (connection 'reconnecting'). An invite refusal likewise waits for the password.
+    if (m.t === 'error' && (!store.getState().ready || ws.outdated || ws.authRefused)) {
+      store.set({ connectWait: { attempt: Math.max(1, ws.attempts), retryAt: ws.retryAt, error: m.error, refresh: ws.outdated, auth: ws.authRefused } });
+    }
   });
   ws.onStatus((st) => {
     const s = store.getState();
@@ -271,6 +276,19 @@ const services: AppServices = {
     store.toast(`이름을 '${v}'(으)로 바꿨습니다`, 'success');
   },
   retryConnect: () => ws.retryNow(),
+  submitInvite(code: string) {
+    const v = code.trim();
+    if (!v || !ws.authRefused) return;
+    invite = v;
+    try {
+      storage?.setItem(INVITE_KEY, v);
+    } catch {
+      // Not remembered: asked again on the next visit.
+    }
+    const cw = store.getState().connectWait;
+    if (cw) store.set({ connectWait: { ...cw, error: null, auth: false } });
+    ws.connect();
+  },
 };
 
 if (import.meta.env.DEV) {

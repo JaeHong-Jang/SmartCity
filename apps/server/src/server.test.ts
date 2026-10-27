@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,6 +8,7 @@ import type { Command, ServerMessage } from '@smartcity/shared';
 import { startServer } from './server.js';
 import { AiService } from './ai/service.js';
 import { scriptedModel } from './ai/model.js';
+import { AUTH_LIMITED, AUTH_NEEDED, AUTH_WRONG, InviteGate } from './invite.js';
 
 type Srv = Awaited<ReturnType<typeof startServer>>;
 
@@ -22,8 +23,8 @@ class TestClient {
     });
     this.closed = new Promise((r) => ws.on('close', (code) => r(code)));
   }
-  static async open(port: number): Promise<TestClient> {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  static async open(port: number, headers?: Record<string, string>): Promise<TestClient> {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers });
     await new Promise((res, rej) => {
       ws.once('open', res);
       ws.once('error', rej);
@@ -342,6 +343,83 @@ describe('server', () => {
     expect(await r.json()).toMatchObject({ ok: true, rooms: 0, clients: 0 });
     const p = await fetch(`http://127.0.0.1:${srv.port}/health`, { method: 'POST' });
     expect(p.status).toBe(405);
+  });
+
+  it('serves the web build: index.html revalidated, hashed assets cached for good', async () => {
+    const web = join(dir, 'web');
+    mkdirSync(join(web, 'assets'), { recursive: true });
+    writeFileSync(join(web, 'index.html'), '<!doctype html>');
+    writeFileSync(join(web, 'assets', 'index-abc123.js'), 'export {}');
+    const s = await startServer({ port: 0, dataDir: join(dir, 'data'), webDist: web });
+    extra.push(s);
+    const page = await fetch(`http://127.0.0.1:${s.port}/`);
+    expect(page.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(page.headers.get('cache-control')).toBe('no-cache');
+    const js = await fetch(`http://127.0.0.1:${s.port}/assets/index-abc123.js`);
+    expect(js.headers.get('content-type')).toBe('text/javascript; charset=utf-8');
+    expect(js.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect((await fetch(`http://127.0.0.1:${s.port}/missing`)).status).toBe(404);
+  });
+});
+
+describe('invite password (SC_INVITE_CODE)', () => {
+  const start = async (opts: { inviteCode?: string; invite?: InviteGate }) => {
+    const s = await startServer({ port: 0, dataDir: dir, helloTimeoutMs: 300, ...opts });
+    extra.push(s);
+    return s;
+  };
+  /** Sends hello (with `invite` unless undefined) and returns the first answer: welcome or error. */
+  const hello = async (port: number, invite: unknown, headers?: Record<string, string>) => {
+    const c = await TestClient.open(port, headers);
+    c.send({ t: 'hello', protocol: PROTOCOL_VERSION, room: 'room-a', name: 'x', ...(invite === undefined ? {} : { invite }) });
+    for (;;) {
+      if (c.msgs.some((m) => m.t === 'welcome' || m.t === 'error')) break;
+      await sleep(10);
+    }
+    return { c, first: c.msgs.find((m) => m.t === 'welcome' || m.t === 'error')! };
+  };
+
+  it('without a code (unset or blank) the server stays open, an invite is ignored', async () => {
+    expect((await hello(srv.port, undefined)).first.t).toBe('welcome');
+    expect((await hello(srv.port, 'anything')).first.t).toBe('welcome');
+    const blank = await start({ inviteCode: '  ' });
+    expect((await hello(blank.port, undefined)).first.t).toBe('welcome');
+  });
+
+  it('admits the right code and refuses a missing or wrong one before any room is loaded', async () => {
+    const s = await start({ inviteCode: 'open sesame' });
+    const missing = await hello(s.port, undefined);
+    expect(missing.first).toEqual({ t: 'error', code: 'auth', error: AUTH_NEEDED });
+    expect(await missing.c.closed).toBe(1008);
+    const wrong = await hello(s.port, 'open sesam');
+    expect(wrong.first).toEqual({ t: 'error', code: 'auth', error: AUTH_WRONG });
+    expect(await wrong.c.closed).toBe(1008);
+    for (const r of [missing, wrong]) expect(r.c.msgs.map((m) => m.t)).toEqual(['error']); // no doc, peers, presence or AI status
+    expect(await (await fetch(`http://127.0.0.1:${s.port}/health`)).json()).toMatchObject({ rooms: 0, clients: 0 });
+
+    const ok = await hello(s.port, 'open sesame');
+    expect(ok.first.t).toBe('welcome');
+    ok.c.send({ t: 'cmd', ref: 1, cmd: addNode('n1') });
+    expect((await ok.c.next('applied')).ref).toBe(1);
+    ok.c.close();
+  });
+
+  it('an over-long invite is a malformed hello: never joined, closed by the hello timeout', async () => {
+    const s = await start({ inviteCode: 'x'.repeat(10) });
+    const c = await TestClient.open(s.port);
+    c.send({ t: 'hello', protocol: PROTOCOL_VERSION, room: 'room-a', name: 'x', invite: 'x'.repeat(129) });
+    expect((await c.next('error')).error).toBe('malformed message');
+    expect(await c.closed).toBe(4000);
+    expect(c.msgs.some((m) => m.t === 'welcome')).toBe(false);
+  });
+
+  it('limits wrong guesses per client address (proxy X-Forwarded-For from loopback), then refuses even the right one', async () => {
+    const s = await start({ invite: new InviteGate('right', { maxFailures: 3, windowMs: 60_000 }) });
+    const from = (ip: string) => ({ 'X-Forwarded-For': `10.9.9.9, ${ip}` }); // last entry = what the proxy saw
+    for (let i = 0; i < 3; i++) expect((await hello(s.port, `guess${i}`, from('203.0.113.7'))).first).toMatchObject({ code: 'auth', error: AUTH_WRONG });
+    expect((await hello(s.port, 'right', from('203.0.113.7'))).first).toEqual({ t: 'error', code: 'auth', error: AUTH_LIMITED });
+    // Another address (another user behind the same proxy) is not affected.
+    expect((await hello(s.port, 'right', from('198.51.100.1'))).first.t).toBe('welcome');
   });
 });
 

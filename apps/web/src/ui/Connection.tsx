@@ -3,6 +3,7 @@
 // the error shown instead of an offline city whose save cannot be read.
 
 import { useEffect, useState } from 'react';
+import { MAX_INVITE_LENGTH } from '@smartcity/shared';
 import { downloadText, exportDoc } from '../app/importExport';
 import { offlineSeenKey, readOfflineSave } from '../net/localTransport';
 import { useServices, useStore } from './context';
@@ -43,13 +44,57 @@ function useSecondsUntil(at: number | null): number | null {
   return at === null ? null : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
+/** The server wants its invite password: asked here, never retried on its own. */
+function InviteCard({ error, room }: { error: string | null; room: string }) {
+  const { submitInvite } = useServices();
+  const [code, setCode] = useState('');
+  const enter = () => {
+    if (code.trim()) submitInvite(code);
+  };
+  return (
+    <div className="connect-overlay" data-connect-overlay data-connect-invite role="alertdialog" aria-modal="true" aria-labelledby="connect-title">
+      <div className="panel connect-card">
+        <h2 id="connect-title">초대 비밀번호</h2>
+        {error && (
+          <p className="connect-error" data-connect-error>
+            {error}
+          </p>
+        )}
+        <p className="muted">이 서버는 초대받은 사람만 들어올 수 있습니다. 비밀번호는 이 브라우저에 저장되어 다음부터 자동으로 쓰입니다.</p>
+        <div className="row connect-actions">
+          <input
+            type="password"
+            data-invite-input
+            aria-label="초대 비밀번호"
+            autoComplete="current-password"
+            autoFocus
+            maxLength={MAX_INVITE_LENGTH}
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') enter();
+            }}
+          />
+          <button className="primary" data-invite-submit disabled={!code.trim()} onClick={enter}>
+            입장
+          </button>
+          <button data-connect-offline title="서버의 도시와 별개인, 이 브라우저에만 저장되는 도시를 엽니다" onClick={() => openRoom(room, true)}>
+            오프라인 단독 모드로 열기
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ConnectOverlay() {
   const { retryConnect } = useServices();
-  // The reload notice also covers a tab that was already in the city (refused on a reconnect).
-  const wait = useStore((s) => (s.connectWait?.refresh ? s.connectWait : s.ready || s.connection === 'offline' ? null : s.connectWait));
+  // The reload and invite notices also cover a tab that was already in the city (refused on a reconnect).
+  const wait = useStore((s) => (s.connectWait?.refresh || s.connectWait?.auth ? s.connectWait : s.ready || s.connection === 'offline' ? null : s.connectWait));
   const room = useStore((s) => s.room);
   const secs = useSecondsUntil(wait?.retryAt ?? null);
   if (!wait) return null;
+  if (wait.auth && !wait.refresh) return <InviteCard error={wait.error} room={room} />;
   if (wait.refresh) {
     // Another app version: retrying cannot help, and the old page must not edit this city.
     return (

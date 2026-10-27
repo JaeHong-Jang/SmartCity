@@ -1,0 +1,40 @@
+# SmartCity 협업 서버 — deploy/setup.sh가 /etc/systemd/system/ 에 설치한다.
+[Unit]
+Description=SmartCity collaboration server
+After=network-online.target
+Wants=network-online.target
+# An ExecStartPre refusal (no invite password) is retried by Restart=always: this limit stops it after
+# 5 tries in 120 s (then `systemctl reset-failed smartcity` before starting again).
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=smartcity
+Group=smartcity
+WorkingDirectory=/opt/smartcity
+# A public server never runs without its invite password (Sol deploy review #1), checked twice on every
+# start, reboots included: here, and by the server itself (SC_REQUIRE_INVITE=1 → exit 78 when blank).
+Environment=SC_REQUIRE_INVITE=1
+# PORT, DATA_DIR, SC_INVITE_CODE, ANTHROPIC_API_KEY, SC_AI_MODEL
+EnvironmentFile=/etc/smartcity.env
+ExecStartPre=/bin/sh -c 'case "$${SC_INVITE_CODE}" in *[![:space:]]*) exit 0 ;; esac; echo "smartcity: SC_INVITE_CODE is empty in /etc/smartcity.env - refusing to start" >&2; exit 78'
+# One process (tsx as a loader, no npm/tsx wrapper): SIGTERM reaches the server directly, which
+# checkpoints every room before exiting.
+ExecStart=/usr/bin/node --import tsx apps/server/src/main.ts
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=always
+RestartSec=3
+# Only for the server process itself (its own exit 78 on a blank password); it does not cover an
+# ExecStartPre failure, which the start limit above bounds instead.
+RestartPreventExitStatus=78
+# The service may write only its data directory (and its private /tmp).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/smartcity
+
+[Install]
+WantedBy=multi-user.target

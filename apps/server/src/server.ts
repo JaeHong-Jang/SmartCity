@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import type { IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -11,6 +12,7 @@ import { Client, MAX_CLIENTS_PER_ROOM } from './room.js';
 import type { Room } from './room.js';
 import { RoomManager } from './roomManager.js';
 import { AiService } from './ai/service.js';
+import { InviteGate } from './invite.js';
 
 export interface ServerOptions {
   port: number;
@@ -23,15 +25,34 @@ export interface ServerOptions {
   webDist?: string;
   /** AI building assistant (default: from the environment, disabled without a key). */
   ai?: AiService;
+  /** Invite password every `hello` must carry (SC_INVITE_CODE); unset or blank = open server. */
+  inviteCode?: string;
+  /** Invite checker (tests: own limits/clock); default built from inviteCode. */
+  invite?: InviteGate;
 }
 
 const MAX_CONSECUTIVE_BAD = 20;
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+/**
+ * The client's address. Behind the local reverse proxy (Caddy) every socket comes from loopback, so the
+ * proxy's X-Forwarded-For (last entry = the address the proxy saw) is used; nobody outside the machine
+ * can connect from loopback, so the header cannot be forged from the internet.
+ */
+function clientIp(req: IncomingMessage): string {
+  const peer = req.socket.remoteAddress ?? 'unknown';
+  const fwd = req.headers['x-forwarded-for'];
+  const last = (Array.isArray(fwd) ? fwd.join(',') : fwd)?.split(',').at(-1)?.trim();
+  return LOOPBACK.has(peer) && last ? last : peer;
+}
 
 export function startServer(opts: ServerOptions): Promise<{ port: number; close(): Promise<void> }> {
   const helloTimeoutMs = opts.helloTimeoutMs ?? 5000;
   const webDist = opts.webDist ?? fileURLToPath(new URL('../../web/dist', import.meta.url));
   const rooms = new RoomManager(opts.dataDir, opts.unloadMs);
   const ai = opts.ai ?? AiService.fromEnv();
+  const inviteCode = opts.inviteCode?.trim();
+  const invite = opts.invite ?? (inviteCode ? new InviteGate(inviteCode) : null);
   const http = createServer(createHttpHandler(() => rooms.stats(), webDist));
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
 
@@ -46,7 +67,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
       socket.destroy();
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, req.socket.remoteAddress ?? 'unknown'));
+    wss.handleUpgrade(req, socket, head, (ws) => onConnection(ws, clientIp(req)));
   });
 
   const send = (ws: WebSocket, msg: ServerMessage) => {
@@ -81,6 +102,13 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
           if (msg.protocol !== PROTOCOL_VERSION) {
             send(ws, { t: 'error', code: 'protocol', error: `${PROTOCOL_MISMATCH} (앱 ${msg.protocol}, 서버 ${PROTOCOL_VERSION})` });
             ws.close(1002, 'protocol');
+            return;
+          }
+          // Before the room is even looked up: a refused client learns nothing about any city.
+          const refusal = invite?.check(ip, msg.invite) ?? null;
+          if (refusal) {
+            send(ws, { t: 'error', code: 'auth', error: refusal });
+            ws.close(1008, 'auth');
             return;
           }
           if (!ROOM_ID_RE.test(msg.room)) {
@@ -153,7 +181,7 @@ export function startServer(opts: ServerOptions): Promise<{ port: number; close(
     http.once('error', reject);
     http.listen(opts.port, () => {
       const port = (http.address() as AddressInfo).port;
-      console.log(`[server] listening on :${port}, data=${opts.dataDir}`);
+      console.log(`[server] listening on :${port}, data=${opts.dataDir}${invite ? ', invite password required' : ''}`);
       resolve({
         port,
         close: () =>

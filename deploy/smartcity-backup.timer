@@ -1,0 +1,12 @@
+# 매일 04:00(한국 시간) /var/lib/smartcity → /var/backups/smartcity/YYYY-MM-DD.tar.gz, 14개 보관
+[Unit]
+Description=Daily SmartCity data backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Seoul
+RandomizedDelaySec=10min
+# A day the VM was off is backed up at the next boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

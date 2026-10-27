@@ -1,0 +1,7 @@
+# 매일 백업 (smartcity-backup.timer가 실행) — 수동 실행: sudo systemctl start smartcity-backup
+[Unit]
+Description=SmartCity daily data backup
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/smartcity/deploy/backup.sh

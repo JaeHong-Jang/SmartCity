@@ -146,6 +146,7 @@ button:disabled {
 
 input[type='text'],
 input[type='number'],
+input[type='password'],
 select {
   background: rgba(0, 0, 0, 0.28);
   border: 1px solid var(--panel-border);
@@ -1377,6 +1378,10 @@ body[data-simmode] .hint {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
+}
+
+.connect-actions input[type='password'] {
+  flex: 1 1 160px;
 }
 
 .conn-banner {

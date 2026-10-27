@@ -13,6 +13,8 @@ export const PROTOCOL_VERSION = 2;
 export const PROTOCOL_MISMATCH = '앱을 새로고침하세요 — 버전이 다릅니다';
 export const MAX_MESSAGE_BYTES = 512 * 1024;
 export const ROOM_ID_RE = /^[a-z0-9-]{1,32}$/;
+/** Longest invite password a `hello` may carry. */
+export const MAX_INVITE_LENGTH = 128;
 
 export const MAX_GHOST_POINTS = 64;
 /** Longest request text the AI building assistant accepts. */
@@ -44,7 +46,8 @@ export interface Peer {
 }
 
 export type ClientMessage =
-  | { t: 'hello'; protocol: number; room: string; name: string }
+  /** `invite`: the server's invite password, required only when the server sets one (SC_INVITE_CODE). */
+  | { t: 'hello'; protocol: number; room: string; name: string; invite?: string }
   /** `ref` is chosen by the client and echoed back in `applied`/`rejected`. */
   | { t: 'cmd'; ref: number; cmd: Command }
   | { t: 'presence'; presence: Presence }
@@ -59,8 +62,11 @@ export type ServerMessage =
   | { t: 'rejected'; ref: number; error: string }
   | { t: 'peers'; peers: Peer[] }
   | { t: 'presence'; clientId: string; presence: Presence }
-  /** `code: 'protocol'` = refused hello of another protocol version: retrying cannot help, reload the app. */
-  | { t: 'error'; error: string; code?: 'protocol' }
+  /**
+   * `code: 'protocol'` = refused hello of another protocol version: retrying cannot help, reload the app.
+   * `code: 'auth'` = refused hello without the right invite password (or after too many wrong ones): ask the user.
+   */
+  | { t: 'error'; error: string; code?: 'protocol' | 'auth' }
   | { t: 'pong'; at: number }
   /** Sent on join: whether the assistant is available (server has an API key) and which model it uses. */
   | { t: 'ai.status'; enabled: boolean; model: string | null }
@@ -108,7 +114,9 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   switch (m.t) {
     case 'hello':
       if (!isFiniteNum(m.protocol) || typeof m.room !== 'string' || typeof m.name !== 'string') return null;
-      return { t: 'hello', protocol: m.protocol, room: m.room, name: m.name.slice(0, 32) };
+      if (m.invite === undefined) return { t: 'hello', protocol: m.protocol, room: m.room, name: m.name.slice(0, 32) };
+      if (typeof m.invite !== 'string' || m.invite.length > MAX_INVITE_LENGTH) return null;
+      return { t: 'hello', protocol: m.protocol, room: m.room, name: m.name.slice(0, 32), invite: m.invite };
     case 'cmd':
       if (!Number.isInteger(m.ref) || !isObj(m.cmd) || typeof m.cmd.type !== 'string') return null;
       return { t: 'cmd', ref: m.ref as number, cmd: m.cmd as unknown as Command };

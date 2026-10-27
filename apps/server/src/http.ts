@@ -48,7 +48,12 @@ export function createHttpHandler(stats: () => { rooms: number; clients: number 
         res.writeHead(404).end();
         return;
       }
-      res.writeHead(200, { 'Content-Type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream' });
+      // Vite's hashed bundles never change under one name; everything else (index.html) is revalidated so
+      // an update reaches every browser on its next load.
+      res.writeHead(200, {
+        'Content-Type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
+        'Cache-Control': rel.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
+      });
       createReadStream(file).on('error', () => res.destroy()).pipe(res);
     } catch {
       if (!res.headersSent) res.writeHead(400);
