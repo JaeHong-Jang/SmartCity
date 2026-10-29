@@ -16,6 +16,8 @@ import type {
   RoadSegment,
   RoadType,
   SegmentId,
+  Sensor,
+  SensorKind,
   VehicleType,
 } from './model.js';
 
@@ -70,6 +72,11 @@ export type Command =
   | { type: 'parcel.remove'; id: string }
   | { type: 'feature.upsert'; feature: RoadFeature }
   | { type: 'feature.remove'; id: string }
+  /** Roadside sensor (ADR 0013 §4). Refused when the id exists. */
+  | { type: 'sensor.place'; sensor: Sensor }
+  /** Change the view of a sensor (fields omitted = unchanged). Moving it is remove + place. */
+  | { type: 'sensor.update'; id: string; kind?: SensorKind; heading?: number; fov?: number; range?: number }
+  | { type: 'sensor.remove'; id: string }
   | { type: 'meta.update'; name?: string; trafficDensity?: number; growth?: boolean }
   /** Applied atomically: if any command fails, none take effect. Not nestable. */
   | { type: 'batch'; commands: Command[] };

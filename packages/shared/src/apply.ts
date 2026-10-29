@@ -2,7 +2,7 @@
 // runs it on untrusted input), and leaves the doc untouched when a command fails.
 
 import type { Command } from './commands.js';
-import type { CityDoc, RoadFeature, RoadSegment } from './model.js';
+import type { CityDoc, RoadFeature, RoadSegment, Sensor } from './model.js';
 import { LIMITS } from './apply/limits.js';
 import { roadHalfWidth } from './roads.js';
 import { ApplyError, Tx, fail, policy } from './apply/tx.js';
@@ -27,6 +27,7 @@ import {
   validateLine,
   validateParcel,
   validateRoadType,
+  validateSensor,
   validateStop,
   validateVehicleType,
 } from './apply/validate.js';
@@ -380,6 +381,32 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!has(doc.features, cmd.id)) fail('unknown road feature');
       tx.set(doc.features, cmd.id, undefined);
       return;
+    case 'sensor.place': {
+      const sn = cmd.sensor;
+      validateSensor(doc, sn);
+      if (has(doc.sensors, sn.id)) fail('sensor exists');
+      checkCapacity(doc.sensors, sn.id, LIMITS.sensors, 'sensors', tx);
+      tx.set(doc.sensors, sn.id, cleanSensor(sn));
+      return;
+    }
+    case 'sensor.update': {
+      const old = get(doc.sensors, cmd.id);
+      if (!old) fail('unknown sensor');
+      const next: Sensor = {
+        ...old,
+        ...(cmd.kind !== undefined ? { kind: cmd.kind } : {}),
+        ...(cmd.heading !== undefined ? { heading: cmd.heading } : {}),
+        ...(cmd.fov !== undefined ? { fov: cmd.fov } : {}),
+        ...(cmd.range !== undefined ? { range: cmd.range } : {}),
+      };
+      validateSensor(doc, next);
+      tx.set(doc.sensors, old.id, cleanSensor(next));
+      return;
+    }
+    case 'sensor.remove':
+      if (!has(doc.sensors, cmd.id)) fail('unknown sensor');
+      tx.set(doc.sensors, cmd.id, undefined);
+      return;
     case 'meta.update':
       if (cmd.name !== undefined) {
         checkName(cmd.name, 'city');
@@ -398,3 +425,5 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       fail(`unknown command type: ${String((cmd as { type?: unknown })?.type)}`);
   }
 }
+
+const cleanSensor = (s: Sensor): Sensor => ({ id: s.id, kind: s.kind, segmentId: s.segmentId, t: s.t, side: s.side, heading: s.heading, fov: s.fov, range: s.range });

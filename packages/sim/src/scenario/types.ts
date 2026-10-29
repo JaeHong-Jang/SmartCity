@@ -3,8 +3,14 @@
 
 import type { CityDoc } from '@smartcity/shared';
 
-/** Bumped whenever a change alters what a ScenarioRecord replays to. */
-export const ENGINE_VERSION = 1;
+/**
+ * Bumped whenever a change alters what a ScenarioRecord replays to. 2 = detection model (ADR 0013 §1–§3:
+ * `policy.detection`, the delay / miss constants of scenario/detection.ts). Records of engine 1 still replay,
+ * read as `detection: 'legacy'` (exactly the engine-1 behaviour).
+ */
+export const ENGINE_VERSION = 2;
+/** Engine versions simulationFromRecord accepts. */
+export const ENGINE_VERSIONS: readonly number[] = [1, 2];
 export const SCENARIO_VERSION = 1;
 
 /** `policy.set` = a response-policy change; `Simulation.setPolicy` records one, so replays stay exact. */
@@ -57,7 +63,8 @@ export interface ScenarioInput {
    *   durationTicks (default 3600 = 30 game min).
    * *.end: none; ends the earliest-started active event of that kind with the same segmentId and lane
    *   (fire / medical / blackout: buildingId).
-   * policy.set: reroute (0 | 1), informedShare (0..1), preempt (optional 0 | 1), battery (optional 0 | 1); target {}.
+   * policy.set: reroute (0 | 1), informedShare (0..1), preempt (optional 0 | 1), battery (optional 0 | 1),
+   *   detection (optional 0 = legacy | 1 = reports | 2 = sensors, `DETECTION_MODES` index; omitted = legacy); target {}.
    */
   params: Record<string, number>;
 }
@@ -76,7 +83,19 @@ export interface ResponsePolicy {
   preempt?: boolean;
   /** Signal batteries keep unpowered signals on for a while in a blackout (4c2-②). Omitted = same as `reroute`. */
   battery?: boolean;
+  /**
+   * When the city learns of an accident or fire (ADR 0013 §1), fixed per event when it starts. Omitted =
+   * `legacy`: at once, exactly as before (old records, goldens). `reports`: at the citizen report.
+   * `sensors`: at min(report, every valid sensor detection). Other events are always known at once.
+   */
+  detection?: DetectionMode;
 }
+
+export const DETECTION_MODES = ['legacy', 'reports', 'sensors'] as const;
+export type DetectionMode = (typeof DETECTION_MODES)[number];
+
+/** Detection mode of a policy (`detection` omitted = legacy). */
+export const detectionOf = (p: ResponsePolicy): DetectionMode => p.detection ?? 'legacy';
 
 export const DEFAULT_POLICY: ResponsePolicy = { reroute: false, informedShare: 0.7 };
 
@@ -102,17 +121,18 @@ export const SCENARIO_PARAM_KEYS: Record<ScenarioInputKind, readonly string[]> =
   'medical.end': [],
   'blackout.start': ['x', 'z', 'radius', 'durationTicks'],
   'blackout.end': [],
-  'policy.set': ['reroute', 'informedShare', 'preempt', 'battery'],
+  'policy.set': ['reroute', 'informedShare', 'preempt', 'battery', 'detection'],
 };
 
 /** Strict policy check shared by setPolicy, records and the worker (no type coercion). Null = valid. */
 export function policyError(p: unknown): string | null {
   if (typeof p !== 'object' || p === null) return 'policy는 객체여야 합니다';
-  const { reroute, informedShare, preempt, battery } = p as Record<string, unknown>;
+  const { reroute, informedShare, preempt, battery, detection } = p as Record<string, unknown>;
   if (typeof reroute !== 'boolean') return 'policy.reroute는 boolean이어야 합니다';
   if (typeof informedShare !== 'number' || !Number.isFinite(informedShare) || informedShare < 0 || informedShare > 1) return 'policy.informedShare는 0..1 수여야 합니다';
   if (preempt !== undefined && typeof preempt !== 'boolean') return 'policy.preempt는 boolean이어야 합니다';
   if (battery !== undefined && typeof battery !== 'boolean') return 'policy.battery는 boolean이어야 합니다';
+  if (detection !== undefined && !(DETECTION_MODES as readonly unknown[]).includes(detection)) return 'policy.detection은 legacy | reports | sensors여야 합니다';
   return null;
 }
 
@@ -208,6 +228,52 @@ export interface ScenarioKpi {
   darkJunctionMinutes: number;
   batteryJunctionMinutes: number;
   darkQueueVehicleMinutes: number;
+  /** Detection KPIs (ADR 0013 §5). Always set by the simulation; optional for older consumers. */
+  detection?: DetectionKpi;
+  /** Emergency response time split into its stages (ADR 0013 §5). Always set by the simulation. */
+  response?: ResponseBreakdown;
+}
+
+/**
+ * Accidents and fires that started under `reports` / `sensors` ("tracked"; legacy-mode events are known at
+ * once and not counted). Game minutes; model values, not calibrated.
+ */
+export interface DetectionKpi {
+  tracked: number;
+  /** Tracked events at least one sensor able to notice that kind covered when it started. */
+  covered: number;
+  /** Tracked events the city learned of, and how many of those a sensor reported first. */
+  detected: number;
+  bySensor: number;
+  /** Detection delay (start → known) of the detected ones; 0 when none. */
+  avgDelay: number;
+  maxDelay: number;
+  /** Not known yet NOW (instantaneous), their elapsed minutes summed and the oldest. */
+  undetectedNow: number;
+  undetectedElapsedSum: number;
+  oldestUndetectedMinutes: number;
+  /** Over before the city learned of them (ended, cleared, target gone, burned down), and of those the fires that burned down (damage). */
+  missed: number;
+  missedDamaged: number;
+  /** Distinct vehicles that drove on an accident lane while the accident was not known yet (summed over accidents). */
+  exposedVehicles: number;
+  /** On-site recoveries of vehicles that saw an accident (side steps + re-routes before its lane), any time. */
+  onSiteRecoveries: number;
+}
+
+/**
+ * Emergency responses that reached the scene (`responses`), averaged per stage in game minutes: detection
+ * (start → known; 0 for legacy events and medical calls), waiting to dispatch (known → the vehicle entered the
+ * network, retries included), travel (→ arrival). detect + dispatchWait + travel = avgResponseTime. `work`:
+ * on-scene suppression / treatment time of the `workDone` jobs that finished it.
+ */
+export interface ResponseBreakdown {
+  arrivals: number;
+  detect: number;
+  dispatchWait: number;
+  travel: number;
+  workDone: number;
+  work: number;
 }
 
 /** Render data of the scenario overlay (only present in snapshots once a scenario state exists). */
@@ -248,6 +314,8 @@ export interface ScenarioView {
   battery: { signalId: string; remainingMinutes: number }[];
   /** Buildings without power (render: windows dark), id order. Scenario state only. */
   unpoweredBuildings: string[];
+  /** Accidents and fires the city does not know of yet (ADR 0013), eventId order. */
+  undetected: { eventId: string; kind: 'accident' | 'fire'; startTick: number }[];
 }
 
 /** One apply-time scenario outcome (`Simulation.drainScenarioOutcomes`, `ScenarioView.recentLog`). */
@@ -263,6 +331,9 @@ export interface ScenarioOutcome {
    * still runs), `dispatch.lost` (vehicle removed by an edit, or no way back / to the hospital).
    * Blackout outcomes (eventId = the blackout): `blackout.end` (reason `duration` / `by <input>`),
    * `signal.dark` / `signal.restored` / `battery.depleted` (reason = the junction node id or crosswalk id).
+   * Detection outcomes (ADR 0013, eventId = the accident / fire): `detection.known` (reason `report` or
+   * `sensor <id>`, then the delay), `detection.missed` (reason `ended before detection` / `burned before
+   * detection` / `target gone`), `detection.unpowered` (reason = the sensor id whose detection a blackout voided).
    */
   kind: string;
   applied: boolean;

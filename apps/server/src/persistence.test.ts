@@ -398,8 +398,8 @@ describe('v7 rounded volumes (ADR 0012 §4)', () => {
     const tower = { ...cloneJson(createEmptyDoc().buildingTypes.house!), id: 'tower', parts: [{ ...cloneJson(createEmptyDoc().buildingTypes.house!.parts[0]!), width: 12, depth: 12, roof: 'flat', round: 6 }] };
     writeFileSync(log, `${JSON.stringify({ seq: 3, cmd: { type: 'buildingType.upsert', buildingType: tower } })}\n`);
     const r = loadRoom(dir, 'r');
-    expect(DOC_VERSION).toBe(7);
-    expect(r.doc.version).toBe(7);
+    expect(DOC_VERSION).toBe(8);
+    expect(r.doc.version).toBe(DOC_VERSION);
     const { tower: added, ...rest } = r.doc.buildingTypes;
     expect(JSON.stringify(rest)).toBe(types);
     expect(added!.parts[0]!.round).toBe(6);
@@ -426,7 +426,7 @@ describe('v7 rounded volumes (ADR 0012 §4)', () => {
     const rooms = new RoomManager(dir);
     const room = rooms.get('r');
     // Written right at load, before any command (with the usual backup of the v6 file).
-    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(7);
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(DOC_VERSION);
     expect(readdirSync(join(dir, 'backups', 'r'))).toHaveLength(1);
     expect(room.system(roundDesign())).toMatchObject({ ok: true, seq: 1 });
     // Crash: no further checkpoint. The log holds the rounded design...
@@ -442,7 +442,7 @@ describe('v7 rounded volumes (ADR 0012 §4)', () => {
     const room = new RoomManager(dir).get('r');
     expect(existsSync(join(dir, 'r.json'))).toBe(false); // a mere visit writes nothing
     expect(room.system(roundDesign()).ok).toBe(true);
-    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8'))).toMatchObject({ seq: 0, doc: { version: 7 } });
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8'))).toMatchObject({ seq: 0, doc: { version: DOC_VERSION } });
     expect(oldServerOpens('r')).toBe(false);
     room.dispose();
   });
@@ -460,5 +460,61 @@ describe('v7 rounded volumes (ADR 0012 §4)', () => {
     expect(room.system(roundDesign()).ok).toBe(true);
     expect(oldServerOpens('r')).toBe(false);
     room.dispose();
+  });
+});
+
+describe('v8 roadside sensors (ADR 0013 §4)', () => {
+  const road = (): string =>
+    [
+      { seq: 1, cmd: { type: 'node.add', node: { id: 'a', pos: { x: 0, z: 0 } } } },
+      { seq: 2, cmd: { type: 'node.add', node: { id: 'b', pos: { x: 200, z: 0 } } } },
+      { seq: 3, cmd: { type: 'segment.add', segment: { id: 'ab', a: 'a', b: 'b', roadTypeId: 'road-2' } } },
+    ]
+      .map((r) => `${JSON.stringify(r)}\n`)
+      .join('');
+  const sensor = { id: 'cam', kind: 'cctv', segmentId: 'ab', t: 0.5, side: 'right', heading: 0, fov: Math.PI / 2, range: 120 };
+  // The v7 server (HEAD before P6b-1) refuses a checkpoint whose doc.version is above its DOC_VERSION 7.
+  const OLD_DOC_VERSION = 7;
+  const oldServerOpens = (room: string): boolean => !(JSON.parse(readFileSync(join(dir, `${room}.json`), 'utf8')).doc.version > OLD_DOC_VERSION);
+
+  it('loads a v7 checkpoint as v8 (empty sensors) and replays a logged sensor and its removal with the road', () => {
+    const v7 = { ...cloneJson(createEmptyDoc()), version: 7 } as Record<string, unknown>;
+    delete v7.sensors;
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: v7 }));
+    writeFileSync(log, road() + `${JSON.stringify({ seq: 4, cmd: { type: 'sensor.place', sensor } })}\n`);
+    const r = loadRoom(dir, 'r');
+    expect(DOC_VERSION).toBe(8);
+    expect(r.doc.version).toBe(8);
+    expect(r.doc.sensors).toEqual({ cam: sensor });
+    appendLog(dir, 'r', 5, JSON.stringify({ type: 'segment.remove', id: 'ab' }));
+    expect(loadRoom(dir, 'r').doc.sensors).toEqual({});
+  });
+
+  it('a migrated room is on disk at v8 before it logs a sensor, so the v7 server refuses it instead of dropping it', () => {
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: { ...cloneJson(createEmptyDoc()), version: 7 } }));
+    expect(oldServerOpens('r')).toBe(true);
+    const room = new RoomManager(dir).get('r');
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(8);
+    for (const c of [
+      { type: 'node.add', node: { id: 'a', pos: { x: 0, z: 0 } } },
+      { type: 'node.add', node: { id: 'b', pos: { x: 200, z: 0 } } },
+      { type: 'segment.add', segment: { id: 'ab', a: 'a', b: 'b', roadTypeId: 'road-2' } },
+      { type: 'sensor.place', sensor },
+    ] as const)
+      expect(room.system(c as never).ok).toBe(true);
+    expect(readFileSync(log, 'utf8')).toContain('"sensor.place"');
+    expect(oldServerOpens('r')).toBe(false);
+    expect(loadRoom(dir, 'r').doc.sensors.cam).toEqual(sensor);
+    room.dispose();
+  });
+
+  it.each([{ segmentId: 'gone' }, { kind: 'bogus' }, { side: 'wrong' }, { t: 2 }, { fov: 0 }, { range: -1 }])('a malformed stored sensor %o refuses the room (docProblem, same rules as sensor.place)', (bad) => {
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: { ...cloneJson(createEmptyDoc()), version: 7 } }));
+    writeFileSync(log, road());
+    const doc = loadRoom(dir, 'r').doc;
+    doc.sensors = { cam: { ...sensor, ...bad } as never };
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 3, doc }));
+    writeFileSync(log, '');
+    expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
   });
 });

@@ -317,7 +317,10 @@ export function checkIncidentInvariants(sim: Simulation): string[] {
       continue;
     }
     if (inc.state !== 'burning' && inc.state !== 'waiting') problems.push(`incident ${inc.eventId}: orphan in state ${inc.state}`);
-    else if (inc.retryAt < 0) problems.push(`incident ${inc.eventId}: no vehicle and no dispatch retry`);
+    // Not known yet (ADR 0013): it waits for its detection, which is always scheduled (the report).
+    else if (inc.knownTick < 0) {
+      if (!sc.det.pending.some((p) => p.eventId === inc.eventId)) problems.push(`incident ${inc.eventId}: unknown and not awaiting detection`);
+    } else if (inc.retryAt < 0) problems.push(`incident ${inc.eventId}: no vehicle and no dispatch retry`);
   }
   if (new Set(sc.missions).size !== sc.missions.length) problems.push('mission listed twice');
   for (const m of sc.missions) if (!live(m)) problems.push(`mission of ${m.incident.eventId} (${m.stage}) has no vehicle, departure or incident`);

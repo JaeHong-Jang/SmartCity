@@ -225,5 +225,6 @@ export function createEmptyDoc(name = '새 도시', seed = 1): CityDoc {
     closures: {},
     parcels: {},
     features: {},
+    sensors: {},
   };
 }

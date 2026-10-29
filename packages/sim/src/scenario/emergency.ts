@@ -12,7 +12,8 @@ import { createVehicle, resolveGoal, routeVehicle } from '../traffic/ops.js';
 import { canPlace, despawn, type Goal, type Vehicle, type World } from '../traffic/world.js';
 import { logOutcome, type Incident, type Mission } from './state.js';
 import { CLOCK_SCALE } from '../types.js';
-import type { ScenarioInput } from './types.js';
+import { detectionMissed, trackFire } from './detection.js';
+import { detectionOf, type ScenarioInput } from './types.js';
 
 /** Defaults in ticks (20 Hz): fire 0 → 100 % in 20 game min, suppression 5 game min, treatment 3 game min. */
 export const FIRE_BURN_TICKS = 2400;
@@ -163,7 +164,7 @@ function dispatch(w: World, inc: Incident): void {
     if (res && (best === null || res.cost < best.cost)) best = { id, from, cost: res.cost };
   }
   if (best === null) return dispatchFailed(w, inc, '경로 없음');
-  const m: Mission = { incident: inc, facilityId: best.id, scene, typeId, stage: 'enroute', v: null, spawn: { from: best.from, goal: accessGoal(scene) } };
+  const m: Mission = { incident: inc, facilityId: best.id, scene, typeId, stage: 'enroute', v: null, spawn: { from: best.from, goal: accessGoal(scene) }, departTick: -1 };
   inc.mission = m;
   inc.retryAt = -1;
   sc.missions.push(m);
@@ -184,8 +185,22 @@ export function startIncident(w: World, input: ScenarioInput): void {
     mission: null,
     retryAt: -1,
     failed: false,
+    knownTick: w.tick,
+    arriveTick: -1,
   };
   w.sc!.incidents.push(inc);
+  // ADR 0013: a fire under reports / sensors waits for detection (no dispatch, no retry until then).
+  if (fire && detectionOf(w.sc!.policy) !== 'legacy') {
+    inc.knownTick = -1;
+    trackFire(w, inc);
+    return;
+  }
+  dispatch(w, inc);
+}
+
+/** The city learned of a tracked fire (scenario/detection.ts): dispatch now. */
+export function incidentKnown(w: World, inc: Incident): void {
+  inc.knownTick = w.tick;
   dispatch(w, inc);
 }
 
@@ -235,6 +250,7 @@ export function endIncident(w: World, input: ScenarioInput): string | null {
   if (!inc) return t.eventId !== undefined ? `event ${t.eventId} not active (unknown, not started yet or already ended)` : 'no active event on target';
   removeIncident(w, inc);
   log(w, inc, `${kind}.end`, `by ${input.eventId}`);
+  detectionMissed(w, inc.eventId, 'ended before detection');
   recall(w, inc);
   return null;
 }
@@ -242,11 +258,13 @@ export function endIncident(w: World, input: ScenarioInput): string | null {
 function finishFire(w: World, inc: Incident, damaged: boolean): void {
   const sc = w.sc!;
   removeIncident(w, inc);
+  workDone(w, inc);
   if (damaged) {
     let k = 0;
     while (k < sc.damaged.length && sc.damaged[k]! < inc.buildingId) k++;
     if (sc.damaged[k] !== inc.buildingId) sc.damaged.splice(k, 0, inc.buildingId);
     log(w, inc, 'fire.damaged');
+    detectionMissed(w, inc.eventId, 'burned before detection', true);
   } else {
     sc.extinguished++;
     log(w, inc, 'fire.extinguished', `${fireProgress(inc, w.tick).toFixed(1)}%`);
@@ -270,6 +288,7 @@ export function recheckIncidents(w: World): void {
     if (inc.state === 'transport' || w.doc.buildings[inc.buildingId]) continue;
     removeIncident(w, inc);
     log(w, inc, `${inc.kind}.end`, 'target gone');
+    detectionMissed(w, inc.eventId, 'target gone');
     const m = inc.mission;
     inc.mission = null;
     if (m === null) continue;
@@ -313,6 +332,7 @@ export function processEmergency(w: World): void {
       if (t >= inc.startTick + inc.burnTicks) finishFire(w, inc, true);
       else if (inc.state === 'suppressing' && t >= inc.workEnd) finishFire(w, inc, false);
     } else if (inc.state === 'treating' && t >= inc.workEnd) {
+      workDone(w, inc);
       inc.state = 'transport';
       leaveScene(w, inc.mission!, 'transport');
     }
@@ -344,8 +364,28 @@ export function processEmergency(w: World): void {
     v.em = m;
     m.v = v;
     m.spawn = null;
-    if (m.stage === 'enroute') log(w, m.incident, 'dispatch.start', `vehicle ${v.id} from ${m.facilityId}`);
+    if (m.stage === 'enroute') {
+      m.departTick = w.tick;
+      log(w, m.incident, 'dispatch.start', `vehicle ${v.id} from ${m.facilityId}`);
+    }
   }
+}
+
+/**
+ * Before the due detections (ADR 0013 §3, same tie rule as accident expiry): a fire the city does not know of
+ * that reaches 100 % this tick burns down first — missed (`burned before detection`, counted as damage), so a
+ * report or sensor due at the same tick never dispatches to a building that is already gone.
+ */
+export function burnOutUnknown(w: World): void {
+  for (const inc of w.sc!.incidents.slice()) if (inc.kind === 'fire' && inc.knownTick < 0 && w.tick >= inc.startTick + inc.burnTicks) finishFire(w, inc, true);
+}
+
+/** On-scene work of an incident ended (extinguished, burned down during suppression, treated): response breakdown. */
+function workDone(w: World, inc: Incident): void {
+  if (inc.arriveTick < 0) return;
+  const det = w.sc!.det;
+  det.workDone++;
+  det.workTicks += w.tick - inc.arriveTick;
 }
 
 /** finalize(): an emergency vehicle reached its destination (it leaves the network like any arrival). */
@@ -361,6 +401,13 @@ export function emergencyArrived(w: World, v: Vehicle): void {
     sc.responses++;
     sc.responseTicks += ticks;
     sc.maxResponseTicks = Math.max(sc.maxResponseTicks, ticks);
+    // Response stages (ADR 0013 §5): detection + waiting to dispatch + travel = ticks.
+    const det = sc.det;
+    inc.arriveTick = w.tick + 1;
+    det.arrivals++;
+    det.detectTicks += inc.knownTick - inc.startTick;
+    det.waitTicks += m.departTick - inc.knownTick;
+    det.travelTicks += w.tick + 1 - m.departTick;
     log(w, inc, 'dispatch.arrive', `${gameMinutes(w, ticks).toFixed(1)}분`);
     m.stage = 'working';
     inc.state = inc.kind === 'fire' ? 'suppressing' : 'treating';

@@ -1,6 +1,7 @@
 // Validators and sanitisers for the apply module: every check throws through fail().
 
 import { FACILITY_SERVICES, PROP_KINDS } from '../model.js';
+import { sensorShapeError } from '../sensors.js';
 import {
   bounds,
   boundsOverlap,
@@ -29,6 +30,7 @@ import type {
   RoadFeature,
   RoadSegment,
   RoadType,
+  Sensor,
   VehicleType,
 } from '../model.js';
 import { LIMITS } from './limits.js';
@@ -442,6 +444,14 @@ export function validateFeature(doc: CityDoc, f: RoadFeature): void {
   for (const o of others) {
     if (!featureGapClear(Math.abs(o.t * len - s))) fail('too close to another road feature');
   }
+}
+
+/** A roadside sensor (ADR 0013 §4): finite values in range, on an existing segment. */
+export function validateSensor(doc: CityDoc, s: Sensor): void {
+  checkId(s?.id, 'sensor');
+  if (!has(doc.segments, s.segmentId)) fail('unknown segment');
+  const bad = sensorShapeError(s);
+  if (bad) fail(bad);
 }
 
 /** Tolerance of the feature distance rules, so remapped positions re-validate exactly. */

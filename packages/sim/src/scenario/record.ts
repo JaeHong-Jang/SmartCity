@@ -5,7 +5,7 @@ import { Simulation } from '../simulation.js';
 import type { World } from '../traffic/world.js';
 import type { SimOptions } from '../types.js';
 import { ensureScenario } from './apply.js';
-import { ENGINE_VERSION, policyError, SCENARIO_VERSION, type ScenarioRecord } from './types.js';
+import { DETECTION_MODES, ENGINE_VERSIONS, policyError, SCENARIO_VERSION, type DetectionMode, type ResponsePolicy, type ScenarioRecord } from './types.js';
 
 export interface ReplayOptions {
   /** Run the record's warm-up before returning (default true). False: returned at tick 0, ready to step / runTo. */
@@ -16,7 +16,18 @@ export interface ReplayOptions {
    * (inputs, informed share, ticks) identical.
    */
   reroute?: boolean;
+  /**
+   * Detection comparison (ADR 0013 §1, preset ②): replace `detection` in the initial policy and in every
+   * recorded `policy.set` input, keeping everything else identical (seed, inputs, report draws, re-route…).
+   */
+  detection?: DetectionMode;
 }
+
+/** The two-run comparisons (A vs B, one condition at a time): ① smart response OFF vs ON, ② citizen reports vs sensors + reports. */
+export const COMPARISON_PRESETS: Record<'smartResponse' | 'detection', readonly [ReplayOptions, ReplayOptions]> = {
+  smartResponse: [{ reroute: false }, { reroute: true }],
+  detection: [{ detection: 'reports' }, { detection: 'sensors' }],
+};
 
 /**
  * A simulation set up from a record: the doc copy with the record's seed and tick rate, scenario activation
@@ -25,7 +36,10 @@ export interface ReplayOptions {
  * then the warm-up run. Step it further to replay.
  */
 export function simulationFromRecord(record: ScenarioRecord, opts: Omit<SimOptions, 'tickRate' | 'scenario'> = {}, how: ReplayOptions = {}): Simulation {
-  if (record.engineVersion !== ENGINE_VERSION) throw new Error(`engineVersion ${record.engineVersion} ≠ ${ENGINE_VERSION}`);
+  if (!ENGINE_VERSIONS.includes(record.engineVersion)) throw new Error(`engineVersion ${record.engineVersion} ∉ ${ENGINE_VERSIONS.join(', ')}`);
+  // Engine 1 had no detection model: its records replay as legacy (ADR 0013 §4).
+  const legacy = record.engineVersion === 1;
+  if (how.detection !== undefined && !(DETECTION_MODES as readonly string[]).includes(how.detection)) throw new Error(`detection ${String(how.detection)}`);
   if (record.scenarioVersion !== SCENARIO_VERSION) throw new Error(`scenarioVersion ${record.scenarioVersion} ≠ ${SCENARIO_VERSION}`);
   const at = record.activatedAtTick ?? 0;
   if (!Number.isInteger(at) || at < 0) throw new Error(`activatedAtTick ${String(record.activatedAtTick)}`);
@@ -36,21 +50,33 @@ export function simulationFromRecord(record: ScenarioRecord, opts: Omit<SimOptio
   const bad = policyError(record.policy);
   if (bad) throw new Error(bad);
   if (!Array.isArray(record.inputs)) throw new Error('inputs는 배열이어야 합니다');
+  if (legacy && record.inputs.some((i) => i?.kind === 'policy.set' && i.params?.detection !== undefined)) throw new Error('engineVersion 1 기록에는 detection 입력이 없어야 합니다');
   const doc = cloneJson(record.doc);
   doc.meta.seed = record.seed;
   const sim = new Simulation(doc, { ...opts, tickRate: record.tickRate, scenario: at === 0 });
   const reroute = how.reroute;
+  const detection = how.detection ?? (legacy ? undefined : record.policy.detection);
   const activate = (): void => {
     // The initial policy is state, not an input: `record.inputs` may already hold the `policy.set` inputs of
     // the recorded run (ids `policy@…`), and a second recorded one would collide with them.
-    const policy = reroute === undefined ? record.policy : { reroute, informedShare: record.policy.informedShare };
-    ensureScenario((sim as unknown as { w: World }).w).policy = { reroute: policy.reroute, informedShare: policy.informedShare, ...(policy.preempt !== undefined ? { preempt: policy.preempt } : {}), ...(policy.battery !== undefined ? { battery: policy.battery } : {}) };
+    const policy: ResponsePolicy = reroute === undefined ? record.policy : { reroute, informedShare: record.policy.informedShare };
+    ensureScenario((sim as unknown as { w: World }).w).policy = {
+      reroute: policy.reroute,
+      informedShare: policy.informedShare,
+      ...(policy.preempt !== undefined ? { preempt: policy.preempt } : {}),
+      ...(policy.battery !== undefined ? { battery: policy.battery } : {}),
+      ...(detection !== undefined ? { detection } : {}),
+    };
     for (const input of record.inputs) {
       let copy = input;
-      if (input.kind === 'policy.set' && reroute !== undefined) {
-        const params: Record<string, number> = { ...input.params, reroute: reroute ? 1 : 0 };
-        delete params.preempt;
-        delete params.battery;
+      if (input.kind === 'policy.set' && (reroute !== undefined || how.detection !== undefined)) {
+        const params: Record<string, number> = { ...input.params };
+        if (reroute !== undefined) {
+          params.reroute = reroute ? 1 : 0;
+          delete params.preempt;
+          delete params.battery;
+        }
+        if (how.detection !== undefined) params.detection = DETECTION_MODES.indexOf(how.detection);
         copy = { ...input, params };
       }
       const r = sim.scenarioInput(copy);

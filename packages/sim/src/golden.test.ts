@@ -159,6 +159,32 @@ describe('golden traces (behaviour-preserving optimizations)', () => {
     if (PRINT) console.log('dense grid', JSON.stringify(got));
     expect(got).toEqual(DENSE_GRID);
   }, 120_000);
+
+  // ADR 0013: roadside sensors feed only the detection model. The same dense-grid script with sensors in the
+  // doc, sensor edits mid-run and sensors cascading with the split / removal keeps the recorded hashes.
+  it('dense grid with sensors and sensor edits: identical to the trace without them', () => {
+    const cam = (id: string, segmentId: string, t: number) => ({ id, kind: 'cctv' as const, segmentId, t, side: 'right' as const, heading: 0, fov: Math.PI / 2, range: 120 });
+    const doc = apply(gridDoc(7, 120, 'road-4', 11), [
+      { type: 'sensor.place', sensor: cam('s1', 'v_4_2', 0.3) },
+      { type: 'sensor.place', sensor: cam('s2', 'v_5_5', 0.5) },
+      { type: 'sensor.place', sensor: { ...cam('s3', 'h_2_3', 0.7), kind: 'smartpole', fov: 2 * Math.PI, range: 40 } },
+    ]);
+    doc.meta.trafficDensity = 3;
+    const sim = new Simulation(doc, { maxVehicles: 1500 });
+    const { hashes: got } = trace(sim, 2400, 300, {
+      200: [{ type: 'sensor.place', sensor: cam('s4', 'h_1_1', 0.5) }],
+      400: [{ type: 'feature.upsert', feature: { id: 'f1', segmentId: 'h_2_3', kind: 'crosswalk', t: 0.5, signal: true } }],
+      600: [{ type: 'sensor.update', id: 's1', heading: 1, range: 60 }],
+      900: [{ type: 'node.move', id: 'n_3_3', pos: { x: 5, z: -4 } }],
+      1300: [{ type: 'segment.split', id: 'v_4_2', t: 0.5, nodeId: 'mid', segmentIds: ['v_4_2a', 'v_4_2b'] }],
+      1500: [{ type: 'batch', commands: [{ type: 'sensor.remove', id: 's3' }, { type: 'sensor.place', sensor: cam('s5', 'v_4_2b', 0.5) }] }],
+      1700: [{ type: 'closure.set', closure: { segmentId: 'h_1_1', reason: 'golden' } }],
+      2000: [{ type: 'segment.remove', id: 'v_5_5' }],
+    });
+    expect(Object.keys(sim.doc.sensors).sort()).toEqual(['s1', 's4', 's5']);
+    expect(sim.doc.sensors.s1!.segmentId).toBe('v_4_2a');
+    expect(got).toEqual(DENSE_GRID);
+  }, 120_000);
 });
 
 const SMALL_CITY = ["abd22600","7be520d5","3473c037","c963d2b5","d8785a55","77e12fe8","48845201","77c6691","f9cf5552","321bf933","f77774f3","8f7ec53e"];

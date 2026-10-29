@@ -133,6 +133,7 @@ export function removeSegment(doc: CityDoc, s: RoadSegment, tx: Tx): void {
   for (const stop of Object.values(doc.busStops)) if (stop.segmentId === s.id) removeStop(doc, stop.id, tx);
   if (has(doc.closures, s.id)) tx.set(doc.closures, s.id, undefined);
   for (const f of Object.values(doc.features)) if (f.segmentId === s.id) tx.set(doc.features, f.id, undefined);
+  for (const sn of Object.values(doc.sensors)) if (sn.segmentId === s.id) tx.set(doc.sensors, sn.id, undefined);
   const idx = TxIndex.of(doc, tx);
   for (const nodeId of [s.a, s.b]) {
     replaceApproach(doc, nodeId, s.id, [], tx);
@@ -201,6 +202,11 @@ export function splitSegment(
         ? { ...stop, segmentId: first.id, t: stop.t / splitS }
         : { ...stop, segmentId: second.id, t: (stop.t - splitS) / (1 - splitS) };
     tx.set(doc.busStops, stop.id, moved);
+  }
+  // Sensors move with their arc-length position, like stops (the side keeps its meaning: both pieces run a → b).
+  for (const sn of Object.values(doc.sensors)) {
+    if (sn.segmentId !== s.id) continue;
+    tx.set(doc.sensors, sn.id, sn.t < splitS ? { ...sn, segmentId: first.id, t: sn.t / splitS } : { ...sn, segmentId: second.id, t: (sn.t - splitS) / (1 - splitS) });
   }
   // Features move with their arc-length position (each piece measured on its own curve); those that
   // now sit in the new junction are dropped by the same rules that validate a new feature.
@@ -311,7 +317,8 @@ const fromCorner = (seg: RoadSegment, nodeId: NodeId, t: number, len: number): n
 /**
  * Validate a fillet of `nodeId` against the current doc and compute it (throws through fail()). Initial
  * scope (ADR 0012 §1): two straight roads of one type at a degree-2 node without own control settings,
- * and no stop, bus line, closure, crosswalk or speed bump, or facing lot in the stretch that is cut away.
+ * and no stop, bus line, closure, crosswalk or speed bump, sensor (ADR 0013 §4), or facing lot in the
+ * stretch that is cut away.
  */
 export function planNodeFillet(doc: CityDoc, nodeId: unknown, radius?: unknown, tx?: Tx): FilletGeometry {
   const node = get(doc.nodes, nodeId);
@@ -364,6 +371,10 @@ export function planNodeFillet(doc: CityDoc, nodeId: unknown, radius?: unknown, 
   }
   for (const line of Object.values(doc.busLines)) {
     if (line.stopIds.some((id) => lens.has(doc.busStops[id]?.segmentId ?? ''))) notRounded('a bus line serves the roads');
+  }
+  for (const sn of Object.values(doc.sensors)) {
+    const len = lens.get(sn.segmentId);
+    if (len !== undefined && fromCorner(doc.segments[sn.segmentId]!, node.id, sn.t, len) < t + FILLET_EPS) notRounded('a sensor is in the corner');
   }
   for (const f of Object.values(doc.features)) {
     const len = lens.get(f.segmentId);
@@ -601,8 +612,8 @@ const samePoint = (p: Vec2 | undefined, q: Vec2): boolean => !!p && typeof p ===
 
 /**
  * road.fillet: shorten both roads by T (their ids stay; the corner end moves to a new node), add the
- * curve with control point = the old corner, and remove the corner node. Stops and features on the kept
- * stretches keep their world position (their t is remapped to the shorter road).
+ * curve with control point = the old corner, and remove the corner node. Stops, features and sensors on the
+ * kept stretches keep their world position (their t is remapped to the shorter road).
  */
 export function filletCorner(doc: CityDoc, cmd: Extract<Command, { type: 'road.fillet' }>, tx: Tx): void {
   const g = planNodeFillet(doc, cmd.nodeId, cmd.radius, tx);
@@ -629,6 +640,7 @@ export function filletCorner(doc: CityDoc, cmd: Extract<Command, { type: 'road.f
     const remap = (t: number): number => Math.min(1, Math.max(0, (s.a === corner ? t * len - g.t : t * len) / kept));
     for (const stop of Object.values(doc.busStops)) if (stop.segmentId === s.id) tx.set(doc.busStops, stop.id, { ...stop, t: remap(stop.t) });
     for (const f of Object.values(doc.features)) if (f.segmentId === s.id) tx.set(doc.features, f.id, { ...f, t: remap(f.t) });
+    for (const sn of Object.values(doc.sensors)) if (sn.segmentId === s.id) tx.set(doc.sensors, sn.id, { ...sn, t: remap(sn.t) });
     tx.set(doc.segments, s.id, s.a === corner ? { ...s, a: newEnd } : { ...s, b: newEnd });
   };
   tx.set(doc.nodes, ids.a, { id: ids.a, pos: g.p0 });

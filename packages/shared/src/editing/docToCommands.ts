@@ -45,5 +45,6 @@ export function docToCommands(doc: CityDoc): Command[] {
   for (const closure of sortedValues(doc.closures)) out.push({ type: 'closure.set', closure });
   for (const parcel of sortedValues(doc.parcels ?? {})) out.push({ type: 'parcel.upsert', parcel: restorableParcel(doc, parcel) });
   for (const feature of sortedValues(doc.features ?? {})) out.push({ type: 'feature.upsert', feature });
+  for (const sensor of sortedValues(doc.sensors ?? {})) out.push({ type: 'sensor.place', sensor });
   return out;
 }

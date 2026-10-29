@@ -8,8 +8,34 @@ import { hash01 } from '../citizens/schedule.js';
 import type { Access } from '../traffic/demand.js';
 import type { Goal, Vehicle, World } from '../traffic/world.js';
 import type { Blackout } from './blackout.js';
+import type { DetectionState } from './detection.js';
 import type { SignalCtl } from './preempt.js';
 import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioInput } from './types.js';
+
+function newDetectionState(): DetectionState {
+  return {
+    cov: null,
+    pending: [],
+    tracked: 0,
+    covered: 0,
+    detected: 0,
+    bySensor: 0,
+    delayTicks: 0,
+    maxDelayTicks: 0,
+    missed: 0,
+    missedDamaged: 0,
+    exposed: 0,
+    onSiteMoves: 0,
+    onSiteReroutes: 0,
+    into: null,
+    arrivals: 0,
+    detectTicks: 0,
+    waitTicks: 0,
+    travelTicks: 0,
+    workDone: 0,
+    workTicks: 0,
+  };
+}
 
 /** Obstacle on a lane, lane coordinates: occupies [rear, rear + len]. */
 export interface Obstacle {
@@ -39,6 +65,19 @@ export interface AccidentEffect {
   len: number;
   startTick: number;
   endTick: number;
+  /**
+   * The city knows of it (ADR 0013 §2): only known accidents enter the router's cost (`Router.obsRear`) and
+   * trigger re-routes; the obstacle itself stops vehicles from the start. Legacy mode: known at once.
+   */
+  known: boolean;
+  /**
+   * Started under reports / sensors: vehicles that see it recover on site (scenario/onsite.ts) — before and
+   * after it is known. False in legacy mode (no on-site recovery, exactly as before).
+   */
+  onSite: boolean;
+  /** Vehicles that already made their one on-site re-route before entering its lane, and those whose side step found no route. */
+  seen: Set<number>;
+  stuck: Set<number>;
 }
 
 export type Effect = ClosureEffect | AccidentEffect;
@@ -78,6 +117,10 @@ export interface Incident {
    */
   retryAt: number;
   failed: boolean;
+  /** Tick the city learned of it (ADR 0013): its start in legacy mode and for medical calls; −1 = not yet (no dispatch). */
+  knownTick: number;
+  /** Tick its vehicle reached the scene, −1 before (response breakdown). */
+  arriveTick: number;
 }
 
 /** One emergency vehicle's trip chain: facility → scene → work → back (fire) or to the hospital (medical). */
@@ -96,6 +139,8 @@ export interface Mission {
   v: Vehicle | null;
   /** Waiting to enter the network at this access point, towards `goal` (retried every tick). */
   spawn: { from: Access; goal: Goal } | null;
+  /** Tick the vehicle entered the network towards the scene, −1 before (response breakdown). */
+  departTick: number;
 }
 
 export interface ScenarioLogEntry {
@@ -175,6 +220,8 @@ export interface ScenarioState {
   extinguished: number;
   medicalCompleted: number;
   dispatchFailed: number;
+  /** Detection queue, coverage cache and detection / response-stage KPI accumulators (ADR 0013). */
+  det: DetectionState;
 }
 
 export function newScenarioState(w: World): ScenarioState {
@@ -225,6 +272,7 @@ export function newScenarioState(w: World): ScenarioState {
     extinguished: 0,
     medicalCompleted: 0,
     dispatchFailed: 0,
+    det: newDetectionState(),
   };
 }
 
@@ -294,7 +342,25 @@ export function compose(w: World): void {
   sc.obsRear = rear;
   sc.closedLanes = closed;
   w.router.ban = ban;
-  w.router.obsRear = rear;
+  // Known costs (ADR 0013 §2): the router only avoids accidents the city knows of. Every accident known (legacy
+  // mode) → the physical array itself, exactly as before.
+  w.router.obsRear = rear !== null && sc.effects.some((e) => e.kind === 'accident' && !e.known) ? knownRear(sc, obs!, nLanes) : rear;
+}
+
+/** Per lane: rear of the first KNOWN obstacle (Infinity when none); null when no accident is known. */
+function knownRear(sc: ScenarioState, obs: Obstacle[][], nLanes: number): Float64Array | null {
+  const known = new Set<string>();
+  for (const e of sc.effects) if (e.kind === 'accident' && e.known) known.add(e.eventId);
+  if (known.size === 0) return null;
+  const out = new Float64Array(nLanes).fill(Infinity);
+  for (let l = 0; l < nLanes; l++) {
+    for (const o of obs[l]!) {
+      if (!known.has(o.eventId)) continue;
+      out[l] = o.rear;
+      break;
+    }
+  }
+  return out;
 }
 
 /** Rear of the nearest obstacle at or ahead of `s` on `lane`, Infinity when none. */

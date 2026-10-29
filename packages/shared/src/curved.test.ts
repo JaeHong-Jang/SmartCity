@@ -312,11 +312,11 @@ describe('round trips and versions', () => {
   });
 
   it('v6 → v7 changes nothing but the version; docProblem checks the radius type', () => {
-    expect(DOC_VERSION).toBe(7);
+    expect(DOC_VERSION).toBe(8);
     const v6 = { ...cloneJson(createEmptyDoc()), version: 6 };
     const before = cloneJson(v6);
     const v7 = normalizeDoc(v6);
-    expect(v7.version).toBe(7);
+    expect(v7.version).toBe(DOC_VERSION);
     expect({ ...v7, version: 6 }).toEqual(before);
     expect(docProblem(roundCity())).toBeNull();
     const bad = roundCity();

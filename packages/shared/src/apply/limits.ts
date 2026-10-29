@@ -25,4 +25,8 @@ export const LIMITS = {
   polygonVertices: 128,
   footprintVertices: 32,
   evChargers: 500,
+  sensors: 10_000,
+  /** Sensor detection range, m. */
+  sensorRangeMin: 5,
+  sensorRangeMax: 500,
 } as const;

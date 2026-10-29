@@ -8,7 +8,8 @@ import { endBlackout, findBlackout, startBlackout } from './blackout.js';
 import { endIncident, startIncident } from './emergency.js';
 import { enqueueAffected } from './reroute.js';
 import { generateSurge } from './surge.js';
-import { SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS, type ResponsePolicy, type ScenarioInput, type ScenarioInputKind, type ScenarioResult } from './types.js';
+import { detectionMissed, trackAccident } from './detection.js';
+import { DETECTION_MODES, detectionOf, SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS, type ResponsePolicy, type ScenarioInput, type ScenarioInputKind, type ScenarioResult } from './types.js';
 
 export const ACCIDENT_TICKS = 2400;
 export const ACCIDENT_LENGTH = 9;
@@ -116,6 +117,7 @@ function validate(w: World, input: ScenarioInput): string | null {
       if (!(p.informedShare! >= 0 && p.informedShare! <= 1)) return 'informedShare는 0..1이어야 합니다';
       if (p.preempt !== undefined && p.preempt !== 0 && p.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
       if (p.battery !== undefined && p.battery !== 0 && p.battery !== 1) return 'battery는 0 또는 1이어야 합니다';
+      if (p.detection !== undefined && p.detection !== 0 && p.detection !== 1 && p.detection !== 2) return 'detection은 0(legacy), 1(reports), 2(sensors)여야 합니다';
       return null;
   }
   return null;
@@ -157,6 +159,7 @@ export function queuePolicy(w: World, policy: ResponsePolicy): ScenarioInput {
       informedShare: policy.informedShare,
       ...(policy.preempt !== undefined ? { preempt: policy.preempt ? 1 : 0 } : {}),
       ...(policy.battery !== undefined ? { battery: policy.battery ? 1 : 0 } : {}),
+      ...(policy.detection !== undefined ? { detection: DETECTION_MODES.indexOf(policy.detection) } : {}),
     },
   };
   const r = queueScenarioInput(w, input);
@@ -189,13 +192,18 @@ function log(w: World, input: ScenarioInput, applied: boolean, note?: string): v
   logOutcome(w.sc!, e);
 }
 
-/** End an effect: by duration (`by` null) or by the end input `by`. */
+/**
+ * End an effect: by duration (`by` null) or by the end input `by`. An accident the city never knew of (ADR
+ * 0013) sends no re-route notice (only the no-route retry, which is on-site recovery) and is logged missed.
+ */
 function endEffect(w: World, e: Effect, by: string | null): void {
   const sc = w.sc!;
   sc.effects.splice(sc.effects.indexOf(e), 1);
-  const lanes = effectLanes(w, e);
+  const unknown = e.kind === 'accident' && !e.known;
+  const lanes = unknown ? [] : effectLanes(w, e);
   compose(w);
   logOutcome(sc, { eventId: e.eventId, tick: w.tick, kind: `${e.kind}.end`, applied: true, note: by === null ? 'duration' : `by ${by}` });
+  if (unknown) detectionMissed(w, e.eventId, 'ended before detection');
   enqueueAffected(w, lanes, true);
 }
 
@@ -260,6 +268,7 @@ export function relocateObstacles(w: World): void {
     if (lane === undefined || rear === null) {
       sc.effects.splice(sc.effects.indexOf(e), 1);
       logOutcome(sc, { eventId: e.eventId, tick: w.tick, kind: 'accident.end', applied: true, note: lane === undefined ? 'lane gone' : 'no room after edit' });
+      detectionMissed(w, e.eventId, 'target gone');
       continue;
     }
     if (rear !== e.rear) logOutcome(sc, { eventId: e.eventId, tick: w.tick, kind: 'accident.move', applied: true, note: `moved to s=${rear.toFixed(2)} after edit` });
@@ -311,11 +320,17 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
         len,
         startTick: w.tick,
         endTick: w.tick + (p.durationTicks ?? ACCIDENT_TICKS),
+        known: detectionOf(sc.policy) === 'legacy',
+        onSite: detectionOf(sc.policy) !== 'legacy',
+        seen: new Set(),
+        stuck: new Set(),
       };
       sc.effects.push(e);
       compose(w);
       log(w, input, true, rear !== t.s && t.s !== undefined ? `moved to s=${rear.toFixed(2)}` : undefined);
-      enqueueAffected(w, [lane], false);
+      // ADR 0013 §2: the obstacle is physical from now; costs and re-route notices wait for detection.
+      if (!e.known) trackAccident(w, e.eventId, e.laneId, rear + len / 2);
+      else enqueueAffected(w, [lane], false);
       return;
     }
     case 'closure.end':
@@ -373,6 +388,7 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
         informedShare: p.informedShare!,
         ...(p.preempt !== undefined ? { preempt: p.preempt === 1 } : {}),
         ...(p.battery !== undefined ? { battery: p.battery === 1 } : {}),
+        ...(p.detection !== undefined ? { detection: DETECTION_MODES[p.detection]! } : {}),
       };
       log(w, input, true);
       return;

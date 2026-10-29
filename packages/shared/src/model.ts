@@ -288,6 +288,42 @@ export interface RoadFeature {
   signal?: boolean;
 }
 
+export const SENSOR_KINDS = ['cctv', 'radar', 'smartpole'] as const;
+/** cctv = video camera (sector), radar = road radar detector (narrow, long), smartpole = 360° short-range pole. */
+export type SensorKind = (typeof SENSOR_KINDS)[number];
+export type SensorId = string;
+
+/**
+ * Roadside sensor (ADR 0013 §4), mounted on a segment like a bus stop: (segmentId, t, side) follows the road
+ * through split / fillet (t remapped) and is removed with it. Placed on the sidewalk (curb when there is none)
+ * of `side`. Only geometry is stored; detection delays and miss rates belong to the simulation.
+ */
+export interface Sensor {
+  id: SensorId;
+  kind: SensorKind;
+  segmentId: SegmentId;
+  /** Fraction (0..1) of the segment's arc length from node a (as BusStop.t). */
+  t: number;
+  /** Side of the segment in its a → b direction. */
+  side: 'left' | 'right';
+  /**
+   * View direction, radians, relative to the segment tangent (a → b) at t: absolute yaw = atan2(tangent.z,
+   * tangent.x) + heading; 0 looks along a → b, +π/2 towards the right side.
+   */
+  heading: number;
+  /** Horizontal field of view, radians (0, 2π]; 2π = all around. */
+  fov: number;
+  /** Detection range, meters. */
+  range: number;
+}
+
+/** Default view geometry per kind (game model values, not calibrated). */
+export const SENSOR_DEFAULTS: Record<SensorKind, { fov: number; range: number }> = {
+  cctv: { fov: Math.PI / 2, range: 120 },
+  radar: { fov: Math.PI / 9, range: 200 },
+  smartpole: { fov: Math.PI * 2, range: 40 },
+};
+
 /** A closed road. First hook for incident simulation. */
 export interface Closure {
   segmentId: SegmentId;
@@ -306,7 +342,7 @@ export interface CityMeta {
 }
 
 /** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
-export const DOC_VERSION = 7;
+export const DOC_VERSION = 8;
 
 export interface CityDoc {
   version: number;
@@ -323,6 +359,7 @@ export interface CityDoc {
   closures: Record<SegmentId, Closure>;
   parcels: Record<ParcelId, Parcel>;
   features: Record<RoadFeatureId, RoadFeature>;
+  sensors: Record<SensorId, Sensor>;
 }
 
 /**
@@ -332,11 +369,13 @@ export interface CityDoc {
  * user who deletes one does not get it back). v4 → v5: the growth preset variants (same rule; existing ids are never touched).
  * v5 → v6: the facility designs (fire station, hospital, substation, power plant; same rule).
  * v6 → v7: rounded volumes (`BuildingPart.round`); no data changes, every v6 shape stays as it was.
+ * v7 → v8: roadside sensors collection (ADR 0013 §4); no other data changes.
  */
 export function normalizeDoc(doc: CityDoc): CityDoc {
   // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
   doc.parcels ??= {};
   doc.features ??= {};
+  doc.sensors ??= {};
   if (doc.version < 2) {
     for (const t of Object.values(doc.buildingTypes)) {
       t.rev ??= 1;
@@ -360,6 +399,7 @@ export function normalizeDoc(doc: CityDoc): CityDoc {
     doc.version = 6;
   }
   if (doc.version < 7) doc.version = 7;
+  if (doc.version < 8) doc.version = 8;
   // A stored `round: null` or `0` means "not rounded", as in an upsert (which drops the key): drop it so
   // load and command validation agree. Malformed collections are left for docProblem to report.
   for (const t of Object.values(doc.buildingTypes ?? {})) {

@@ -4,6 +4,7 @@
 // `nodes` is an array, say, accepts edits that the next save silently drops.
 
 import type { CityDoc } from './model.js';
+import { sensorShapeError } from './sensors.js';
 
 type Obj = Record<string, unknown>;
 
@@ -25,6 +26,7 @@ export const DOC_COLLECTIONS = [
   'closures',
   'parcels',
   'features',
+  'sensors',
 ] as const;
 
 /**
@@ -61,6 +63,8 @@ export function docProblem(doc: unknown): string | null {
     ['closures', 'segmentId', (e) => has('segments', e.segmentId)],
     ['parcels', 'id', (e) => Array.isArray(e.polygon) && isObj(e.regulation)],
     ['features', 'id', (e) => has('segments', e.segmentId) && num(e.t)],
+    // The same field rules as sensor.place (one validator): a bad kind or range must not reach the sim.
+    ['sensors', 'id', (e) => has('segments', e.segmentId) && sensorShapeError(e) === null],
   ];
   for (const [k, idField, ok] of rules) {
     for (const [key, e] of Object.entries(d[k])) {

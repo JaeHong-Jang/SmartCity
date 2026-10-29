@@ -48,6 +48,10 @@ const DOMAINS: Record<Exclude<CommandType, 'batch'>, number> = {
   'parcel.upsert': D_PARCELS,
   'parcel.remove': D_PARCELS,
   'meta.update': 0,
+  // Sensors are not drawn yet (P6b-2 adds their layer).
+  'sensor.place': 0,
+  'sensor.update': 0,
+  'sensor.remove': 0,
 };
 
 /** Union of the domains a command (or every command of a batch) can change. */

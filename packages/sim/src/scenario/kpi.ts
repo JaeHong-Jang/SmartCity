@@ -4,6 +4,7 @@ import { CLOCK_SCALE } from '../types.js';
 import type { World } from '../traffic/world.js';
 import { minutesOf } from './blackout.js';
 import { gameMinutes } from './emergency.js';
+import { detectionKpi, emptyDetectionKpi, emptyResponseBreakdown, responseBreakdown } from './detection.js';
 import { NO_ROUTE } from './reroute.js';
 import { activeEvents } from './state.js';
 import { surgeWaiting } from './surge.js';
@@ -74,6 +75,8 @@ export function scenarioKpi(w: World): ScenarioKpi {
     darkJunctionMinutes: minutesOf(w, sc.darkJunctionTicks),
     batteryJunctionMinutes: minutesOf(w, sc.batteryTicks),
     darkQueueVehicleMinutes: minutesOf(w, sc.darkQueueTicks),
+    detection: detectionKpi(w),
+    response: responseBreakdown(w),
   };
 }
 
@@ -129,6 +132,8 @@ export function inactiveKpi(w: World): ScenarioKpi {
     darkJunctionMinutes: 0,
     batteryJunctionMinutes: 0,
     darkQueueVehicleMinutes: 0,
+    detection: emptyDetectionKpi(),
+    response: emptyResponseBreakdown(),
   };
 }
 

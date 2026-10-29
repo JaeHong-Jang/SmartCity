@@ -29,6 +29,8 @@ import { reconcileSignals, stepClearings, writeClearings } from './traffic/signa
 import { reapplyDark, writeDark } from './traffic/signalDark.js';
 import { minutesOf, powerCoverage, updatePower, type PowerCoverage } from './scenario/blackout.js';
 import { processReroutes } from './scenario/reroute.js';
+import { processDetections, undetectedView } from './scenario/detection.js';
+import { hasOnSite, processOnSite } from './scenario/onsite.js';
 import { scenarioHolds } from './scenario/state.js';
 import { processSurge } from './scenario/surge.js';
 import { policyError, RECENT_LOG_SIZE, type ResponsePolicy, type ScenarioOutcome, type ScenarioInput, type ScenarioKpi, type ScenarioResult, type ScenarioView } from './scenario/types.js';
@@ -76,6 +78,8 @@ const NETWORK_COMMANDS = new Set<Command['type']>([
   'feature.upsert',
   'feature.remove',
 ]);
+/** Sensors feed only the detection model (coverage is rebuilt from the doc when it changed): nothing to refresh. */
+const SENSOR_COMMANDS = new Set<Command['type']>(['sensor.place', 'sensor.update', 'sensor.remove']);
 
 export class Simulation {
   private readonly w: World;
@@ -159,7 +163,7 @@ export class Simulation {
     if (!res.ok) return res;
     const types = cmd.type === 'batch' ? cmd.commands.map((c) => c.type) : [cmd.type];
     if (types.some((t) => NETWORK_COMMANDS.has(t))) this.netDirty = true;
-    else this.derivedDirty = true;
+    else if (!types.every((t) => SENSOR_COMMANDS.has(t))) this.derivedDirty = true;
     return res;
   }
 
@@ -185,6 +189,8 @@ export class Simulation {
     const w = this.w;
     this.flush();
     if (w.sc !== null) applyDueInputs(w);
+    // Detection (ADR 0013 §3): after the due inputs, before power — events tracked under reports / sensors.
+    if (w.sc !== null && w.sc.det.pending.length > 0) processDetections(w);
     // Blackouts (ADR 0010 §3): power, batteries, DARK / restore — only while a blackout runs or a signal is dark.
     // …and once more after the last one ended: restores, refills batteries, clears the unpowered state.
     if (w.sc !== null && (w.sc.blackouts.length > 0 || w.dark !== null || w.sc.battery.size > 0 || w.sc.unpoweredSignals > 0 || w.sc.unpoweredBuildings.length > 0)) updatePower(w);
@@ -199,6 +205,8 @@ export class Simulation {
     maintainBuses(w);
     this.processQueue();
     if (w.sc !== null) {
+      // On-site recovery around accidents seen by the driver (ADR 0013 §2; reports / sensors accidents only).
+      if (w.sc.effects.length > 0 && hasOnSite(w)) processOnSite(w);
       processReroutes(w);
       processSurge(w);
       if (w.sc.incidents.length > 0 || w.sc.missions.length > 0) processEmergency(w);
@@ -431,6 +439,7 @@ export class Simulation {
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([signalId, ticks]) => ({ signalId, remainingMinutes: minutesOf(w, ticks) })),
       unpoweredBuildings: sc.unpoweredBuildings.slice(),
+      undetected: undetectedView(w),
     };
   }
 

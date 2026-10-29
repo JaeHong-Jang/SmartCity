@@ -20,3 +20,4 @@ export * from './editing/zoning.js';
 export * from './growth.js';
 export * from './docCheck.js';
 export * from './editing/fillet.js';
+export * from './sensors.js';
