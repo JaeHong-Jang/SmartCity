@@ -1192,7 +1192,8 @@ body[data-simmode] .hint {
   top: 112px;
   left: 84px;
   width: 290px;
-  max-height: calc(100% - 112px - 60px);
+  /* Ends above the lock note (bottom 62px + its height) so the last buttons stay clickable. */
+  max-height: calc(100% - 112px - 96px);
   overflow-y: auto;
   padding: 10px 12px;
   display: flex;
@@ -1490,6 +1491,10 @@ body[data-conn-banner] .sim-banner {
 body[data-conn-banner] .sim-panel,
 body[data-conn-banner] .sim-compare {
   top: 142px;
+}
+
+body[data-conn-banner] .sim-panel {
+  max-height: calc(100% - 142px - 96px);
 }
 
 .offline-notice {

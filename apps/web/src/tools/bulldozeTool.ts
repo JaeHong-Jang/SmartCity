@@ -1,4 +1,4 @@
-// Bulldoze: hover highlights, click removes a road segment, building or bus stop.
+// Bulldoze: hover highlights, click removes a road segment, building, bus stop or sensor.
 
 import type { Command, Vec2 } from '@smartcity/shared';
 import { highlightPreview } from './highlight';
@@ -16,6 +16,8 @@ export function removeCommandFor(hit: PickResult): Command | null {
       return { type: 'busStop.remove', id: hit.id };
     case 'parcel':
       return { type: 'parcel.remove', id: hit.id };
+    case 'sensor':
+      return { type: 'sensor.remove', id: hit.id };
     case 'node':
       return null;
   }
@@ -51,8 +53,8 @@ export class BulldozeTool implements Tool {
       this.hover = hit;
       this.ctx.changed();
     }
-    const label = hit ? { segment: '도로', building: '건물', busStop: '정류장', node: '교차점', parcel: '필지' }[hit.kind] : null;
-    const hint = label ? `클릭하면 ${label}을(를) 철거합니다` : '철거할 도로·건물·정류장 위에 올려 두세요';
+    const label = hit ? { segment: '도로', building: '건물', busStop: '정류장', node: '교차점', parcel: '필지', sensor: '센서' }[hit.kind] : null;
+    const hint = label ? `클릭하면 ${label}을(를) 철거합니다` : '철거할 도로·건물·정류장·센서 위에 올려 두세요';
     if (this.ctx.store.getState().toolHint !== hint) this.ctx.store.set({ toolHint: hint });
   }
 

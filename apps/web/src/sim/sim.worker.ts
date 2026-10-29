@@ -143,7 +143,7 @@ self.onmessage = (ev: MessageEvent<ToWorker>) => {
       next =
         msg.t === 'init'
           ? new Simulation(msg.seed === undefined ? msg.doc : { ...msg.doc, meta: { ...msg.doc.meta, seed: msg.seed } }, msg.scenario ? { scenario: true } : {})
-          : simulationFromRecord(msg.record, {}, { warmup: false, ...(msg.reroute === undefined ? {} : { reroute: msg.reroute }) });
+          : simulationFromRecord(msg.record, {}, { warmup: false, ...(msg.reroute === undefined ? {} : { reroute: msg.reroute }), ...(msg.detection === undefined ? {} : { detection: msg.detection }) });
     } catch (e) {
       post({ t: 'error', error: e instanceof Error ? e.message : String(e), for: msg.t });
       return;

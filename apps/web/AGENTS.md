@@ -27,7 +27,9 @@ src/
   render/vehicles.ts       차량 타입별 parts → 정점색 병합 지오메트리 베이크 → 타입별 InstancedMesh, 용량 2배 확장, 스냅샷 2개를 vehicleId 기준 보간(graphRevision 다르면 보간 생략)
   render/signals.ts        신호등 헤드 인스턴스(색 = 스냅샷 color)
   render/overlays.ts       로컬/동료 고스트, pending 펄스, 선택 하이라이트, 버스 노선, 폐쇄 표시, 교통 흐름 오버레이(laneFlow 색), 신호 위상 화살표, 동료 커서+이름
-  render/dirty.ts          명령 종류 → 영향 도메인(도로/건물/차량/정류장/노선/필지) 표 + 선택 영향 판정. CityRenderer·OverlayLayer가 무효화에 사용 (새 명령은 여기에 분류해야 컴파일됨)
+  render/sensors.ts        센서(ADR 0013 §5): 종류별 InstancedMesh(폴대+CCTV 헤드/레이더 박스/스마트폴, 그림자 없음, 카메라 1.2 km 밖 컬링) + 감시 부채꼴·실제 커버 차선 띠(sim의 compileSensorCoverage — 센서 도구 활성·'센서 범위' 토글 = 전체, 센서 선택 = 그 센서만, 평소 없음; 센서/도로 변경 시에만 재계산)
+  render/detection.ts      시뮬레이터 감지 표시: 감지 순간 펄스 + "CCTV 감지"/"신고 접수" 라벨(6초), 미인지 사건(ScenarioView.undetected)은 흐린 회색 링 + "미인지"
+  render/dirty.ts          명령 종류 → 영향 도메인(도로/건물/차량/정류장/노선/필지/센서) 표 + 선택 영향 판정. CityRenderer·OverlayLayer가 무효화에 사용 (새 명령은 여기에 분류해야 컴파일됨)
   tools/types.ts           interface Tool { id; onPointerDown/Move/Up(e: ToolPointer); onKey?(e); cancel(); ghost(): Vec2[] }
   tools/selectTool.ts      클릭 선택(노드/세그먼트/건물/정류장) → Inspector
   tools/roadTool.ts        직선/곡선(C 토글: 시작→제어점→끝), 연속 그리기, planRoad 미리보기(길이 m·각도°·교차 지점 하이라이트), G 그리드 스냅 토글, 우클릭(5px 미만 움직임)/Esc 취소
@@ -35,9 +37,10 @@ src/
   tools/bulldozeTool.ts    호버 하이라이트, 클릭 철거(세그먼트/건물/정류장)
   tools/busLineTool.ts     도로 위를 순서대로 클릭 → 정류장 자동 생성(클릭한 쪽 = 진행 방향), Enter/첫 정류장 클릭으로 완료 → busStop.add들 + busLine.upsert 를 한 batch
   tools/closureTool.ts     세그먼트 클릭으로 폐쇄 토글
+  tools/sensorTool.ts      센서 설치(0): 도로 가까이 → 커서 쪽 보도 중앙에 스냅, 기본 방향 = 그쪽 차선 진행 방향(교차로 40 m 이내면 교차로 중심), 설치 전 부채꼴 + 실제 커버 차선 미리보기(sensorCoverage, rAF당 1회), 휠·, . 회전(Shift 5°), 드래그 = 방향 지정, 클릭 = sensor.place 1개, Esc 회전 초기화
   tools/picking.ts         문서 공간 질의(가장 가까운 노드/세그먼트/건물/정류장, 공간 해시)
   ui/App.tsx               레이아웃: 상단바(도시 이름, 접속 상태, 동료 목록, 내보내기/가져오기), 좌측 도구 모음, 우측 패널(인스펙터/에디터), 하단 상태바(FPS, 드로우콜, 차량 수, 평균 속도, 제거 수, 시뮬 속도, 교통 밀도, 오버레이 토글)
-  ui/Toolbar.tsx           도구 버튼 + 단축키(1 선택, 2 도로, 3 건물, 4 철거, 5 버스, 6 폐쇄), 아래쪽에 보기 버튼(ViewButtons: 도시 보기 — 밀집 지역, 한 번 더 누르면 도시 전체 / 눈높이 / 용도지역 색 토글)
+  ui/Toolbar.tsx           도구 버튼 + 단축키(1 선택, 2 도로, 3 건물, 4 철거, 5 버스, 6 폐쇄, 7 필지, 8 교통 시설, 9 조닝, 0 센서), 아래쪽에 보기 버튼(ViewButtons: 도시 보기 — 밀집 지역, 한 번 더 누르면 도시 전체 / 눈높이 / 용도지역 색 토글)
   ui/PerfOverlay.tsx       개발 서버 전용 성능 오버레이(` 키 또는 ?perf=1)
   dev/benchCity.ts         성능 기준 도시 생성기(개발·e2e 전용, 결정적: 도로 1,012·건물 2,000). 측정: e2e/perf/p6-bench.spec.ts, 결과 docs/perf/p6-baseline.md
   ui/Inspector.tsx         노드: 신호 종류·위상(접근로 체크, 녹색 초)·황색·전적색·오프셋·자동 복원 / 세그먼트: 도로 타입 변경·폐쇄 / 건물: 타입·회전·철거 / 정류장

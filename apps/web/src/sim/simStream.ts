@@ -1,7 +1,7 @@
 // SimulationStream: what renderers subscribe to (ADR 0005). Phase 1 = WorkerSimStream.
 
 import type { CityDoc, Command } from '@smartcity/shared';
-import type { ResponsePolicy, ScenarioInput, ScenarioRecord, SimSnapshot, SnapshotBuffers } from '@smartcity/sim';
+import type { DetectionMode, ResponsePolicy, ScenarioInput, ScenarioRecord, SimSnapshot, SnapshotBuffers } from '@smartcity/sim';
 import { snapshotTransferables, type FromWorker, type ToWorker, type WorkerSpeed } from './protocol';
 
 /** Worker replies to simulator-mode messages (scenario results, policy result, KPIs). */
@@ -29,7 +29,8 @@ export interface ScenarioControl {
  */
 export interface FastForwardControl {
   init(doc: CityDoc, seed?: number, opts?: { scenario?: boolean }): void;
-  initRecord(record: ScenarioRecord, reroute?: boolean): void;
+  /** `reroute` / `detection` override the record's policy everywhere (comparison presets ① / ②, ADR 0013 §1). */
+  initRecord(record: ScenarioRecord, reroute?: boolean, detection?: DetectionMode): void;
   runTo(tick: number, opts?: { progressEvery?: number; kpiEvery?: number }): void;
   cancelRun(): void;
 }
@@ -130,9 +131,12 @@ export class WorkerSimStream implements SimulationStream, SimControl, ScenarioCo
     this.post(msg);
   }
 
-  initRecord(record: ScenarioRecord, reroute?: boolean): void {
+  initRecord(record: ScenarioRecord, reroute?: boolean, detection?: DetectionMode): void {
     this.dropSnapshots();
-    this.post(reroute === undefined ? { t: 'initRecord', record } : { t: 'initRecord', record, reroute });
+    const msg: ToWorker = { t: 'initRecord', record };
+    if (reroute !== undefined) msg.reroute = reroute;
+    if (detection !== undefined) msg.detection = detection;
+    this.post(msg);
   }
 
   runTo(tick: number, opts: { progressEvery?: number; kpiEvery?: number } = {}): void {

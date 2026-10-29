@@ -1,4 +1,4 @@
-// Hover highlight shapes shared by the select, bulldoze and closure tools.
+// Hover highlight shapes shared by the select, bulldoze, closure and sensor tools.
 
 import { add, buildingFootprints, dist, rotateY, roadHalfWidth, scale, type Building, type BuildingType, type CityDoc, type Vec2 } from '@smartcity/shared';
 import { closedRing } from '../app/ring';
@@ -34,6 +34,11 @@ export function highlightPreview(doc: CityDoc, idx: PickIndex, hit: PickResult, 
     case 'parcel': {
       const pc = doc.parcels[hit.id];
       if (pc) out.lines.push({ pts: closedRing(pc.polygon), width: 0.8, color });
+      break;
+    }
+    case 'sensor': {
+      const p = idx.sensorPosition(hit.id);
+      if (p) out.points.push({ pos: p, radius: 2.2, color });
       break;
     }
   }

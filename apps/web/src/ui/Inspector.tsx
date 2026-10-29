@@ -6,7 +6,12 @@ import {
   sampleSegmentCurve,
   segmentLength,
   segmentsAtNode,
+  SENSOR_DEFAULTS,
+  SENSOR_KINDS,
+  sensorPose,
   sub,
+  LIMITS,
+  type SensorKind,
   type Building,
   type CityDoc,
   type IntersectionControl,
@@ -14,6 +19,8 @@ import {
 } from '@smartcity/shared';
 import { bearing } from '../tools/roadTool';
 import { segmentFeatures } from '../tools/streetTool';
+import { SENSOR_KIND_INFO, SENSOR_MODEL_NOTE, sensorBearing, wrapPi } from '../tools/sensorTool';
+import { SensorKindIcon } from './Toolbar';
 import { AiBadge } from './AiBadge';
 import { translateError } from '../app/store';
 import { useDoc, useServices, useStore } from './context';
@@ -431,6 +438,94 @@ function StopInspector({ id }: { id: string }) {
   );
 }
 
+const DEG = Math.PI / 180;
+
+/** Number field that commits on Enter / blur (one `sensor.update` per edit, not per keystroke). */
+function CommitNumber({ value, min, max, onCommit, field }: { value: number; min: number; max: number; onCommit: (v: number) => void; field: string }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = (): void => {
+    if (draft === null) return;
+    const v = clampNum(draft, min, max);
+    setDraft(null);
+    if (v !== value) onCommit(v);
+  };
+  return (
+    <input
+      type="number"
+      data-sensor-field={field}
+      min={min}
+      max={max}
+      value={draft ?? value}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') setDraft(null);
+      }}
+    />
+  );
+}
+
+function SensorInspector({ id }: { id: string }) {
+  const { dispatcher } = useServices();
+  const { doc } = useDoc();
+  const s = doc.sensors[id]!;
+  const pose = sensorPose(doc, s);
+  const update = (patch: { kind?: SensorKind; heading?: number; fov?: number; range?: number }) => dispatcher.dispatch({ type: 'sensor.update', id, ...patch });
+  const turn = (by: number) => update({ heading: wrapPi(s.heading + by) });
+  const fov = Math.round(s.fov / DEG);
+  return (
+    <>
+      <h3>센서 · {SENSOR_KIND_INFO[s.kind].label}</h3>
+      <div className="row wrap" role="group" aria-label="센서 종류">
+        {SENSOR_KINDS.map((k) => (
+          <button
+            key={k}
+            data-sensor-set-kind={k}
+            className={s.kind === k ? 'active' : ''}
+            title={`${SENSOR_KIND_INFO[k].desc} (시야각·범위는 그 종류의 기본값으로)`}
+            onClick={() => k !== s.kind && update({ kind: k, fov: SENSOR_DEFAULTS[k].fov, range: SENSOR_DEFAULTS[k].range })}
+          >
+            <SensorKindIcon kind={k} /> {SENSOR_KIND_INFO[k].short}
+          </button>
+        ))}
+      </div>
+      <span className="muted">{SENSOR_KIND_INFO[s.kind].desc}</span>
+      <div className="row">
+        <label>방향</label>
+        <button data-sensor-turn="-15" onClick={() => turn(-15 * DEG)}>−15°</button>
+        <b data-sensor-bearing style={{ width: 64, textAlign: 'center' }}>
+          {pose ? `방위 ${sensorBearing(pose.pos, pose.yaw)}°` : '—'}
+        </b>
+        <button data-sensor-turn="15" onClick={() => turn(15 * DEG)}>+15°</button>
+        <button data-sensor-turn="180" onClick={() => turn(Math.PI)} title="반대쪽을 봅니다">
+          반대
+        </button>
+      </div>
+      <div className="row">
+        <label>시야각</label>
+        <CommitNumber field="fov" value={fov} min={1} max={360} onCommit={(v) => update({ fov: Math.min(2 * Math.PI, v * DEG) })} />
+        <span className="muted">°</span>
+        <label>범위</label>
+        <CommitNumber field="range" value={s.range} min={LIMITS.sensorRangeMin} max={LIMITS.sensorRangeMax} onCommit={(v) => update({ range: v })} />
+        <span className="muted">m</span>
+      </div>
+      <dl className="kv">
+        <dt>도로 위치</dt>
+        <dd>
+          {Math.round(s.t * 100)}% · {s.side === 'right' ? '오른쪽' : '왼쪽'} 보도
+        </dd>
+      </dl>
+      <span className="muted" data-sensor-note>
+        {SENSOR_MODEL_NOTE} · 지도의 노란 띠 = 실제로 감시하는 차선 구간 · 도로를 지우면 함께 삭제
+      </span>
+      <button className="danger" data-sensor-remove onClick={() => dispatcher.dispatch({ type: 'sensor.remove', id })}>
+        센서 삭제
+      </button>
+    </>
+  );
+}
+
 export function Inspector() {
   const sel = useStore((s) => s.selection);
   const { doc } = useDoc();
@@ -438,7 +533,7 @@ export function Inspector() {
     return (
       <>
         <h3>속성</h3>
-        <span className="muted">선택 도구(1)로 도로·교차점·건물·정류장·필지를 클릭하면 여기에서 편집할 수 있습니다.</span>
+        <span className="muted">선택 도구(1)로 도로·교차점·건물·정류장·필지·센서를 클릭하면 여기에서 편집할 수 있습니다.</span>
         <dl className="kv">
           <dt>교차점</dt>
           <dd>{Object.keys(doc.nodes).length}</dd>
@@ -467,5 +562,7 @@ export function Inspector() {
       return doc.busStops[sel.id] ? <StopInspector key={sel.id} id={sel.id} /> : null;
     case 'parcel':
       return doc.parcels[sel.id] ? <ParcelInspector key={sel.id} id={sel.id} /> : null;
+    case 'sensor':
+      return doc.sensors[sel.id] ? <SensorInspector key={sel.id} id={sel.id} /> : null;
   }
 }

@@ -98,6 +98,8 @@ test('phase 4c1: simulator mode — private copy, events, ON/OFF comparison, no 
   await expect(page.locator('[data-simmode-warmup]')).toBeVisible();
   expect(await workers(page)).toBe(1);
   await expect(page.locator('[data-simmode-ready]')).toBeVisible({ timeout: 90_000 });
+  // No sensors in this city: detection stays "즉시 인지 (기존)", exactly as before sensors existed.
+  await expect(page.locator('[data-simmode-detection="legacy"]')).toHaveClass(/active/);
   // Shared editing is locked: the toolbar ignores clicks.
   expect(await page.evaluate(() => getComputedStyle(document.querySelector('.toolbar')!).pointerEvents)).toBe('none');
 

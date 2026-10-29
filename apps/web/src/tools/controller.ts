@@ -2,6 +2,7 @@
 // Left presses capture the pointer so drags keep working outside the canvas; G cycles the snap step.
 
 import type { Presence, Vec2 } from '@smartcity/shared';
+import type { RoadGraph } from '@smartcity/sim';
 import type { Dispatcher } from '../app/dispatch';
 import type { ClientStore, ToolId } from '../app/store';
 import { BuildingTool } from './buildingTool';
@@ -12,6 +13,7 @@ import { ParcelTool } from './parcelTool';
 import { Picker } from './picking';
 import { RoadTool } from './roadTool';
 import { SelectTool } from './selectTool';
+import { SensorTool } from './sensorTool';
 import { StreetTool } from './streetTool';
 import { ZoningTool } from './zoningTool';
 import { DragGesture } from './gesture';
@@ -30,6 +32,8 @@ export interface ViewHooks {
   focus(p: Vec2): void;
   /** Ground point under the cursor (null = left the viewport), for the fine grid. */
   cursor(p: Vec2 | null): void;
+  /** Compiled road graph of the drawn city (sensor coverage previews). */
+  roadGraph?(): RoadGraph | null;
 }
 
 function isTyping(): boolean {
@@ -51,6 +55,7 @@ export class ToolController {
   private lastDocVersion: number;
   private lastSnap: number;
   private lastStreetMode: string;
+  private lastSensorKind: string;
 
   constructor(
     private readonly store: ClientStore,
@@ -72,6 +77,7 @@ export class ToolController {
       changed: () => this.onPreview(this.active.preview()),
       pan: view.pan,
       focus: (p) => view.focus(p),
+      roadGraph: () => view.roadGraph?.() ?? null,
     };
     this.tools = {
       select: new SelectTool(ctx, index),
@@ -83,11 +89,13 @@ export class ToolController {
       parcel: new ParcelTool(ctx),
       street: new StreetTool(ctx, index),
       zoning: new ZoningTool(ctx),
+      sensor: new SensorTool(ctx, index),
     };
     this.active = this.tools[store.getState().tool];
     this.lastDocVersion = store.getState().docVersion;
     this.lastSnap = store.getState().toolOptions.snapStep;
     this.lastStreetMode = store.getState().toolOptions.streetMode;
+    this.lastSensorKind = store.getState().toolOptions.sensorKind;
 
     dom.addEventListener('pointerdown', this.down);
     dom.addEventListener('pointermove', this.move);
@@ -113,10 +121,12 @@ export class ToolController {
       if (this.lastPointer) this.active.onPointerMove(this.lastPointer);
       this.onPreview(this.active.preview());
     }
-    if (s.docVersion !== this.lastDocVersion || s.toolOptions.snapStep !== this.lastSnap || s.toolOptions.streetMode !== this.lastStreetMode) {
+    const o = s.toolOptions;
+    if (s.docVersion !== this.lastDocVersion || o.snapStep !== this.lastSnap || o.streetMode !== this.lastStreetMode || o.sensorKind !== this.lastSensorKind) {
       this.lastDocVersion = s.docVersion;
-      this.lastSnap = s.toolOptions.snapStep;
-      this.lastStreetMode = s.toolOptions.streetMode;
+      this.lastSnap = o.snapStep;
+      this.lastStreetMode = o.streetMode;
+      this.lastSensorKind = o.sensorKind;
       // The doc or the snap step changed under the cursor: refresh snapping and validity.
       if (this.lastPointer) this.active.onPointerMove(this.lastPointer);
     }

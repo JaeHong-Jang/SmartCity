@@ -1,9 +1,10 @@
 import { useEffect, useRef, type ReactNode } from 'react';
-import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
+import { DEFAULT_REGULATIONS, LIMITS, SENSOR_DEFAULTS, SENSOR_KINDS, ZONE_LABELS, type SensorKind } from '@smartcity/shared';
 import type { StreetMode, ToolId } from '../app/store';
 import { ZONE_COLORS } from '../app/zoneColors';
 import { PARCEL_ZONES } from '../tools/parcelTool';
 import { ROAD_MODE_LABEL, setAutoFillet } from '../tools/roadTool';
+import { SENSOR_KIND_INFO, SENSOR_MODEL_NOTE } from '../tools/sensorTool';
 import { TOOL_META } from '../tools/toolMeta';
 import { AiBadge } from './AiBadge';
 import { useSimMode } from '../simmode/store';
@@ -26,6 +27,44 @@ const IconZoning = () => (
   </svg>
 );
 
+const IconSensor = () => (
+  <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M7 21V9" />
+    <rect x={5} y={5} width={9} height={5} rx={1} />
+    <path d="M14 7.5h2" />
+    <path d="M17 4.5a5 5 0 0 1 0 6M19.5 2.5a8 8 0 0 1 0 10" />
+  </svg>
+);
+
+/** Small kind glyphs of the sensor tool options and inspector. */
+export function SensorKindIcon({ kind }: { kind: SensorKind }) {
+  return (
+    <svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {kind === 'cctv' && (
+        <>
+          <path d="M6 21V10" />
+          <rect x={4} y={5} width={11} height={5} rx={1} />
+          <path d="M15 7.5l4-2v5l-4-2" />
+        </>
+      )}
+      {kind === 'radar' && (
+        <>
+          <path d="M8 21V6" />
+          <rect x={5} y={4} width={7} height={6} rx={1} />
+          <path d="M14 5l7-2M14 9l7 2" />
+        </>
+      )}
+      {kind === 'smartpole' && (
+        <>
+          <path d="M12 21V4" />
+          <circle cx={12} cy={6} r={2} />
+          <path d="M8 3a5 5 0 0 0 0 6M16 3a5 5 0 0 1 0 6" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 const STREET_MODES: { id: StreetMode; label: string }[] = [
   { id: 'crosswalk', label: '횡단보도' },
   { id: 'signalCrosswalk', label: '신호 횡단보도' },
@@ -44,6 +83,7 @@ const TOOL_ICONS: Record<ToolId, ReactNode> = {
   parcel: <IconParcel />,
   street: <IconStreet />,
   zoning: <IconZoning />,
+  sensor: <IconSensor />,
 };
 
 export const TOOLS: { id: ToolId; label: string; key: string; icon: ReactNode }[] = TOOL_META.map((t) => ({ ...t, icon: TOOL_ICONS[t.id] }));
@@ -82,7 +122,7 @@ export function ToolOptions() {
   // The chosen item stays visible in a scrolled list (eyedropper, keyboard, tool switch).
   useEffect(() => {
     ref.current?.querySelector('.list > .active')?.scrollIntoView({ block: 'nearest' });
-  }, [tool, opts.roadTypeId, opts.buildingTypeId, opts.parcelZone, opts.zoningZone, opts.zoningErase, opts.streetMode]);
+  }, [tool, opts.roadTypeId, opts.buildingTypeId, opts.parcelZone, opts.zoningZone, opts.zoningErase, opts.streetMode, opts.sensorKind]);
   if (tool === 'road') {
     return (
       <section ref={ref} className="panel tool-options" aria-label="도로 도구 옵션">
@@ -188,6 +228,35 @@ export function ToolOptions() {
           ))}
         </div>
         <span className="muted">도로 옆에서 드래그 · [ ] 깊이(8m/칸) · 지우기는 건물이 없는 자동 필지만 · Esc 취소</span>
+      </section>
+    );
+  }
+  if (tool === 'sensor') {
+    return (
+      <section ref={ref} className="panel tool-options" aria-label="센서 도구 옵션">
+        <h3>센서 종류</h3>
+        <div className="list">
+          {SENSOR_KINDS.map((k) => {
+            const d = SENSOR_DEFAULTS[k];
+            const fov = Math.round((d.fov * 180) / Math.PI);
+            return (
+              <button key={k} data-sensor-kind={k} className={opts.sensorKind === k ? 'active' : ''} onClick={() => store.setToolOptions({ sensorKind: k })} title={SENSOR_KIND_INFO[k].desc}>
+                <SensorKindIcon kind={k} />
+                <span style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                  <span>{SENSOR_KIND_INFO[k].label}</span>
+                  <span className="muted">{SENSOR_KIND_INFO[k].desc}</span>
+                </span>
+                <span className="muted" style={{ whiteSpace: 'nowrap' }}>
+                  {fov}° · {d.range}m
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <span className="muted" data-sensor-note>
+          {SENSOR_MODEL_NOTE} (시야각·범위 {LIMITS.sensorRangeMin}~{LIMITS.sensorRangeMax}m는 설치 후 인스펙터에서 편집)
+        </span>
+        <span className="muted">도로 가까이 = 보도에 스냅 · 클릭 설치 · 드래그로 방향 · 휠 / , . 회전 (Shift 5°) · Esc 회전 초기화</span>
       </section>
     );
   }

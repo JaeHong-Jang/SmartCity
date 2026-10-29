@@ -9,7 +9,9 @@ export const D_VEHICLE_TYPES = 4;
 export const D_BUS_STOPS = 8;
 export const D_BUS_LINES = 16;
 export const D_PARCELS = 32;
-export const D_ALL = D_ROADS | D_BUILDINGS | D_VEHICLE_TYPES | D_BUS_STOPS | D_BUS_LINES | D_PARCELS;
+/** Roadside sensors (ADR 0013 §5). Their pose follows the road, so road edits redraw them too. */
+export const D_SENSORS = 64;
+export const D_ALL = D_ROADS | D_BUILDINGS | D_VEHICLE_TYPES | D_BUS_STOPS | D_BUS_LINES | D_PARCELS | D_SENSORS;
 
 /**
  * Road edits that also remove automatic lots and their grown buildings in the same transaction, or remap
@@ -48,10 +50,9 @@ const DOMAINS: Record<Exclude<CommandType, 'batch'>, number> = {
   'parcel.upsert': D_PARCELS,
   'parcel.remove': D_PARCELS,
   'meta.update': 0,
-  // Sensors are not drawn yet (P6b-2 adds their layer).
-  'sensor.place': 0,
-  'sensor.update': 0,
-  'sensor.remove': 0,
+  'sensor.place': D_SENSORS,
+  'sensor.update': D_SENSORS,
+  'sensor.remove': D_SENSORS,
 };
 
 /** Union of the domains a command (or every command of a batch) can change. */
@@ -74,6 +75,11 @@ function directId(cmd: Command): string | null {
       return cmd.id;
     case 'busStop.add':
       return cmd.stop.id;
+    case 'sensor.place':
+      return cmd.sensor.id;
+    case 'sensor.update':
+    case 'sensor.remove':
+      return cmd.id;
     case 'parcel.upsert':
       return cmd.parcel.id;
     default:
@@ -94,6 +100,8 @@ export function touchesSelection(cmd: Command, sel: { kind: string; id: string }
       return (d & D_ROADS) !== 0;
     case 'busStop':
       return (d & D_ROADS) !== 0 || ((d & D_BUS_STOPS) !== 0 && directId(cmd) === sel.id);
+    case 'sensor':
+      return (d & D_ROADS) !== 0 || ((d & D_SENSORS) !== 0 && directId(cmd) === sel.id);
     case 'building':
       // A road edit may remove the selected (grown) building: d === D_ROAD_PRUNE.
       return cmd.type === 'buildingType.upsert' || cmd.type === 'buildingType.remove' || d === D_ROAD_PRUNE || ((d & D_BUILDINGS) !== 0 && directId(cmd) === sel.id);

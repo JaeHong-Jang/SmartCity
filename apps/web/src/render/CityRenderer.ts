@@ -10,7 +10,7 @@ import type { GroundPan, ToolPreview } from '../tools/types';
 import { BuildingLayer } from './buildings';
 import { createCityCamera, type CityCamera } from './camera';
 import { cityFrame, cityViewPose, districtFrame, EMPTY_START, eyeLevelPose, type CameraPose } from './cityView';
-import { commandDomains, D_BUILDINGS, D_PARCELS, D_ROADS, D_VEHICLE_TYPES } from './dirty';
+import { commandDomains, D_BUILDINGS, D_PARCELS, D_ROADS, D_SENSORS, D_VEHICLE_TYPES } from './dirty';
 import { computeDayNight, createDayNightState, NOON } from './dayNight';
 import { createGround, type Ground } from './ground';
 import { HighlightLayer, type HighlightStats } from './highlight';
@@ -21,10 +21,12 @@ import { FrameTimes, type FramePercentiles } from './perfStats';
 import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer, Y_WALK } from './roads';
 import { BlackoutLayer } from './blackout';
+import { DetectionLayer } from './detection';
 import { EmergencyLayer } from './emergency';
 import { ScenarioLayer } from './scenario';
 import { configureRenderer, createSun } from './sceneKit';
 import { PedSignalLayer, SignalLayer } from './signals';
+import { SensorLayer, type SensorStats } from './sensors';
 import { createSky, fogRange, type Sky } from './sky';
 import { VehicleLayer } from './vehicles';
 
@@ -58,6 +60,7 @@ export class CityRenderer {
   /** Where the last district view put the camera (a second "도시 보기" there shows the whole city). */
   private districtPose: CameraPose | null = null;
   private buildings = new BuildingLayer();
+  private sensors = new SensorLayer();
   private vehicles: VehicleLayer;
   private signals: SignalLayer;
   private pedestrians: PedestrianLayer;
@@ -67,10 +70,11 @@ export class CityRenderer {
   readonly scenario: ScenarioLayer;
   readonly emergency: EmergencyLayer;
   readonly blackout: BlackoutLayer;
+  readonly detection: DetectionLayer;
   /** Night factor 0..1 of the last frame (blackout veil strength). */
   private night = 0;
   private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
-  private dirty = { roads: true, buildings: true, vehicleTypes: true, paving: true };
+  private dirty = { roads: true, buildings: true, vehicleTypes: true, paving: true, sensors: true };
   private raf = 0;
   private last = performance.now();
   private frames = 0;
@@ -140,7 +144,8 @@ export class CityRenderer {
     this.scenario = new ScenarioLayer(stream);
     this.emergency = new EmergencyLayer(stream);
     this.blackout = new BlackoutLayer(stream);
-    this.scene.add(this.paving.group, this.roads.group, this.buildings.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group, this.blackout.group);
+    this.detection = new DetectionLayer(stream, labelRoot);
+    this.scene.add(this.paving.group, this.roads.group, this.buildings.group, this.sensors.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group, this.blackout.group, this.detection.group);
 
     this.unsubs.push(
       store.onApplied((cmd) => {
@@ -149,6 +154,8 @@ export class CityRenderer {
         if (d & D_BUILDINGS) this.dirty.buildings = true;
         if (d & D_VEHICLE_TYPES) this.dirty.vehicleTypes = true;
         if (d & (D_ROADS | D_BUILDINGS | D_PARCELS)) this.dirty.paving = true;
+        // A sensor's pose follows its road.
+        if (d & (D_SENSORS | D_ROADS)) this.dirty.sensors = true;
         this.overlays.invalidate(cmd);
       }),
       store.onReset(() => {
@@ -156,6 +163,7 @@ export class CityRenderer {
         this.dirty.buildings = true;
         this.dirty.vehicleTypes = true;
         this.dirty.paving = true;
+        this.dirty.sensors = true;
         this.overlays.invalidateAll();
       }),
       // Synchronously with the welcome (before React shows the room), so nothing the user or a test
@@ -252,6 +260,14 @@ export class CityRenderer {
       this.dirty.buildings = false;
       this.buildings.update(s.doc);
     }
+    if (this.dirty.sensors) {
+      // After the road network: coverage uses its compiled graph.
+      this.dirty.sensors = false;
+      this.sensors.update(s.doc);
+    }
+    // View sectors: every sensor with the sensor tool or the layer toggle, else only a selected sensor.
+    const one = s.selection?.kind === 'sensor' ? s.selection.id : null;
+    this.sensors.setSectors(s.doc, this.network.graph, s.tool === 'sensor' || s.overlays.sensors ? 'all' : one !== null ? 'one' : 'none', one);
     if (this.dirty.vehicleTypes) {
       this.dirty.vehicleTypes = false;
       this.vehicles.syncTypes(s.doc);
@@ -342,6 +358,7 @@ export class CityRenderer {
     this.interpSum += interp;
     if (interp > this.interpMax) this.interpMax = interp;
     this.pedestrians.update(now, this.cam.controls.distance);
+    this.sensors.frame(this.cam.camera.position.x, this.cam.camera.position.z);
     this.buildings.setOccupancy(this.stream.latest());
     this.signals.update();
     this.pedSignals.update(now, Y_WALK);
@@ -349,6 +366,7 @@ export class CityRenderer {
     this.scenario.update(now);
     this.emergency.update(now);
     this.blackout.update(now, this.night, this.cam.controls.distance);
+    this.detection.update(now, this.cam.camera, this.width, this.height);
     this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.shadowCalls = 0;
@@ -482,6 +500,11 @@ export class CityRenderer {
     return (performance.now() - t0) / frames;
   }
 
+  /** Test/debug: sensor instances and view sectors currently drawn. */
+  sensorStats(): SensorStats {
+    return this.sensors.stats();
+  }
+
   /** Test/debug: highlight things currently drawn. */
   highlightStats(): HighlightStats {
     return this.highlights.stats();
@@ -496,6 +519,7 @@ export class CityRenderer {
     this.paving.dispose();
     this.sky.dispose();
     this.buildings.dispose();
+    this.sensors.dispose();
     this.vehicles.dispose();
     this.pedestrians.dispose();
     this.signals.dispose();
@@ -505,6 +529,7 @@ export class CityRenderer {
     this.scenario.dispose();
     this.emergency.dispose();
     this.blackout.dispose();
+    this.detection.dispose();
     this.ground.dispose();
     this.renderer.dispose();
   }

@@ -5,12 +5,14 @@ import {
   applyCommand,
   cloneJson,
   createEmptyDoc,
+  LIMITS,
   normalizeDoc,
   type CityDoc,
   type Command,
   type ParcelZone,
   type Peer,
   type Presence,
+  type SensorKind,
   type ServerMessage,
   type Vec2,
 } from '@smartcity/shared';
@@ -20,7 +22,7 @@ import { addHighlight, highlightFromBatch, initialHighlights, type Highlight, ty
 import type { ProposalStatus } from './proposal';
 import type { TransitSummary } from './transit';
 
-export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel' | 'street' | 'zoning';
+export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel' | 'street' | 'zoning' | 'sensor';
 /** Traffic facility tool sub-modes (교통 시설). */
 export type StreetMode = 'crosswalk' | 'signalCrosswalk' | 'speedBump' | 'schoolZone' | 'remove';
 /** Snap resolution in meters; 0 = off. Personal UI state, never stored in the doc. */
@@ -34,7 +36,8 @@ export type Selection =
   | { kind: 'segment'; id: string }
   | { kind: 'building'; id: string }
   | { kind: 'busStop'; id: string }
-  | { kind: 'parcel'; id: string };
+  | { kind: 'parcel'; id: string }
+  | { kind: 'sensor'; id: string };
 
 export type RoadMode = 'straight' | 'curve' | 'free';
 
@@ -57,6 +60,8 @@ export interface ToolOptions {
   zoningZone: 'residential' | 'commercial' | 'office';
   zoningDepth: 1 | 2 | 3 | 4;
   zoningErase: boolean;
+  /** Sensor tool (ADR 0013 §5): the kind placed next. */
+  sensorKind: SensorKind;
 }
 
 export interface PendingEntry {
@@ -88,6 +93,8 @@ export interface Overlays {
   violations: boolean;
   /** Zone-colored fill over lots (outlines are always drawn; the ground itself shows paving or lawn). */
   zones: boolean;
+  /** Sensor view sectors and covered lanes of every sensor (otherwise only with the sensor tool or a selected sensor). */
+  sensors: boolean;
 }
 
 /** Waiting for the server before the first welcome (drives the full-screen connect overlay). */
@@ -205,6 +212,11 @@ const ERROR_KO: [RegExp, string][] = [
   [/building type in use/, '이 타입의 건물이 남아 있습니다'],
   [/vehicle type in use/, '버스 노선이 이 차량 타입을 사용 중입니다'],
   [/rate limited/, '요청이 너무 많습니다. 잠시 후 다시 시도하세요'],
+  // Sensor ranges before the generic range message (first match wins).
+  [/sensor\.range out of range/, `감시 범위는 ${LIMITS.sensorRangeMin}~${LIMITS.sensorRangeMax}m여야 합니다`],
+  [/sensor\.fov out of range/, '시야각은 1°~360°여야 합니다'],
+  [/sensor\.heading out of range/, '방향 값이 허용 범위를 벗어났습니다'],
+  [/sensor\.t out of range/, '센서가 도로 범위를 벗어났습니다'],
   [/out of range/, '허용 범위를 벗어난 값입니다'],
   [/no lanes in that direction/, '그 방향에는 차선이 없습니다'],
   [/a line needs/, '노선에는 정류장이 2개 이상 필요합니다'],
@@ -251,7 +263,14 @@ const ERROR_KO: [RegExp, string][] = [
   [/cannot round the corner: the curve could not be checked against nearby roads/, '주변 도로와의 간격을 끝까지 확인하지 못했습니다 (검사 한도)'],
   [/cannot round the corner: the curve would cross another road/, '곡선이 다른 도로와 교차합니다'],
   [/cannot round the corner: the corner changed since it was planned/, '다른 사용자가 이 모서리를 먼저 바꿨습니다. 다시 시도하세요'],
+  [/cannot round the corner: a sensor is in the corner/, '모서리 구간에 센서가 있습니다'],
   [/fillet radius out of range/, '반경이 허용 범위를 벗어났습니다'],
+  // Sensors (ADR 0013 §4).
+  [/sensor exists/, '같은 이름의 센서가 이미 있습니다'],
+  [/unknown sensor/, '센서가 이미 바뀌었습니다. 다시 시도하세요'],
+  [/too many sensors/, '센서가 너무 많습니다'],
+  [/invalid sensor kind/, '알 수 없는 센서 종류입니다'],
+  [/invalid sensor side/, '센서 위치(도로 쪽)가 올바르지 않습니다'],
 ];
 
 function withResult(results: Record<number, string>, ref: number, outcome: string): Record<number, string> {
@@ -283,7 +302,7 @@ export function initialState(room: string, name: string): ClientState {
     offlineCity: null,
     offlineError: null,
     tool: 'select',
-    toolOptions: { roadTypeId: 'road-2', roadMode: 'straight', autoFillet: true, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false },
+    toolOptions: { roadTypeId: 'road-2', roadMode: 'straight', autoFillet: true, snapStep: 8, buildingTypeId: 'house', buildingRotation: 0, parcelZone: 'residential', parcelPolygon: false, streetMode: 'crosswalk', zoningZone: 'residential', zoningDepth: 2, zoningErase: false, sensorKind: 'cctv' },
     toolHint: '',
     selection: null,
     phaseHighlight: null,
@@ -306,7 +325,7 @@ export function initialState(room: string, name: string): ClientState {
     aiApplying: null,
     aiPending: {},
     session: 0,
-    overlays: { flow: false, shadows: true, violations: true, zones: false },
+    overlays: { flow: false, shadows: true, violations: true, zones: false, sensors: false },
     panel: 'inspector',
     render: { fps: 0, drawCalls: 0, triangles: 0 },
   };
@@ -554,5 +573,7 @@ export function selectionExists(doc: CityDoc, sel: Selection): boolean {
       return sel.id in doc.busStops;
     case 'parcel':
       return sel.id in doc.parcels;
+    case 'sensor':
+      return sel.id in doc.sensors;
   }
 }

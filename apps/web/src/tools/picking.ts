@@ -1,4 +1,4 @@
-// Document-space picking: nearest node / segment / building / bus stop / parcel around a ground point,
+// Document-space picking: nearest node / segment / building / bus stop / parcel / sensor around a ground point,
 // accelerated by a uniform spatial hash. Rebuild the index when the doc changes.
 
 import {
@@ -10,6 +10,7 @@ import {
   pointInPolygon,
   roadHalfWidth,
   sampleSegmentCurve,
+  sensorPose,
   type CityDoc,
   type Vec2,
 } from '@smartcity/shared';
@@ -26,13 +27,14 @@ export interface SegmentHit {
   curve: Vec2[];
 }
 
-type Kind = 'n' | 's' | 'b' | 'p' | 'q';
+type Kind = 'n' | 's' | 'b' | 'p' | 'q' | 'c';
 
 export class PickIndex {
   private cells = new Map<string, Set<string>>();
   private curves = new Map<string, Vec2[]>();
   private stopPos = new Map<string, Vec2>();
   private footprints = new Map<string, Vec2[][]>();
+  private sensorPos = new Map<string, Vec2>();
 
   constructor(private readonly doc: CityDoc) {
     for (const n of Object.values(doc.nodes)) this.insert('n', n.id, n.pos, n.pos);
@@ -66,6 +68,12 @@ export class PickIndex {
     for (const pc of Object.values(doc.parcels)) {
       const { min, max } = bounds(pc.polygon, 0);
       this.insert('q', pc.id, min, max);
+    }
+    for (const sn of Object.values(doc.sensors ?? {})) {
+      const pose = sensorPose(doc, sn);
+      if (!pose) continue;
+      this.sensorPos.set(sn.id, pose.pos);
+      this.insert('c', sn.id, pose.pos, pose.pos);
     }
   }
 
@@ -156,6 +164,20 @@ export class PickIndex {
     return best;
   }
 
+  nearestSensor(p: Vec2, r: number): { id: string; distance: number; pos: Vec2 } | null {
+    let best: { id: string; distance: number; pos: Vec2 } | null = null;
+    for (const id of this.near('c', p, r)) {
+      const q = this.sensorPos.get(id)!;
+      const d = dist(q, p);
+      if (d <= r && (!best || d < best.distance || (d === best.distance && id < best.id))) best = { id, distance: d, pos: q };
+    }
+    return best;
+  }
+
+  sensorPosition(sensorId: string): Vec2 | undefined {
+    return this.sensorPos.get(sensorId);
+  }
+
   stopPosition(stopId: string): Vec2 | undefined {
     return this.stopPos.get(stopId);
   }
@@ -195,15 +217,23 @@ export type PickResult =
   | { kind: 'segment'; id: string }
   | { kind: 'building'; id: string }
   | { kind: 'busStop'; id: string }
-  | { kind: 'parcel'; id: string };
+  | { kind: 'parcel'; id: string }
+  | { kind: 'sensor'; id: string };
 
-/** Priority: bus stop > node > building > segment > parcel (parcels only when asked for). */
+/** Pick radius of a sensor pole, meters (it stands on the sidewalk, next to stops and roads). */
+export const SENSOR_PICK_RADIUS = 3;
+
+/** Priority: sensor > bus stop > node > building > segment > parcel (parcels only when asked for). */
 export function pickAt(
   idx: PickIndex,
   p: Vec2,
-  opts: { nodes?: boolean; stops?: boolean; buildings?: boolean; segments?: boolean; parcels?: boolean } = {},
+  opts: { nodes?: boolean; stops?: boolean; buildings?: boolean; segments?: boolean; parcels?: boolean; sensors?: boolean } = {},
 ): PickResult | null {
-  const { nodes = true, stops = true, buildings = true, segments = true, parcels = false } = opts;
+  const { nodes = true, stops = true, buildings = true, segments = true, parcels = false, sensors = true } = opts;
+  if (sensors) {
+    const sn = idx.nearestSensor(p, SENSOR_PICK_RADIUS);
+    if (sn) return { kind: 'sensor', id: sn.id };
+  }
   if (stops) {
     const st = idx.nearestStop(p, 4);
     if (st) return { kind: 'busStop', id: st.id };

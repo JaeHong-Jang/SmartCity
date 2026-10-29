@@ -264,6 +264,10 @@ function StatusBar() {
         <input type="checkbox" checked={overlays.violations} onChange={(e) => store.set({ overlays: { ...overlays, violations: e.target.checked } })} />
         규제 위반
       </label>
+      <label className="toggle" title="모든 센서의 감시 범위(부채꼴)와 실제로 보는 차선 구간 · 보정 전 모의 값 · 건물 가림 미반영">
+        <input type="checkbox" data-overlay-sensors checked={overlays.sensors} onChange={(e) => store.set({ overlays: { ...overlays, sensors: e.target.checked } })} />
+        센서 범위
+      </label>
       <div className="spacer" />
       <span className="muted" title="Phase 1: 차량은 각자의 브라우저에서 계산되어 참여자마다 다를 수 있습니다">
         교통은 참여자별 미리보기

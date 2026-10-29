@@ -11,6 +11,7 @@ import {
   pointAtLength,
   rightNormal,
   scale,
+  sensorPose,
   slicePolyline,
   sub,
   type CityDoc,
@@ -22,7 +23,7 @@ import type { ClientState, ClientStore } from '../app/store';
 import type { SimulationStream } from '../sim/simStream';
 import { buildingGizmo } from '../tools/highlight';
 import type { ToolPreview } from '../tools/types';
-import { commandDomains, D_ALL, D_BUILDINGS, D_BUS_LINES, D_BUS_STOPS, D_PARCELS, D_ROADS, touchesSelection } from './dirty';
+import { commandDomains, D_ALL, D_BUILDINGS, D_BUS_LINES, D_BUS_STOPS, D_PARCELS, D_ROADS, D_SENSORS, touchesSelection } from './dirty';
 import { GhostBuilding } from './ghostBuilding';
 import { MeshBuilder } from './meshBuilder';
 import { centroid, ParcelLayer } from './parcels';
@@ -83,6 +84,19 @@ function ring(b: MeshBuilder, p: Vec2, r: number, w: number, color: string, y = 
   line(b, pts, w, color, y);
 }
 
+/** Filled view sector (apex at `p`, ±fov/2 around `yaw`; a disc for 360°). */
+export function fan(b: MeshBuilder, p: Vec2, yaw: number, fov: number, range: number, color: string, y = Y_OVER): void {
+  _c.set(color);
+  const span = Math.min(fov, Math.PI * 2);
+  const seg = Math.max(4, Math.ceil((span / (Math.PI * 2)) * 40));
+  const a0 = yaw - span / 2;
+  for (let i = 0; i < seg; i++) {
+    const x0 = a0 + (span * i) / seg;
+    const x1 = a0 + (span * (i + 1)) / seg;
+    b.tri(p.x, y, p.z, p.x + Math.cos(x1) * range, y, p.z + Math.sin(x1) * range, p.x + Math.cos(x0) * range, y, p.z + Math.sin(x0) * range, _c);
+  }
+}
+
 function outline(b: MeshBuilder, poly: readonly Vec2[], w: number, color: string, y = Y_OVER): void {
   line(b, closedRing(poly), w, color, y);
 }
@@ -121,6 +135,8 @@ interface PeerTag {
 export class OverlayLayer {
   readonly group = new THREE.Group();
   private preview: DynLayer;
+  /** Sensor sector fill of the tool preview (fainter than the preview lines). */
+  private previewFans: DynLayer;
   private peers: DynLayer;
   private pending: DynLayer;
   private flash: DynLayer;
@@ -168,6 +184,7 @@ export class OverlayLayer {
     this.pending = new DynLayer(this.group, 'pending', 0.5, 11);
     this.flash = new DynLayer(this.group, 'flash', 0.8, 12);
     this.preview = new DynLayer(this.group, 'preview', 0.6, 13);
+    this.previewFans = new DynLayer(this.group, 'preview-sectors', 0.2, 12);
     const cone = new THREE.ConeGeometry(1.6, 4, 12).rotateX(Math.PI).translate(0, 4, 0);
     this.cursorMesh = new THREE.InstancedMesh(cone, new THREE.MeshBasicMaterial({ color: '#ffffff' }), 64);
     this.cursorMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(64 * 3), 3);
@@ -188,6 +205,9 @@ export class OverlayLayer {
       for (const l of p.lines) line(b, l.pts, l.width, l.color, Y_OVER + 0.02);
       for (const pt of p.points) disc(b, pt.pos, pt.radius, pt.color, Y_OVER + 0.04);
       this.preview.set(b);
+      const f = new MeshBuilder();
+      for (const sc of p.sectors ?? []) fan(f, sc.pos, sc.yaw, sc.fov, sc.range, sc.color, Y_OVER + 0.015);
+      this.previewFans.set(f);
     }
 
     this.setDrawLabel(p.label);
@@ -230,6 +250,9 @@ export class OverlayLayer {
     }
     if (n[i++] !== p.points.length) return false;
     for (const pt of p.points) if (n[i++] !== pt.pos.x || n[i++] !== pt.pos.z || n[i++] !== pt.radius || c[k++] !== pt.color) return false;
+    const sectors = p.sectors ?? [];
+    if (n[i++] !== sectors.length) return false;
+    for (const sc of sectors) if (n[i++] !== sc.pos.x || n[i++] !== sc.pos.z || n[i++] !== sc.yaw || n[i++] !== sc.fov || n[i++] !== sc.range || c[k++] !== sc.color) return false;
     return i === n.length && k === c.length;
   }
 
@@ -245,6 +268,12 @@ export class OverlayLayer {
     for (const pt of p.points) {
       n.push(pt.pos.x, pt.pos.z, pt.radius);
       c.push(pt.color);
+    }
+    const sectors = p.sectors ?? [];
+    n.push(sectors.length);
+    for (const sc of sectors) {
+      n.push(sc.pos.x, sc.pos.z, sc.yaw, sc.fov, sc.range);
+      c.push(sc.color);
     }
     this.previewNums = n;
     this.previewCols = c;
@@ -271,7 +300,7 @@ export class OverlayLayer {
     this.stale = 0;
     const selStale = this.selectionStale;
     this.selectionStale = false;
-    if (d & (D_ROADS | D_BUILDINGS | D_BUS_STOPS | D_PARCELS) || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
+    if (d & (D_ROADS | D_BUILDINGS | D_BUS_STOPS | D_PARCELS | D_SENSORS) || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
     if (d & (D_PARCELS | D_BUILDINGS) || p.overlays?.violations !== s.overlays.violations) this.parcels.update(s.doc, s.overlays.violations);
     // Zone fill: on demand, and while working with lots.
     this.parcels.setFillVisible(s.overlays.zones || s.tool === 'parcel' || s.tool === 'zoning' || s.selection?.kind === 'parcel');
@@ -341,6 +370,12 @@ export class OverlayLayer {
       outline(b, pc.polygon, 1, color, Y_OVER + 0.01);
       return centroid(pc.polygon);
     }
+    const sn = doc.sensors[id];
+    const pose = sn ? sensorPose(doc, sn) : null;
+    if (pose) {
+      ring(b, pose.pos, 3, 0.5, color, Y_OVER + 0.01);
+      return pose.pos;
+    }
     return null;
   }
 
@@ -387,6 +422,11 @@ export class OverlayLayer {
       const st = doc.busStops[sel.id];
       const p = st ? stopPosition(doc, st) : null;
       if (p) ring(b, p, 4, 0.5, '#38bdf8');
+    } else if (sel?.kind === 'sensor') {
+      // The view sector itself is drawn by the sensor layer while a sensor is selected.
+      const sn = doc.sensors[sel.id];
+      const pose = sn ? sensorPose(doc, sn) : null;
+      if (pose) ring(b, pose.pos, 2.6, 0.45, '#38bdf8');
     }
     this.selection.set(b);
   }
@@ -624,7 +664,7 @@ export class OverlayLayer {
   }
 
   dispose(): void {
-    for (const l of [this.preview, this.peers, this.pending, this.flash, this.selection, this.transit, this.closures, this.phases, this.flow]) l.dispose();
+    for (const l of [this.preview, this.previewFans, this.peers, this.pending, this.flash, this.selection, this.transit, this.closures, this.phases, this.flow]) l.dispose();
     this.cursorMesh.geometry.dispose();
     (this.cursorMesh.material as THREE.Material).dispose();
     this.cursorMesh.dispose();

@@ -2,7 +2,8 @@
 
 import { createRoot } from 'react-dom/client';
 import * as THREE from 'three';
-import { buildingFootprints, ROOM_ID_RE } from '@smartcity/shared';
+import { buildingFootprints, cumulativeLengths, pointAtLength, ROOM_ID_RE, sensorPose } from '@smartcity/shared';
+import { compileSensorCoverage } from '@smartcity/sim';
 import { createDispatcher } from './app/dispatch';
 import { resumeImport } from './app/importExport';
 import { sameDisplayedStats } from './app/simStats';
@@ -14,7 +15,7 @@ import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsTransport';
 import { CityRenderer } from './render/CityRenderer';
 import { WorkerSimStream } from './sim/simStream';
-import { SimModeController } from './simmode/controller';
+import { DETECTION_FLASH_MS, SimModeController } from './simmode/controller';
 import { setSimModeController } from './simmode/instance';
 import { installSimModeInput } from './simmode/input';
 import { createFrozenView } from './simmode/frozenStore';
@@ -239,6 +240,11 @@ renderer.emergency.setSource({
   },
   node: (id) => simMode.copyCityDoc()?.nodes[id]?.pos ?? null,
 });
+renderer.detection.setSource({
+  flashes: () => simModeStore.getState().detections,
+  flashMs: DETECTION_FLASH_MS,
+  position: (id) => simModeStore.getState().events.find((e) => e.eventId === id)?.pos ?? null,
+});
 // Before the ToolController: while simulator mode is active the shared editing tools never see the left button.
 installSimModeInput(renderer.renderer.domElement, simMode, renderer.pickGround, renderer.groundPan);
 new ToolController(
@@ -248,7 +254,7 @@ new ToolController(
   renderer.pickGround,
   (p) => renderer.setPreview(p),
   (presence) => transport?.send({ t: 'presence', presence }),
-  { pan: renderer.groundPan, focus: (p) => renderer.focus(p), cursor: (p) => renderer.setCursor(p) },
+  { pan: renderer.groundPan, focus: (p) => renderer.focus(p), cursor: (p) => renderer.setCursor(p), roadGraph: () => renderer.roadNetwork.graph },
 );
 
 watchProposal(store);
@@ -299,6 +305,21 @@ if (import.meta.env.DEV) {
   (window as unknown as { __smartcity: unknown }).__smartcity = {
     store,
     renderer,
+    sensors: () => renderer.sensorStats(),
+    /** A sensor's mount point and view yaw, and the middle of each lane stretch it covers (the sim's coverage). */
+    sensorProbe(id: string) {
+      const doc = store.getState().doc;
+      const s = doc.sensors[id];
+      const pose = s ? sensorPose(doc, s) : null;
+      const graph = renderer.roadNetwork.graph;
+      if (!s || !pose || !graph) return null;
+      const cov = compileSensorCoverage(doc, graph).find((c) => c.sensorId === id);
+      const covered = (cov?.lanes ?? []).map((iv) => {
+        const lane = graph.lanes[graph.laneById.get(iv.laneId)!]!;
+        return pointAtLength(lane.points, cumulativeLengths(lane.points), (iv.sFrom + iv.sTo) / 2);
+      });
+      return { pos: pose.pos, yaw: pose.yaw, covered };
+    },
     simmode: {
       controller: simMode,
       store: simModeStore,
@@ -308,6 +329,7 @@ if (import.meta.env.DEV) {
       liveBuildings: () => Object.keys(store.getState().doc.buildings).length,
       scene: () => renderer.scenario.stats(),
       emergency: () => renderer.emergency.stats(),
+      detection: () => renderer.detection.stats(),
     },
     worldToScreen(x: number, z: number) {
       const rect = renderer.renderer.domElement.getBoundingClientRect();

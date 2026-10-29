@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyDoc, FACILITY_PRESETS, type CityDoc } from '@smartcity/shared';
-import type { ResponsePolicy, ScenarioInput, ScenarioKpi, ScenarioRecord, SimSnapshot } from '@smartcity/sim';
+import type { DetectionMode, ResponsePolicy, ScenarioInput, ScenarioKpi, ScenarioRecord, SimSnapshot } from '@smartcity/sim';
 import type { WorkerSpeed } from '../sim/protocol';
 import type { ScenarioReply, SimulationStream } from '../sim/simStream';
 import { SIM_STOPPED, SimModeController, type CopyStream } from './controller';
@@ -19,7 +19,7 @@ class FakeStream implements CopyStream {
   snap: SimSnapshot | null = null;
   speeds: WorkerSpeed[] = [];
   inits: { doc: CityDoc; seed?: number; scenario?: boolean }[] = [];
-  records: { record: ScenarioRecord; reroute?: boolean }[] = [];
+  records: { record: ScenarioRecord; reroute?: boolean; detection?: DetectionMode }[] = [];
   runs: { tick: number; kpiEvery?: number }[] = [];
   cancels = 0;
   policies: ResponsePolicy[] = [];
@@ -36,7 +36,7 @@ class FakeStream implements CopyStream {
   previousAt() { return 0; }
   subscribe(cb: (s: SimSnapshot) => void) { this.subs.add(cb); return () => this.subs.delete(cb); }
   init(doc: CityDoc, seed?: number, opts: { scenario?: boolean } = {}) { this.inits.push({ doc, seed, scenario: opts.scenario }); }
-  initRecord(record: ScenarioRecord, reroute?: boolean) { this.records.push({ record, reroute }); }
+  initRecord(record: ScenarioRecord, reroute?: boolean, detection?: DetectionMode) { this.records.push({ record, reroute, detection }); }
   runTo(tick: number, opts: { kpiEvery?: number } = {}) { this.runs.push({ tick, kpiEvery: opts.kpiEvery }); }
   cancelRun() { this.cancels++; }
   setSpeed(s: WorkerSpeed) { this.speeds.push(s); }
@@ -126,7 +126,8 @@ describe('SimModeController', () => {
     expect(copy.inits[0]!.doc).not.toBe(e.doc);
     expect(copy.inits[0]!.doc).toEqual(e.doc);
     expect(copy.inits[0]!.seed).toBe(9);
-    expect(copy.policies).toEqual([{ reroute: true, informedShare: 0.7 }]);
+    // Detection is always explicit (ADR 0013 §1: a policy without it means legacy).
+    expect(copy.policies).toEqual([{ reroute: true, informedShare: 0.7, detection: 'legacy' }]);
     expect(copy.inits[0]!.scenario).toBe(true); // scenario mode from tick 0, warm-up included
     expect(copy.speeds).toEqual([0]); // real-time loop held while runTo fast-forwards
     expect(copy.runs).toEqual([{ tick: WARMUP_TICKS, kpiEvery: 60 }]);
@@ -209,7 +210,8 @@ describe('SimModeController', () => {
     const copy = e.streams()[0]!;
     copy.done(WARMUP_TICKS);
     expect(e.c.setPolicy({ reroute: false, informedShare: 0.5 })).toBe(true);
-    expect(e.store.getState().policy).toEqual({ reroute: false, informedShare: 0.5 });
+    expect(e.store.getState().policy).toEqual({ reroute: false, informedShare: 0.5, detection: 'legacy' });
+    expect(copy.policies.at(-1)).toEqual({ reroute: false, informedShare: 0.5, detection: 'legacy' });
     e.c.placeClosure('s1', DEFAULT_ARMED.closure);
     expect(e.c.setPolicy({ reroute: true, informedShare: 0.9 })).toBe(false);
   });
@@ -621,5 +623,87 @@ describe('SimModeController', () => {
     (snap.scenario as { kpi: ScenarioKpi }).kpi = { ...kpi(WARMUP_TICKS + 1), unpoweredSignals: 5, darkSignals: 2, unpoweredBuildings: 7 };
     for (const cb of (copy as unknown as { subs: Set<(s: SimSnapshot) => void> }).subs) cb(snap);
     expect(e.store.getState().power).toEqual({ dark: 2, battery: 3, buildings: 7, queue: 0 });
+  });
+
+  it('preset ② replays the same record with the other detection mode only (reports ↔ sensors), sensors = the ON side', () => {
+    const e = setup();
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    expect(e.c.setPolicy({ reroute: true, informedShare: 0.7, detection: 'reports' })).toBe(true);
+    expect(copy.policies.at(-1)).toEqual({ reroute: true, informedShare: 0.7, detection: 'reports' });
+    for (let t = WARMUP_TICKS + 60; t <= 1800; t += 60) copy.emit(t);
+    e.c.placeClosure('s1', DEFAULT_ARMED.closure);
+    for (let t = 1860; t <= 2400; t += 60) copy.emit(t);
+    e.c.setComparePreset('detection');
+    expect(e.c.compare()).toBe(true);
+    const cmp = e.streams()[1]!;
+    expect(cmp.records[0]).toMatchObject({ reroute: undefined, detection: 'sensors' });
+    cmp.done(2400);
+    const st = e.store.getState();
+    expect(st.compare!.preset).toBe('detection');
+    // The screen ran 'reports' (the OFF side); the replay is the sensors side.
+    expect(st.compare!.off.at(-1)!.tick).toBe(2400);
+    expect(st.compare!.on).toHaveLength(st.compare!.off.length);
+  });
+
+  it('preset ② needs reports or sensors on screen (legacy cannot be compared); preset ① still replays with the opposite reroute', () => {
+    const e = setup();
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    for (let t = WARMUP_TICKS + 60; t <= 2400; t += 60) copy.emit(t);
+    expect(e.c.detectionCompareBlock()).not.toBeNull();
+    expect(e.c.compare('detection')).toBe(false);
+    expect(e.store.getState().error).toContain('감지 비교');
+    expect(e.c.liveWorkers()).toBe(1);
+    expect(e.c.compare('smartResponse')).toBe(true);
+    expect(e.streams()[1]!.records[0]).toMatchObject({ reroute: false, detection: undefined });
+  });
+
+  it('a detection outcome notes the row and adds a map pulse ("CCTV 감지" / "신고 접수"); live detection KPIs follow the snapshot', () => {
+    const e = setup();
+    e.doc.sensors['cam1'] = { id: 'cam1', kind: 'cctv', segmentId: 's1', t: 0.5, side: 'right', heading: 0, fov: 1, range: 100 };
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    copy.done(WARMUP_TICKS);
+    expect(e.store.getState().sensors).toBe(1);
+    e.c.setPolicy({ reroute: true, informedShare: 0.7, detection: 'sensors' });
+    e.c.placeClosure('s1', DEFAULT_ARMED.closure);
+    e.c.placeClosure('s1', DEFAULT_ARMED.closure);
+    const [a, b] = e.store.getState().events;
+    copy.outcomes([
+      { eventId: a!.eventId, tick: 1300, kind: 'detection.known', applied: true, reason: 'sensor cam1, 0.4분' },
+      { eventId: b!.eventId, tick: 1300, kind: 'detection.known', applied: true, reason: 'report, 3.0분' },
+    ]);
+    const st = e.store.getState();
+    expect(st.events[0]!.detected).toBe('CCTV 감지 · 발생 0.4분 후');
+    expect(st.events[1]!.detected).toBe('신고 접수 · 발생 3.0분 후');
+    expect(st.detections.map((d) => [d.label, d.bySensor])).toEqual([
+      ['CCTV 감지', true],
+      ['신고 접수', false],
+    ]);
+    expect(st.detections.every((d) => d.pos === st.events.find((r) => r.eventId === d.eventId)!.pos)).toBe(true);
+    const snap = { ...copy.snap!, tick: WARMUP_TICKS + 1 } as SimSnapshot;
+    const detection = { tracked: 2, covered: 1, detected: 2, bySensor: 1, avgDelay: 1.7, maxDelay: 3, undetectedNow: 0, undetectedElapsedSum: 0, oldestUndetectedMinutes: 0, missed: 0, missedDamaged: 0, exposedVehicles: 3, onSiteRecoveries: 1 };
+    (snap.scenario as { kpi: ScenarioKpi }).kpi = { ...kpi(WARMUP_TICKS + 1), detection };
+    for (const cb of (copy as unknown as { subs: Set<(s: SimSnapshot) => void> }).subs) cb(snap);
+    expect(e.store.getState().detection).toEqual(detection);
+  });
+
+  it('a city with sensors starts in sensors + reports; without sensors in legacy (as before); restart keeps the choice', () => {
+    const plain = setup();
+    plain.c.enter();
+    expect(plain.streams()[0]!.policies[0]!.detection).toBe('legacy');
+    const e = setup();
+    e.doc.sensors['cam1'] = { id: 'cam1', kind: 'cctv', segmentId: 's1', t: 0.5, side: 'right', heading: 0, fov: 1, range: 100 };
+    e.c.enter();
+    const copy = e.streams()[0]!;
+    expect(copy.policies[0]).toEqual({ reroute: true, informedShare: 0.7, detection: 'sensors' });
+    expect(e.store.getState().policy.detection).toBe('sensors');
+    copy.done(WARMUP_TICKS);
+    expect(e.c.setPolicy({ ...e.store.getState().policy, detection: 'reports' })).toBe(true); // still changeable before the first event
+    e.c.restart();
+    expect(e.streams().at(-1)!.policies[0]!.detection).toBe('reports');
   });
 });

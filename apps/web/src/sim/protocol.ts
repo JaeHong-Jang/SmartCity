@@ -1,8 +1,8 @@
 // Messages between the main thread and sim.worker.ts.
 
 import type { CityDoc, Command } from '@smartcity/shared';
-import { SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS } from '@smartcity/sim';
-import type { ResponsePolicy, ScenarioInput, ScenarioKpi, ScenarioOutcome, ScenarioRecord, ScenarioResult, Simulation, SimSnapshot, SnapshotBuffers } from '@smartcity/sim';
+import { DETECTION_MODES, SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS } from '@smartcity/sim';
+import type { DetectionMode, ResponsePolicy, ScenarioInput, ScenarioKpi, ScenarioOutcome, ScenarioRecord, ScenarioResult, Simulation, SimSnapshot, SnapshotBuffers } from '@smartcity/sim';
 
 export type WorkerSpeed = 0 | 1 | 2 | 4;
 
@@ -15,8 +15,11 @@ export type ToWorker =
    * from tick 0 (SimOptions.scenario): warm-up and experiment run under scenario rules, records replay exactly.
    */
   | { t: 'init'; doc: CityDoc; seed?: number; scenario?: boolean }
-  /** Replay a record from tick 0 (no warm-up run; use runTo). `reroute` overrides the policy's reroute everywhere (ON/OFF compare). */
-  | { t: 'initRecord'; record: ScenarioRecord; reroute?: boolean }
+  /**
+   * Replay a record from tick 0 (no warm-up run; use runTo). `reroute` overrides the policy's reroute everywhere
+   * (preset ① ON/OFF), `detection` the detection mode everywhere (preset ② reports vs sensors, ADR 0013 §1).
+   */
+  | { t: 'initRecord'; record: ScenarioRecord; reroute?: boolean; detection?: DetectionMode }
   | { t: 'command'; cmd: Command }
   | { t: 'setSpeed'; speed: WorkerSpeed }
   | { t: 'returnBuffers'; buffers: SnapshotBuffers }
@@ -122,6 +125,8 @@ export function inputShapeError(x: unknown): string | null {
     if (!(typeof share === 'number' && share >= 0 && share <= 1)) return 'informedShare는 0..1이어야 합니다';
     if (x.params.preempt !== undefined && x.params.preempt !== 0 && x.params.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
     if (x.params.battery !== undefined && x.params.battery !== 0 && x.params.battery !== 1) return 'battery는 0 또는 1이어야 합니다';
+    const det = x.params.detection;
+    if (det !== undefined && !(typeof det === 'number' && Number.isInteger(det) && det >= 0 && det < DETECTION_MODES.length)) return 'detection은 0(즉시), 1(신고), 2(센서+신고)여야 합니다';
   }
   return null;
 }
@@ -129,6 +134,7 @@ export function inputShapeError(x: unknown): string | null {
 const SPEEDS = new Set([0, 1, 2, 4]);
 const optNumber = (x: unknown): boolean => x === undefined || (typeof x === 'number' && Number.isFinite(x));
 const optBool = (x: unknown): boolean => x === undefined || typeof x === 'boolean';
+const optDetection = (x: unknown): boolean => x === undefined || (DETECTION_MODES as readonly unknown[]).includes(x);
 
 /** Top-level shape check of anything posted to the worker. Null = usable; else why not (answered, never fatal). */
 export function toWorkerError(m: unknown): string | null {
@@ -137,7 +143,7 @@ export function toWorkerError(m: unknown): string | null {
     case 'init':
       return isObj(m.doc) && optNumber(m.seed) && optBool(m.scenario) ? null : 'init: doc 객체, seed 수, scenario boolean';
     case 'initRecord':
-      return isObj(m.record) && isObj(m.record.doc) && optBool(m.reroute) ? null : 'initRecord: record 객체(doc 포함), reroute boolean';
+      return isObj(m.record) && isObj(m.record.doc) && optBool(m.reroute) && optDetection(m.detection) ? null : 'initRecord: record 객체(doc 포함), reroute boolean, detection legacy | reports | sensors';
     case 'command':
       return isObj(m.cmd) && typeof m.cmd.type === 'string' ? null : 'command: cmd 객체';
     case 'setSpeed':

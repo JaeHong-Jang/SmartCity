@@ -2,11 +2,12 @@
 
 import { useEffect, useRef } from 'react';
 import './blackout.css';
-import { CLOCK_SCALE } from '@smartcity/sim';
+import { CLOCK_SCALE, DETECTION_MODES, type ScenarioKpi } from '@smartcity/sim';
 import { formatClock } from '../../render/dayNight';
 import { simModeController } from '../../simmode/instance';
 import { alignKpiSeries, inclusiveResponseTime, KPI_METRICS, rebaseSeries } from '../../simmode/kpiSeries';
 import { blackoutState, dispatchText, incidentText, powerSummaryText } from '../../simmode/emergencyText';
+import { DETECTION_MODE_LABEL, detectionSummaryText, responseBreakdownText } from '../../simmode/detectionText';
 import { facilityHint, FACILITY_SUMMARY, SUPPLY_MODEL_NOTE } from '../../simmode/facilities';
 import { DEFAULT_ARMED, useSimMode, type EventKind, type EventRow } from '../../simmode/store';
 import { ticksToGameMin, WARMUP_GAME_MIN, WARMUP_TICKS } from '../../simmode/time';
@@ -194,6 +195,39 @@ function Palette() {
           onChange={(e) => c.setPolicy({ ...s.policy, informedShare: Number(e.target.value) / 100 })}
         />
       </label>
+      <h3>감지 모드: 사고·화재를 도시가 언제 아는가</h3>
+      <div className="sim-blackout-mode" role="group" aria-label="감지 모드">
+        {DETECTION_MODES.map((m) => (
+          <button
+            key={m}
+            data-simmode-detection={m}
+            className={(s.policy.detection ?? 'legacy') === m ? 'active' : ''}
+            disabled={!ready || locked}
+            title={m === 'legacy' ? '사건 발생 즉시 안다 (기존 동작)' : m === 'reports' ? '시민 신고가 들어와야 안다 (센서 미사용 기준)' : '시민 신고와 센서 감지 중 빠른 쪽에 안다'}
+            onClick={() => c.setPolicy({ ...s.policy, detection: m })}
+          >
+            {DETECTION_MODE_LABEL[m]}
+          </button>
+        ))}
+      </div>
+      <span className="muted" data-simmode-sensor-count>
+        사본 센서 {s.sensors}개 · 신고·센서 지연은 보정 전 모의 값 · 건물 가림 미반영
+      </span>
+      {s.policy.detection === 'sensors' && s.sensors === 0 && (
+        <span className="sim-error" role="status">
+          사본에 센서가 없어 '신고만'과 결과가 같습니다
+        </span>
+      )}
+      {s.detection && (s.policy.detection ?? 'legacy') !== 'legacy' && (
+        <span className="sim-power-line" data-simmode-detection-kpi title="도시 전체의 현재 값 (게임 모델)">
+          {detectionSummaryText(s.detection)}
+        </span>
+      )}
+      {s.response && s.response.arrivals > 0 && (
+        <span className="sim-power-line" data-simmode-response-breakdown>
+          {responseBreakdownText(s.response)}
+        </span>
+      )}
       <h3>활성·예정 사건</h3>
       <ul className="sim-events" data-simmode-events>
         {s.events.length === 0 && <li className="muted">아직 없음</li>}
@@ -214,6 +248,11 @@ function Palette() {
               {e.note && (
                 <span className="muted" data-simmode-note>
                   {e.note}
+                </span>
+              )}
+              {e.detected && (
+                <span className="muted" data-simmode-detected>
+                  {e.detected}
                 </span>
               )}
               {e.endError && (
@@ -238,14 +277,33 @@ function Palette() {
           {powerSummaryText(s.power)}
         </span>
       )}
+      <div className="sim-blackout-mode" role="group" aria-label="비교 프리셋">
+        <button data-simmode-preset="smartResponse" className={s.comparePreset === 'smartResponse' ? 'active' : ''} title="같은 기록을 스마트 대응 OFF / ON으로 다시 돌려 비교합니다" onClick={() => c.setComparePreset('smartResponse')}>
+          ① 스마트 대응
+        </button>
+        <button data-simmode-preset="detection" className={s.comparePreset === 'detection' ? 'active' : ''} title={c.detectionCompareBlock() ?? '같은 기록을 신고만 / 센서+신고로 다시 돌려 비교합니다'} onClick={() => c.setComparePreset('detection')}>
+          ② 신고 vs 센서
+        </button>
+      </div>
+      {s.comparePreset === 'detection' && c.detectionCompareBlock() && (
+        <span className="muted" data-simmode-preset-block>
+          {c.detectionCompareBlock()}
+        </span>
+      )}
       <div className="row wrap">
         {s.phase === 'comparing' ? (
           <button className="danger" data-simmode-compare-cancel onClick={() => c.cancelCompare()}>
             비교 취소
           </button>
         ) : (
-          <button className="primary" data-simmode-compare disabled={!ready || s.aligning || s.tick < WARMUP_TICKS + 60} onClick={() => c.compare()} title="반대 정책을 별도 워커에서 같은 tick까지 돌려 KPI를 비교합니다">
-            ON/OFF 비교 실행
+          <button
+            className="primary"
+            data-simmode-compare
+            disabled={!ready || s.aligning || s.tick < WARMUP_TICKS + 60 || (s.comparePreset === 'detection' && !!c.detectionCompareBlock())}
+            onClick={() => c.compare()}
+            title="한 조건만 바꾼 실행을 별도 워커에서 같은 tick까지 돌려 KPI를 비교합니다"
+          >
+            {s.comparePreset === 'detection' ? '신고만 / 센서+신고 비교 실행' : 'ON/OFF 비교 실행'}
           </button>
         )}
       </div>
@@ -257,10 +315,47 @@ function fmtMin(sec: number): string {
   return ((sec * CLOCK_SCALE) / 60).toFixed(1);
 }
 
+/** One side of the detection table; `data-avg-delay` carries the raw game minutes (tests). */
+/** Sensor coverage is counted only when sensors are used: a reports-only run always shows 0%. */
+const REPORTS_COVER_NOTE = '신고만 모드에서는 센서를 쓰지 않아 0%';
+
+function detectionLine(k: ScenarioKpi | undefined, label: string, side: 'on' | 'off', reportsOnly: boolean) {
+  const d = k?.detection;
+  if (!k || !d) return null;
+  const r = k.response;
+  return (
+    <tr data-simmode-detection-row={side} data-avg-delay={d.avgDelay} data-detected={d.detected} data-tracked={d.tracked}>
+      <th>{label}</th>
+      <td>
+        {d.detected > 0 ? `${d.avgDelay.toFixed(1)}분 / ${d.maxDelay.toFixed(1)}분` : '—'}
+      </td>
+      <td>
+        {d.detected} / {d.tracked}
+      </td>
+      <td>{d.bySensor}</td>
+      <td data-simmode-cover title={reportsOnly ? REPORTS_COVER_NOTE : undefined}>
+        {d.tracked > 0 ? `${Math.round((d.covered / d.tracked) * 100)}%` : '—'}
+        {reportsOnly && <span className="muted"> (센서 미사용)</span>}
+      </td>
+      <td>
+        {d.undetectedNow}
+        {d.undetectedNow > 0 ? ` (${d.oldestUndetectedMinutes.toFixed(1)}분)` : ''}
+      </td>
+      <td>
+        {d.missed} / {d.missedDamaged}
+      </td>
+      <td>{d.exposedVehicles}</td>
+      <td>{d.onSiteRecoveries}</td>
+      <td>{r && r.arrivals > 0 ? `${r.detect.toFixed(1)} + ${r.dispatchWait.toFixed(1)} + ${r.travel.toFixed(1)}분` : '—'}</td>
+    </tr>
+  );
+}
+
 function ComparePanel() {
   const phase = useSimMode((s) => s.phase);
   const progress = useSimMode((s) => s.progress);
   const cmp = useSimMode((s) => s.compare);
+  const policy = useSimMode((s) => s.policy);
   if (phase === 'comparing') {
     return (
       <aside className="panel sim-compare" data-simmode-comparing>
@@ -302,11 +397,20 @@ function ComparePanel() {
         </td>
       </tr>
     );
+  const det = cmp.preset === 'detection';
+  // Preset ② replays the off side as reports only; preset ① keeps the screen's detection mode on both sides.
+  const reportsOn = !det && policy.detection === 'reports';
+  const reportsOff = det || policy.detection === 'reports';
+  const onName = det ? '센서+신고' : 'ON';
+  const offName = det ? '신고만' : 'OFF';
+  const showDetection = det || !!(on?.detection?.tracked || off?.detection?.tracked);
   return (
-    <aside className="panel sim-compare" data-simmode-result>
-      <h3>스마트 대응 ON / OFF 비교 · 준비 운행 이후 (sim tick {WARMUP_TICKS}–{cmp.untilTick})</h3>
+    <aside className="panel sim-compare" data-simmode-result data-preset={cmp.preset}>
+      <h3>
+        {det ? '감지 비교: 신고만 / 센서+신고' : '스마트 대응 ON / OFF 비교'} · 준비 운행 이후 (sim tick {WARMUP_TICKS}–{cmp.untilTick})
+      </h3>
       <div className="sim-legend">
-        <span className="swatch-on" /> ON <span className="swatch-off" /> OFF
+        <span className="swatch-on" /> {onName} <span className="swatch-off" /> {offName}
       </div>
       <div className="sim-charts">
         {KPI_METRICS.map((m) => (
@@ -333,15 +437,46 @@ function ComparePanel() {
           </tr>
         </thead>
         <tbody>
-          {line(on, 'ON')}
-          {line(off, 'OFF')}
+          {line(on, onName)}
+          {line(off, offName)}
         </tbody>
       </table>
       </div>
+      {showDetection && (
+        <div className="sim-table-wrap">
+          <table className="sim-table" data-simmode-detection-table>
+            <thead>
+              <tr>
+                <th>감지 (사고·화재)</th>
+                <th>감지 지연 평균 / 최대</th>
+                <th>인지 / 대상</th>
+                <th>센서 먼저</th>
+                <th>센서 커버</th>
+                <th>미인지 (최장)</th>
+                <th>인지 전 종료 / 피해</th>
+                <th>인지 전 노출 차량</th>
+                <th>현장 복구</th>
+                <th>대응 = 감지 + 출동 대기 + 이동</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detectionLine(on, onName, 'on', reportsOn)}
+              {detectionLine(off, offName, 'off', reportsOff)}
+            </tbody>
+          </table>
+          {(reportsOn || reportsOff) && (
+            <p className="muted" data-simmode-cover-note>
+              센서 커버: {REPORTS_COVER_NOTE}입니다 (사건이 센서 범위에 있었는지는 센서+신고 쪽에서 봅니다)
+            </p>
+          )}
+        </div>
+      )}
       <p className="muted" data-simmode-response-note>
         평균 대응 시간: 도착 전 출동은 경과 시간으로 계산(하한). 도착한 차량만의 평균은 "도착 평균"입니다.
       </p>
-      <p className="muted">미완료 = 아직 도로 위에 있는 차량, 포기 = 경로 없음·막힌 출발지로 시작하지 못한 통행. ON이 항상 낫지 않을 수 있음 — 게임 모델(보정 전 값).</p>
+      <p className="muted">
+        미완료 = 아직 도로 위에 있는 차량, 포기 = 경로 없음·막힌 출발지로 시작하지 못한 통행. {det ? '센서는 신고보다 늦을 수도 있음(그때는 신고가 먼저)' : 'ON이 항상 낫지 않을 수 있음'} — 게임 모델(보정 전 값){det ? ' · 건물 가림 미반영' : ''}.
+      </p>
     </aside>
   );
 }

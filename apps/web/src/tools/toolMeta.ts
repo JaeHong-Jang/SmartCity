@@ -11,4 +11,6 @@ export const TOOL_META: readonly { id: ToolId; label: string; key: string }[] = 
   { id: 'parcel', label: '필지', key: '7' },
   { id: 'street', label: '교통 시설', key: '8' },
   { id: 'zoning', label: '조닝', key: '9' },
+  // 0: next to 9 on the number row; no camera key (WASD, QE, RF) or tool option key (C B T G P [ ] , .) uses it.
+  { id: 'sensor', label: '센서', key: '0' },
 ];

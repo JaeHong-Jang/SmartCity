@@ -2,7 +2,7 @@
 // the switchable stream. Nothing here talks to the server or dispatches a Command.
 
 import { cloneJson, type CityDoc } from '@smartcity/shared';
-import { compileNetwork, DEFAULT_POLICY, type ResponsePolicy, type RoadGraph, type ScenarioInput, type ScenarioTarget, type SimSnapshot } from '@smartcity/sim';
+import { compileNetwork, DEFAULT_POLICY, type DetectionKpi, type ResponseBreakdown, type ResponsePolicy, type RoadGraph, type ScenarioInput, type ScenarioTarget, type SimSnapshot } from '@smartcity/sim';
 import type { WorkerSpeed } from '../sim/protocol';
 import type { FastForwardControl, ScenarioReply, ScenarioControl, SimulationStream } from '../sim/simStream';
 import { applyOutcomes, reconcileEvents, type EventOutcome, type PendingEnd } from './eventState';
@@ -12,7 +12,8 @@ import { accidentPlace, blackoutAreaPlace, blackoutSubstationPlace, closurePlace
 import { KPI_EVERY, KpiCollector } from './kpiSeries';
 import { transition, type SimAction } from './machine';
 import { accidentParams, closureParams, eventEndTick, ScenarioRecorder, surgeParams } from './record';
-import { simModeStore, type ArmedEvent, type EventKind, type EventRow, type SimModeStore } from './store';
+import { simModeStore, type ArmedEvent, type ComparePreset, type DetectionFlash, type EventKind, type EventRow, type SimModeStore } from './store';
+import { detectionLabel, detectionNote } from './detectionText';
 import { EVENT_LEAD_TICKS, gameMinToTicks, WARMUP_TICKS } from './time';
 
 /** What the controller needs from a worker stream (WorkerSimStream implements it). */
@@ -45,7 +46,15 @@ export interface SimModeDeps {
 
 export const SIM_STOPPED = "시뮬레이션이 중단되었습니다 — '최신 도시로 다시 시작'을 눌러 주세요";
 const TICK_PUBLISH_MS = 200;
-const DEFAULT_POLICY_ON: ResponsePolicy = { reroute: true, informedShare: 0.7 };
+/** Detection is always sent explicitly: a policy without it means `legacy` (ADR 0013 §1). */
+const DEFAULT_POLICY_ON: ResponsePolicy = { reroute: true, informedShare: 0.7, detection: 'legacy' };
+/** How long a detection pulse and its label stay on the map, ms (render/detection.ts). */
+export const DETECTION_FLASH_MS = 6000;
+
+/** `policy` with its detection mode spelled out (omitted = legacy). */
+export const withDetection = (p: ResponsePolicy): ResponsePolicy => ({ ...p, detection: p.detection ?? 'legacy' });
+
+const sameJson = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 export class SimModeController {
   private readonly store: SimModeStore;
@@ -153,7 +162,9 @@ export class SimModeController {
     this.move('enter');
     this.deps.setEditLock(true);
     this.deps.setMainSpeed(0);
-    this.store.set({ policy: { ...DEFAULT_POLICY_ON } });
+    // A city with sensors starts in "센서+신고"; without any, "즉시 인지 (기존)" exactly as before. Changeable until the first event.
+    const hasSensors = Object.keys(this.deps.getDoc().sensors ?? {}).length > 0;
+    this.store.set({ policy: { ...DEFAULT_POLICY_ON, detection: hasSensors ? 'sensors' : 'legacy' } });
     this.begin();
   }
 
@@ -190,6 +201,10 @@ export class SimModeController {
       error: null,
       fatal: false,
       facilities: countFacilities(doc),
+      sensors: Object.keys(doc.sensors ?? {}).length,
+      detection: null,
+      response: null,
+      detections: [],
     });
 
     const copy = this.spawn();
@@ -212,7 +227,7 @@ export class SimModeController {
     // paused while runTo fast-forwards the warm-up.
     copy.init(doc, seed, { scenario: true });
     copy.setSpeed(0);
-    copy.setPolicy(policy);
+    copy.setPolicy(withDetection(policy));
     copy.runTo(WARMUP_TICKS, { progressEvery: 60, kpiEvery: KPI_EVERY });
     this.deps.proxy.use(copy);
     this.deps.setViewDoc?.(doc);
@@ -251,6 +266,10 @@ export class SimModeController {
       const power = { dark: k.darkSignals, battery: Math.max(0, k.unpoweredSignals - k.darkSignals), buildings: k.unpoweredBuildings, queue: Math.round(k.darkQueueVehicleMinutes * 10) / 10 };
       const cur = this.store.getState().power;
       if (power.dark !== cur.dark || power.battery !== cur.battery || power.buildings !== cur.buildings || power.queue !== cur.queue) this.store.set({ power });
+      const det: DetectionKpi | null = k.detection ?? null;
+      const resp: ResponseBreakdown | null = k.response ?? null;
+      const st = this.store.getState();
+      if (!sameJson(det, st.detection) || !sameJson(resp, st.response)) this.store.set({ detection: det, response: resp });
     }
     if (this.store.getState().phase !== 'warming') this.publish({ tick: snap.tick });
   }
@@ -301,8 +320,18 @@ export class SimModeController {
 
   private onOutcomes(outcomes: readonly EventOutcome[]): void {
     const rows = this.store.getState().events;
-    const next = applyOutcomes(rows, outcomes, this.endOf);
+    let next = applyOutcomes(rows, outcomes, this.endOf);
+    const flashes: DetectionFlash[] = [];
+    for (const o of outcomes) {
+      const note = detectionNote(o, this.copyDoc);
+      if (note === null) continue;
+      next = next.map((r) => (r.eventId === o.eventId ? { ...r, detected: note } : r));
+      const row = next.find((r) => r.eventId === o.eventId);
+      const label = detectionLabel(o, this.copyDoc);
+      if (row && label) flashes.push({ eventId: o.eventId, label: label.text, bySensor: label.bySensor, pos: row.pos, at: this.now() });
+    }
     if (next !== rows) this.store.set({ events: next });
+    if (flashes.length) this.store.set({ detections: [...this.store.getState().detections, ...flashes].slice(-8) });
   }
 
   /** A policy change the sim recorded as a tick-aligned input belongs to the record. */
@@ -452,16 +481,35 @@ export class SimModeController {
   /** Policy can only change before the first event: the record holds one policy for the whole run. */
   setPolicy(policy: ResponsePolicy): boolean {
     if (!this.ready() || this.store.getState().events.length > 0) return false;
-    this.copy!.setPolicy(policy);
-    this.store.set({ policy: { ...policy } });
+    const p = withDetection(policy);
+    this.copy!.setPolicy(p);
+    this.store.set({ policy: p });
     return true;
+  }
+
+  setComparePreset(preset: ComparePreset): void {
+    if (this.store.getState().comparePreset !== preset) this.store.set({ comparePreset: preset });
+  }
+
+  /** Why preset ② cannot run with the policy on screen (null = it can). */
+  detectionCompareBlock(): string | null {
+    const d = this.store.getState().policy.detection ?? 'legacy';
+    return d === 'reports' || d === 'sensors' ? null : "감지 비교는 감지 모드가 '신고만' 또는 '센서+신고'일 때 실행합니다 (사건을 넣기 전에 선택)";
   }
 
   // ---------- compare ----------
 
-  /** Replay the record with the opposite reroute on a headless worker up to the copy's current grid tick. */
-  compare(): boolean {
+  /**
+   * Replay the record on a headless worker up to the copy's current grid tick with one condition flipped:
+   * ① the opposite reroute, ② the other detection mode (reports ↔ sensors; ADR 0013 §1). One condition at a time.
+   */
+  compare(preset: ComparePreset = this.store.getState().comparePreset): boolean {
     if (!this.ready() || this.aligning) return false;
+    const block = preset === 'detection' ? this.detectionCompareBlock() : null;
+    if (block) {
+      this.store.set({ error: block });
+      return false;
+    }
     const copy = this.copy!;
     const untilTick = Math.floor(this.tickNow() / KPI_EVERY) * KPI_EVERY;
     if (untilTick <= WARMUP_TICKS) {
@@ -470,6 +518,9 @@ export class SimModeController {
     }
     const record = this.recorder!.toRecord();
     const screenReroute = this.store.getState().policy.reroute;
+    const screenSensors = this.store.getState().policy.detection === 'sensors';
+    // The side the screen run is on: ON = smart response ON (①) or sensors + reports (②).
+    const screenOn = preset === 'detection' ? screenSensors : screenReroute;
     const screenPoints = this.collector.points.filter((p) => p.tick <= untilTick);
     copy.setSpeed(0);
     this.move('compare');
@@ -497,11 +548,12 @@ export class SimModeController {
         done = true;
         const mine = r.kpi.filter((p) => p.tick <= untilTick);
         this.finishCompare();
-        this.store.set({ compare: { screenReroute, untilTick, on: screenReroute ? screenPoints : mine, off: screenReroute ? mine : screenPoints } });
+        this.store.set({ compare: { preset, screenReroute, untilTick, on: screenOn ? screenPoints : mine, off: screenOn ? mine : screenPoints } });
       }
     });
     this.cmpUnsubs.push(off);
-    cmp.initRecord(record, !screenReroute);
+    if (preset === 'detection') cmp.initRecord(record, undefined, screenSensors ? 'reports' : 'sensors');
+    else cmp.initRecord(record, !screenReroute);
     cmp.setSpeed(0);
     cmp.runTo(untilTick, { progressEvery: 120, kpiEvery: KPI_EVERY });
     return true;

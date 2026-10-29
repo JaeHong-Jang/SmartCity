@@ -1,4 +1,5 @@
 import type { IdGen, Vec2 } from '@smartcity/shared';
+import type { RoadGraph } from '@smartcity/sim';
 import type { Dispatch } from '../app/dispatch';
 import type { ClientStore, ToolId } from '../app/store';
 
@@ -37,9 +38,20 @@ export interface PreviewBuilding {
   settle?: number;
 }
 
+/** Translucent view sector of a sensor (ADR 0013 §5). */
+export interface PreviewSector {
+  pos: Vec2;
+  /** Absolute view direction, atan2(z, x). */
+  yaw: number;
+  fov: number;
+  range: number;
+  color: string;
+}
+
 export interface ToolPreview {
   lines: PreviewLine[];
   points: PreviewPoint[];
+  sectors?: PreviewSector[];
   /** Short text next to the cursor (length, angle, snap kind, refusal reason). */
   label?: { pos: Vec2; text: string; error?: boolean };
   building?: PreviewBuilding;
@@ -61,6 +73,8 @@ export interface ToolContext {
   pan: GroundPan;
   /** Fly the camera to a point. */
   focus(p: Vec2): void;
+  /** Compiled road graph the renderer draws (sensor coverage previews); null when unavailable. */
+  roadGraph?(): RoadGraph | null;
 }
 
 export interface Tool {

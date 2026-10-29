@@ -287,6 +287,27 @@ describe('frames without growth: district = square, full = single-pass union', (
     for (const aspect of [16 / 9, 9 / 16]) for (const az of [0, Math.PI / 2, DEFAULT_AZIMUTH]) expectDistrictGuarantees(doc, f, aspect, az);
   });
 
+  it('repro C, fixed (Sol): the tower at x = 290 touches the district square and sets the height to 300 m', () => {
+    const doc = build([
+      { type: 'buildingType.upsert', buildingType: flatType('left', 0, 0, 0, 0, [part(0, 20, 100, 1, 2)]) },
+      { type: 'buildingType.upsert', buildingType: flatType('heavy', 0, 0, 0, 0, [part(200, 300, 40, 10, 2)]) },
+      { type: 'buildingType.upsert', buildingType: flatType('tower', 0, 0, 0, 0, [part(0, 3, 3, 100, 3)]) },
+      { type: 'building.place', building: { id: 'l', typeId: 'left', pos: { x: -500, z: 0 }, rotation: 0 } },
+      { type: 'building.place', building: { id: 'h', typeId: 'heavy', pos: { x: 0, z: 0 }, rotation: 0 } },
+      { type: 'building.place', building: { id: 't', typeId: 'tower', pos: { x: 290, z: 100 }, rotation: 0 } },
+    ]);
+    const f = districtFrame(doc)!;
+    expect(f.halfX).toBe(DISTRICT_SIZE / 2);
+    expect(touchesBox(doc, f)(doc.buildings.t!)).toBe(true);
+    expect(f.height).toBeCloseTo(300, 6);
+    for (const aspect of [16 / 9, 9 / 16]) {
+      for (const az of [0, Math.PI / 2, DEFAULT_AZIMUTH]) {
+        expect(cityViewPose(f, 50, aspect, az).fits).toBe(true);
+        expectDistrictGuarantees(doc, f, aspect, az);
+      }
+    }
+  });
+
   /** Repro D: a row of 20 touching 100 × 20 m buildings, x from −1000 to 1000. */
   const rowCmds = (reverse: boolean): Command[] => {
     const ids = Array.from({ length: 20 }, (_, i) => i);

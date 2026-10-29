@@ -1,7 +1,7 @@
 // Small independent store for simulator-mode UI state (the shared ClientStore is not touched).
 
 import { useSyncExternalStore } from 'react';
-import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioKpi } from '@smartcity/sim';
+import { DEFAULT_POLICY, type DetectionKpi, type ResponseBreakdown, type ResponsePolicy, type ScenarioKpi } from '@smartcity/sim';
 import type { CoverageRing } from './coverage';
 import type { FacilityCounts } from './facilities';
 import type { SimPhase } from './machine';
@@ -50,6 +50,8 @@ export interface EventRow {
   note?: string;
   /** Why the sim rejected the last request to end this event (the event is still active). */
   endError?: string;
+  /** Accidents / fires under reports or sensors (ADR 0013): how and when the city learned of it, or that it never did. */
+  detected?: string;
   /** Listed in the latest snapshot's activeEvents. */
   active: boolean;
   /** Gone from activeEvents after its start (ended by duration, by an end input, or run out). */
@@ -59,12 +61,28 @@ export interface EventRow {
   buildingId?: string;
 }
 
+/** The two-run comparisons (ADR 0013 §1): ① smart response OFF vs ON, ② citizen reports vs sensors + reports. */
+export type ComparePreset = 'smartResponse' | 'detection';
+
 export interface CompareResult {
+  /** Which comparison; for `detection`, `on` = sensors + reports and `off` = reports only. */
+  preset: ComparePreset;
   /** Policy shown on screen during the run, and the series of each side. */
   screenReroute: boolean;
   untilTick: number;
   on: ScenarioKpi[];
   off: ScenarioKpi[];
+}
+
+/** The moment the city learned of an accident or fire (pulse + label on the map for a few seconds). */
+export interface DetectionFlash {
+  eventId: string;
+  /** "CCTV 감지", "레이더 감지", "스마트폴 감지" or "신고 접수". */
+  label: string;
+  bySensor: boolean;
+  pos: { x: number; z: number };
+  /** performance.now() when it arrived. */
+  at: number;
 }
 
 export interface SimModeState {
@@ -91,6 +109,15 @@ export interface SimModeState {
   coverage: CoverageRing[];
   /** Facilities in the simulated copy, for the guidance line and the missing-facility hint. */
   facilities: FacilityCounts;
+  /** Sensors in the simulated copy (ADR 0013). */
+  sensors: number;
+  /** Comparison chosen for the next run. */
+  comparePreset: ComparePreset;
+  /** Detection KPIs and the response-time breakdown now (from the snapshot), null before the first. */
+  detection: DetectionKpi | null;
+  response: ResponseBreakdown | null;
+  /** Recent detection moments, oldest first (at most 8). */
+  detections: DetectionFlash[];
   /** Live workers (copy + compare), for the leak test hook. */
   workers: number;
 }
@@ -121,6 +148,11 @@ export function initialSimModeState(): SimModeState {
     power: { dark: 0, battery: 0, buildings: 0, queue: 0 },
     coverage: [],
     facilities: { fireStation: 0, hospital: 0, substation: 0, powerPlant: 0 },
+    sensors: 0,
+    comparePreset: 'smartResponse',
+    detection: null,
+    response: null,
+    detections: [],
     workers: 0,
   };
 }
