@@ -100,7 +100,8 @@ export class VehicleLayer {
   private makeMesh(name: string, geo: THREE.BufferGeometry, capacity: number): TypeMesh {
     const mesh = new THREE.InstancedMesh(geo, this.mat, capacity);
     mesh.count = 0;
-    mesh.castShadow = true;
+    // Small and moving: no shadow-pass draw (ADR 0013 §6).
+    mesh.castShadow = false;
     mesh.frustumCulled = false;
     mesh.name = name;
     this.group.add(mesh);
@@ -139,7 +140,8 @@ export class VehicleLayer {
   private createType(vt: VehicleType, capacity: number, geo?: THREE.BufferGeometry): TypeMesh {
     const mesh = new THREE.InstancedMesh(geo ?? bakeVehicleGeometry(vt.parts), this.mat, capacity);
     mesh.count = 0;
-    mesh.castShadow = true;
+    // Small and moving: no shadow-pass draw (ADR 0013 §6).
+    mesh.castShadow = false;
     mesh.frustumCulled = false;
     mesh.name = `vehicles-${vt.id}`;
     this.group.add(mesh);

@@ -273,6 +273,8 @@ export class OverlayLayer {
     this.selectionStale = false;
     if (d & (D_ROADS | D_BUILDINGS | D_BUS_STOPS | D_PARCELS) || p.presence !== s.presence || p.peers !== s.peers) this.buildPeers(s);
     if (d & (D_PARCELS | D_BUILDINGS) || p.overlays?.violations !== s.overlays.violations) this.parcels.update(s.doc, s.overlays.violations);
+    // Zone fill: on demand, and while working with lots.
+    this.parcels.setFillVisible(s.overlays.zones || s.tool === 'parcel' || s.tool === 'zoning' || s.selection?.kind === 'parcel');
     if (p.selection !== s.selection || p.hoverParcelId !== s.hoverParcelId || d & (D_PARCELS | D_BUILDINGS)) {
       this.parcels.setFocus([s.selection?.kind === 'parcel' ? s.selection.id : null, s.hoverParcelId]);
     }

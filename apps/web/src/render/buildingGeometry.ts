@@ -603,15 +603,22 @@ export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' 
   return gb.build();
 }
 
-/** Shared material for baked building geometry: vertex colors plus the facade shader. */
+/**
+ * Shared material for baked building geometry: vertex colors plus the facade shader, a darker band
+ * where walls meet the ground (contact shading) and glass that picks up the sky color at grazing angles.
+ */
 export function createBuildingMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.02 });
-  mat.customProgramCacheKey = () => 'smartcity-building-v5';
-  // uNight (0..1) is shared by reference; set `material.userData.uNight.value` each frame.
+  mat.customProgramCacheKey = () => 'smartcity-building-v6';
+  // uNight (0..1) and uSky (linear color) are shared by reference; set `material.userData.uNight.value` /
+  // `uSky.value` each frame.
   const uNight = { value: 0 };
+  const uSky = { value: new THREE.Color('#5f8fc2') };
   mat.userData.uNight = uNight;
+  mat.userData.uSky = uSky;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uNight = uNight;
+    shader.uniforms.uSky = uSky;
     shader.vertexShader = shader.vertexShader
       .replace(
         '#include <common>',
@@ -623,11 +630,14 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         varying vec3 vTone;
         varying vec3 vWall;
         varying vec4 vFacade;
-        varying float vOcc;`,
+        varying float vOcc;
+        varying float vGroundY;`,
       )
       .replace(
         '#include <begin_vertex>',
         `#include <begin_vertex>
+        // Instances only turn about Y and stand at y = 0, so this is the height above the ground.
+        vGroundY = transformed.y;
         vWall = aWall;
         vFacade = aFacade;
         vOcc = aOccupancy;
@@ -641,7 +651,9 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         varying vec4 vFacade;
         varying float vOcc;
         varying vec3 vTone;
+        varying float vGroundY;
         uniform float uNight;
+        uniform vec3 uSky;
         ${TONE_GLSL}
         float bHash(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }`,
       )
@@ -728,7 +740,9 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         } else if (vWall.z < -2.5 && vWall.z > -3.5) {
           float n = bHash(floor(vWall.xy * 1.3));
           diffuseColor.rgb *= 0.8 + 0.4 * n;
-        }`,
+        }
+        // Contact shading: the bottom ~3.5 m is up to 20 % darker (cheap ambient occlusion).
+        diffuseColor.rgb *= mix(0.8, 1.0, smoothstep(0.0, 3.5, vGroundY));`,
       )
       .replace(
         '#include <roughnessmap_fragment>',
@@ -738,7 +752,10 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
       .replace(
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
-        totalEmissiveRadiance += winGlow * 1.1;`,
+        totalEmissiveRadiance += winGlow * 1.1;
+        // Glass reflects the sky, more at grazing angles (Schlick-like), less at night.
+        float skyFres = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);
+        totalEmissiveRadiance += uSky * glassMask * (0.05 + 0.3 * skyFres) * (1.0 - 0.75 * uNight);`,
       );
   };
   return mat;

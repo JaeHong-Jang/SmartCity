@@ -79,7 +79,6 @@ export class ScenarioLayer {
     this.solid = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
     this.solid.name = 'scenario-solid';
     this.solid.frustumCulled = false;
-    this.solid.castShadow = true;
     this.bands = new THREE.Mesh(
       new THREE.BufferGeometry(),
       new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -8 }),

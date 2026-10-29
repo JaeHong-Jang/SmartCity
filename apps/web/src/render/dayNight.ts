@@ -14,7 +14,10 @@ export interface DayNightState {
   lightDir: THREE.Vector3;
   lightColor: THREE.Color;
   lightIntensity: number;
+  /** Sky at the horizon; also the fog color. */
   sky: THREE.Color;
+  /** Sky straight up (top of the sky gradient). */
+  skyZenith: THREE.Color;
   hemiSky: THREE.Color;
   hemiGround: THREE.Color;
   hemiIntensity: number;
@@ -30,6 +33,7 @@ export function createDayNightState(): DayNightState {
     lightColor: new THREE.Color(),
     lightIntensity: 0,
     sky: new THREE.Color(),
+    skyZenith: new THREE.Color(),
     hemiSky: new THREE.Color(),
     hemiGround: new THREE.Color(),
     hemiIntensity: 0,
@@ -43,15 +47,20 @@ const smooth = (a: number, b: number, x: number): number => {
   return t * t * (3 - 2 * t);
 };
 
-const SKY_DAY = new THREE.Color('#aecbe0');
-const SKY_NIGHT = new THREE.Color('#15234a');
+// Horizon haze is paler and greyer than the zenith (atmospheric perspective).
+const SKY_DAY = new THREE.Color('#bccfdb');
+const SKY_NIGHT = new THREE.Color('#1a2648');
 const SKY_TWILIGHT = new THREE.Color('#d9936a');
+const ZENITH_DAY = new THREE.Color('#5f8fc2');
+const ZENITH_NIGHT = new THREE.Color('#070d24');
+const ZENITH_TWILIGHT = new THREE.Color('#4a5d8c');
 const SUN_NOON = new THREE.Color('#fff3dd');
 const SUN_LOW = new THREE.Color('#ffa968');
 const MOON = new THREE.Color('#c2d0ff');
 const HEMI_SKY_DAY = new THREE.Color('#dbeafe');
 const HEMI_SKY_NIGHT = new THREE.Color('#aab9ec');
-const HEMI_GROUND_DAY = new THREE.Color('#56603f');
+// Light bounced from a city floor of concrete and lawn: greyer than pure grass.
+const HEMI_GROUND_DAY = new THREE.Color('#5a5d4a');
 const HEMI_GROUND_NIGHT = new THREE.Color('#6a7494');
 const MOON_DIR = new THREE.Vector3(0.35, 0.8, -0.3).normalize();
 
@@ -89,6 +98,7 @@ export function computeDayNight(dayTime: number, out: DayNightState): DayNightSt
 
   const twilight = Math.max(0, 1 - Math.abs(elev) / 0.22) * 0.6;
   out.sky.copy(SKY_NIGHT).lerp(SKY_DAY, day).lerp(SKY_TWILIGHT, twilight);
+  out.skyZenith.copy(ZENITH_NIGHT).lerp(ZENITH_DAY, day).lerp(ZENITH_TWILIGHT, twilight * 0.6);
   out.hemiSky.copy(HEMI_SKY_NIGHT).lerp(HEMI_SKY_DAY, day);
   out.hemiGround.copy(HEMI_GROUND_NIGHT).lerp(HEMI_GROUND_DAY, day);
   // Stays well above zero so the city is still readable at night.

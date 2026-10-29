@@ -12,6 +12,7 @@ import { Dashboard } from './Dashboard';
 import { GrowthHud } from './GrowthHud';
 import { IconChart, IconCity, IconDownload, IconPause, IconUpload } from './Icons';
 import { Inspector } from './Inspector';
+import { PerfOverlay } from './PerfOverlay';
 import { SimModeEnterButton, SimModeRoot } from './sim/SimMode';
 import { useSimMode } from '../simmode/store';
 import { RoadTypeEditor } from './RoadTypeEditor';
@@ -330,6 +331,7 @@ export function App() {
       <ToolHint />
       <Toasts />
       <StatusBar />
+      {import.meta.env.DEV && <PerfOverlay />}
       <OfflineCityNotice />
       <ConnectionBanner />
       <ConnectOverlay />

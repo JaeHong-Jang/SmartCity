@@ -9,6 +9,7 @@ import { AiBadge } from './AiBadge';
 import { useSimMode } from '../simmode/store';
 import { useDoc, useServices, useStore } from './context';
 import { IconBuilding, IconBulldoze, IconBus, IconClosure, IconParcel, IconRoad, IconSelect } from './Icons';
+import { ViewButtons } from './ViewButtons';
 
 const IconStreet = () => (
   <svg width={22} height={22} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -67,6 +68,7 @@ export function Toolbar() {
           <span className="key">{t.key}</span>
         </button>
       ))}
+      <ViewButtons />
     </nav>
   );
 }

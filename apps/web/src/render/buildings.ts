@@ -75,6 +75,11 @@ export class BuildingLayer {
     (this.material.userData.uNight as { value: number }).value = night;
   }
 
+  /** Sky color the glass reflects (linear). */
+  setSky(color: THREE.Color): void {
+    (this.material.userData.uSky as { value: THREE.Color }).value.copy(color);
+  }
+
   private createMesh(id: string, geo: THREE.BufferGeometry, capacity: number, occ: THREE.InstancedBufferAttribute, tone: THREE.InstancedBufferAttribute): THREE.InstancedMesh {
     geo.setAttribute('aOccupancy', occ);
     geo.setAttribute('aTone', tone);

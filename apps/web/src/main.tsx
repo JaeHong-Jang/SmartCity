@@ -9,7 +9,7 @@ import { sameDisplayedStats } from './app/simStats';
 import { watchProposal } from './app/proposalWatch';
 import { sameTransit, summarizeTransit } from './app/transit';
 import { ClientStore } from './app/store';
-import { LocalTransport, offlineSeenKey, readOfflineSave } from './net/localTransport';
+import { LocalTransport, offlineSeenKey, offlineStorageKey, readOfflineSave } from './net/localTransport';
 import type { Transport } from './net/transport';
 import { WsTransport } from './net/wsTransport';
 import { CityRenderer } from './render/CityRenderer';
@@ -261,6 +261,8 @@ const services: AppServices = {
   dispatcher,
   focus: (p) => renderer.focus(p),
   fit: (box) => renderer.fitBox(box),
+  viewCity: () => renderer.viewCity(),
+  viewEyeLevel: () => renderer.viewEyeLevel(),
   send: (msg) => guardedSend(msg, () => simMode.active, (m) => transport?.send(m), (text) => store.toast(text, 'error', 'simlock')),
   cameraTarget() {
     const t = renderer.cam.controls.getTarget(new THREE.Vector3());
@@ -318,6 +320,22 @@ if (import.meta.env.DEV) {
     cameraTarget() {
       const t = renderer.cam.controls.getTarget(new THREE.Vector3());
       return { x: t.x, z: t.z };
+    },
+    /** Performance measurement (ADR 0013 §7): benchmark city, fixed time of day, frame stats. */
+    perf: {
+      /** Store the benchmark city as this browser's offline save of `room` (open it with ?offline=1&room=…). */
+      async saveBenchCity(room: string, opts?: import('./dev/benchCity').BenchOptions) {
+        const { createBenchCity } = await import('./dev/benchCity');
+        const doc = createBenchCity(opts);
+        localStorage.setItem(offlineStorageKey(room), JSON.stringify({ seq: 1, doc, savedAt: Date.now() }));
+        return { buildings: Object.keys(doc.buildings).length, segments: Object.keys(doc.segments).length };
+      },
+      setDayTime(seconds: number | null) {
+        renderer.dayTimeOverride = seconds;
+      },
+      resetFrameTimes: () => renderer.resetFrameTimes(),
+      renderCost: (frames: number) => renderer.benchRender(frames),
+      stats: () => store.getState().render,
     },
   };
 }

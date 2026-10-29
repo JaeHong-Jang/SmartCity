@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import CameraControls from 'camera-controls';
+import { EMPTY_START } from './cityView';
 
 CameraControls.install({ THREE });
 
@@ -50,7 +51,9 @@ export function createCityCamera(dom: HTMLElement, halfSize: number): CityCamera
   controls.draggingSmoothTime = 0.06;
   controls.dollySpeed = 0.6;
   controls.setBoundary(new THREE.Box3(new THREE.Vector3(-halfSize - 200, 0, -halfSize - 200), new THREE.Vector3(halfSize + 200, 0, halfSize + 200)));
-  controls.setLookAt(-180, 260, 260, 0, 0, 0, false);
+  // A city in the room is framed on entry by the renderer (cityView.ts); this is the empty-city start.
+  const { position: sp, target: st } = EMPTY_START;
+  controls.setLookAt(sp.x, sp.y, sp.z, st.x, 0, st.z, false);
 
   const down = (e: KeyboardEvent): void => {
     if (isTyping() || e.ctrlKey || e.metaKey || e.altKey) return;

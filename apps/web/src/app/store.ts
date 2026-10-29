@@ -86,6 +86,8 @@ export interface Overlays {
   shadows: boolean;
   /** Regulation violation badges on buildings and parcels. */
   violations: boolean;
+  /** Zone-colored fill over lots (outlines are always drawn; the ground itself shows paving or lawn). */
+  zones: boolean;
 }
 
 /** Waiting for the server before the first welcome (drives the full-screen connect overlay). */
@@ -115,8 +117,16 @@ export interface OfflineCityNote {
 
 export interface RenderStats {
   fps: number;
+  /** Every draw call of the frame, shadow pass included (`shadowCalls` of them). */
   drawCalls: number;
   triangles: number;
+  /** Draw calls and triangles of the shadow-map pass (0 when shadows are off or not redrawn). */
+  shadowCalls?: number;
+  shadowTriangles?: number;
+  /** Frame time percentiles over the last ~600 frames, ms. */
+  frameMs?: { p50: number; p95: number; p99: number };
+  /** Main-thread CPU time of vehicle snapshot interpolation per frame (mean / max over the window), ms. */
+  interpMs?: { mean: number; max: number };
 }
 
 export interface ClientState {
@@ -296,7 +306,7 @@ export function initialState(room: string, name: string): ClientState {
     aiApplying: null,
     aiPending: {},
     session: 0,
-    overlays: { flow: false, shadows: true, violations: true },
+    overlays: { flow: false, shadows: true, violations: true, zones: false },
     panel: 'inspector',
     render: { fps: 0, drawCalls: 0, triangles: 0 },
   };

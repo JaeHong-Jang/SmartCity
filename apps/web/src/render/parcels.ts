@@ -1,4 +1,5 @@
-// Parcel overlay: translucent zone-colored fill, outline and a label (zone, area) per parcel, plus
+// Parcel overlay: zone-colored outline and a label (zone, area) per parcel, a translucent zone fill
+// only on demand (the ground under lots is paving or lawn, paving.ts), plus
 // orange regulation-violation badges over buildings (and violating parcels) when the overlay is on.
 // Rebuilt only when parcels, buildings or the toggle change; label elements are reused by key and
 // repositioned every frame.
@@ -52,6 +53,7 @@ export class ParcelLayer {
   /** Automatic lots get a label only when hovered, selected or in violation (ADR 0009 §4, hundreds of lots). */
   private autoInfo = new Map<string, { html: string; x: number; z: number; warn: boolean }>();
   private focus = new Set<string>();
+  private fillOn = false;
 
   constructor(private readonly labelRoot: HTMLElement) {
     this.group.name = 'parcels';
@@ -125,6 +127,13 @@ export class ParcelLayer {
     }
     this.setGeometry(this.fill, fill);
     this.setGeometry(this.lines, lines);
+    this.fill.visible = this.fillOn && !fill.empty;
+  }
+
+  /** Show the zone-colored fill (zones overlay, lot tools); cheap, no rebuild. */
+  setFillVisible(on: boolean): void {
+    this.fillOn = on;
+    this.fill.visible = on && this.fill.geometry.getAttribute('position') !== undefined;
   }
 
   /** The selected / hovered parcel ids: their automatic lots show a label. Cheap; no mesh rebuild. */

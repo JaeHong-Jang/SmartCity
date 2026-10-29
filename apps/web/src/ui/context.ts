@@ -10,6 +10,9 @@ export interface AppServices {
   focus(p: Vec2): void;
   /** Fly the camera so the box fills the view. */
   fit(box: Box): void;
+  /** Camera presets: the whole city from a low angle, and street level (ADR 0013 §6). */
+  viewCity(): void;
+  viewEyeLevel(): void;
   /** Send a protocol message over the current transport (no-op while disconnected). */
   send(msg: ClientMessage): void;
   /** Ground point the camera looks at. */
