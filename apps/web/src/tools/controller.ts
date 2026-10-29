@@ -14,7 +14,7 @@ import { RoadTool } from './roadTool';
 import { SelectTool } from './selectTool';
 import { StreetTool } from './streetTool';
 import { ZoningTool } from './zoningTool';
-import { CLICK_SLOP_PX } from './gesture';
+import { DragGesture } from './gesture';
 import { nextSnapStep, snapLabel } from './snap';
 import { TOOL_META } from './toolMeta';
 import type { GroundPan, Tool, ToolContext, ToolPointer, ToolPreview } from './types';
@@ -43,7 +43,8 @@ export class ToolController {
   private tools: Record<ToolId, Tool>;
   private active: Tool;
   private lastPointer: ToolPointer | null = null;
-  private rightDown: { x: number; y: number } | null = null;
+  /** Right press: a click cancels, a drag (past the slop at any moment) is camera work. */
+  private right = new DragGesture();
   private lastPresence = '';
   private presenceTimer: ReturnType<typeof setInterval>;
   private unsub: () => void;
@@ -132,7 +133,9 @@ export class ToolController {
 
   private down = (e: PointerEvent): void => {
     if (e.button === 2) {
-      this.rightDown = { x: e.clientX, y: e.clientY };
+      this.right.down(e.clientX, e.clientY);
+      // Moves over the HUD and a release outside the canvas still reach this gesture.
+      this.dom.setPointerCapture?.(e.pointerId);
       return;
     }
     if (e.button !== 0) return;
@@ -146,6 +149,7 @@ export class ToolController {
   };
 
   private move = (e: PointerEvent): void => {
+    this.right.move(e.clientX, e.clientY);
     const p = this.pointer(e);
     if (!p) return;
     this.lastPointer = { ...p, button: -1 };
@@ -155,6 +159,7 @@ export class ToolController {
 
   private cancel = (e: PointerEvent): void => {
     if (this.dom.hasPointerCapture?.(e.pointerId)) this.dom.releasePointerCapture(e.pointerId);
+    this.right.cancel();
     this.active.cancel();
   };
 
@@ -166,11 +171,11 @@ export class ToolController {
   };
 
   private up = (e: PointerEvent): void => {
-    if (e.button === 2 && this.rightDown) {
-      const moved = Math.hypot(e.clientX - this.rightDown.x, e.clientY - this.rightDown.y);
-      this.rightDown = null;
-      // A right click without dragging cancels; a drag pans the camera.
-      if (moved < CLICK_SLOP_PX && !this.active.onSecondaryClick?.()) this.active.cancel();
+    if (e.button === 2 && this.right.phase !== 'idle') {
+      // A right click without dragging cancels; a drag rotates (Shift: pans) the camera, even one
+      // that comes back to where it started.
+      const click = this.right.up() === 'pressed';
+      if (click && !this.active.onSecondaryClick?.()) this.active.cancel();
       return;
     }
     if (this.dom.hasPointerCapture?.(e.pointerId)) this.dom.releasePointerCapture(e.pointerId);

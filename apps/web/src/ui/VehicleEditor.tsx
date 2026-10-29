@@ -5,6 +5,7 @@ import { vehiclePreview } from '../render/vehicles';
 import { useDoc, useServices } from './context';
 import { PartPreview } from './PartPreview';
 import { clampNum } from './RoadTypeEditor';
+import { ColorPicker } from './ColorPicker';
 
 const KIND_KO: Record<VehicleKind, string> = { car: '승용', bus: '버스', truck: '화물', emergency: '긴급' };
 const newPart = (): VehiclePart => ({ offset: { x: 0, y: 0.3, z: 0 }, length: 2, width: 1.6, height: 0.8, color: '#cbd5e1' });
@@ -82,7 +83,7 @@ export function VehicleEditor() {
               ))}
             </select>
             <label style={{ minWidth: 0 }}>대표 색</label>
-            <input type="color" value={vt.color} onChange={(e) => edit({ color: e.target.value })} />
+            <ColorPicker label="대표 색" value={vt.color} onChange={(c) => edit({ color: c })} />
           </div>
           {num('길이', vt.length, 2, 30, 0.1, (v) => edit({ length: v }), 'm')}
           {num('폭', vt.width, 1, 4, 0.05, (v) => edit({ width: v }), 'm')}
@@ -128,7 +129,7 @@ export function VehicleEditor() {
                     <input type="number" step={0.05} value={p.height} onChange={(e) => editPart(i, { height: clampNum(e.target.value, 0.05, 6) })} />
                   </td>
                   <td>
-                    <input type="color" value={p.color} onChange={(e) => editPart(i, { color: e.target.value })} />
+                    <ColorPicker label={`파트 ${i + 1} 색`} value={p.color} onChange={(c) => editPart(i, { color: c })} />
                   </td>
                   <td>
                     <button className="danger" style={{ padding: '1px 5px' }} disabled={vt.parts.length <= 1} onClick={() => edit({ parts: vt.parts.filter((_, j) => j !== i) })} title="파트 삭제">

@@ -1,5 +1,6 @@
-// City-builder camera: left button is reserved for tools, right drag pans over the ground,
-// middle drag rotates, wheel zooms toward the cursor. Keyboard: WASD/arrows pan, Q/E rotate, R/F zoom.
+// City-builder camera: left button is reserved for tools, right drag rotates (Shift+right drag pans,
+// for mice without a middle button), middle drag pans, wheel zooms toward the cursor.
+// Keyboard: WASD/arrows pan, Q/E rotate, R/F zoom.
 
 import * as THREE from 'three';
 import CameraControls from 'camera-controls';
@@ -11,6 +12,12 @@ export const MAX_DISTANCE = 2500;
 
 const keys = new Set<string>();
 const tmpTarget = new THREE.Vector3();
+
+/** Mouse mapping; camera-controls reads it on every drag move, so it is set at each pointerdown. */
+export function mouseButtonsFor(shift: boolean): CameraControls['mouseButtons'] {
+  const A = CameraControls.ACTION;
+  return { left: A.NONE, middle: A.SCREEN_PAN, right: shift ? A.SCREEN_PAN : A.ROTATE, wheel: A.DOLLY };
+}
 
 export interface CityCamera {
   camera: THREE.PerspectiveCamera;
@@ -30,10 +37,7 @@ function isTyping(): boolean {
 export function createCityCamera(dom: HTMLElement, halfSize: number): CityCamera {
   const camera = new THREE.PerspectiveCamera(50, 1, 1, 12000);
   const controls = new CameraControls(camera, dom);
-  controls.mouseButtons.left = CameraControls.ACTION.NONE;
-  controls.mouseButtons.right = CameraControls.ACTION.SCREEN_PAN;
-  controls.mouseButtons.middle = CameraControls.ACTION.ROTATE;
-  controls.mouseButtons.wheel = CameraControls.ACTION.DOLLY;
+  Object.assign(controls.mouseButtons, mouseButtonsFor(false));
   controls.touches.one = CameraControls.ACTION.TOUCH_SCREEN_PAN;
   controls.touches.two = CameraControls.ACTION.TOUCH_DOLLY_ROTATE;
   controls.dollyToCursor = true;
@@ -61,6 +65,11 @@ export function createCityCamera(dom: HTMLElement, halfSize: number): CityCamera
   window.addEventListener('blur', blur);
   const noMenu = (e: Event): void => e.preventDefault();
   dom.addEventListener('contextmenu', noMenu);
+  // Capture phase: runs before the controls' own pointerdown on this element.
+  const modifiers = (e: PointerEvent): void => {
+    controls.mouseButtons.right = mouseButtonsFor(e.shiftKey).right;
+  };
+  dom.addEventListener('pointerdown', modifiers, { capture: true });
 
   return {
     camera,
@@ -100,6 +109,7 @@ export function createCityCamera(dom: HTMLElement, halfSize: number): CityCamera
       window.removeEventListener('keyup', up);
       window.removeEventListener('blur', blur);
       dom.removeEventListener('contextmenu', noMenu);
+      dom.removeEventListener('pointerdown', modifiers, { capture: true });
       controls.dispose();
     },
   };

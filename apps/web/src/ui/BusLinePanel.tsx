@@ -1,6 +1,7 @@
 import type { BusLine } from '@smartcity/shared';
 import { stopPosition } from '../render/busRoute';
 import { lineLoad, lineWaiting } from '../app/transit';
+import { ColorPicker } from './ColorPicker';
 import { useDoc, useServices, useStore } from './context';
 import { clampInt } from './RoadTypeEditor';
 
@@ -30,7 +31,7 @@ export function BusLinePanel() {
       {lines.map((l) => (
         <div key={l.id} className="phase">
           <div className="row">
-            <input type="color" value={l.color} onChange={(e) => upsert(l, { color: e.target.value })} title="노선 색" />
+            <ColorPicker label="노선 색" value={l.color} onChange={(c) => upsert(l, { color: c })} />
             <input
               type="text"
               key={`${l.id}-${l.name}`}

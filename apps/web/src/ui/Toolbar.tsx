@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { DEFAULT_REGULATIONS, ZONE_LABELS } from '@smartcity/shared';
 import type { StreetMode, ToolId } from '../app/store';
 import { ZONE_COLORS } from '../app/zoneColors';
@@ -76,9 +76,14 @@ export function ToolOptions() {
   const tool = useStore((s) => s.tool);
   const opts = useStore((s) => s.toolOptions);
   const { doc } = useDoc();
+  const ref = useRef<HTMLElement>(null);
+  // The chosen item stays visible in a scrolled list (eyedropper, keyboard, tool switch).
+  useEffect(() => {
+    ref.current?.querySelector('.list > .active')?.scrollIntoView({ block: 'nearest' });
+  }, [tool, opts.roadTypeId, opts.buildingTypeId, opts.parcelZone, opts.zoningZone, opts.zoningErase, opts.streetMode]);
   if (tool === 'road') {
     return (
-      <section className="panel tool-options" aria-label="도로 도구 옵션">
+      <section ref={ref} className="panel tool-options" aria-label="도로 도구 옵션">
         <h3>도로 타입</h3>
         <div className="list">
           {Object.values(doc.roadTypes).map((rt) => (
@@ -111,7 +116,7 @@ export function ToolOptions() {
   }
   if (tool === 'building') {
     return (
-      <section className="panel tool-options" aria-label="건물 도구 옵션">
+      <section ref={ref} className="panel tool-options" aria-label="건물 도구 옵션">
         <h3>건물 타입</h3>
         <div className="list">
           {Object.values(doc.buildingTypes).map((bt) => (
@@ -129,7 +134,7 @@ export function ToolOptions() {
   }
   if (tool === 'parcel') {
     return (
-      <section className="panel tool-options" aria-label="필지 도구 옵션">
+      <section ref={ref} className="panel tool-options" aria-label="필지 도구 옵션">
         <h3>용도지역</h3>
         <div className="list">
           {PARCEL_ZONES.map((z) => {
@@ -159,7 +164,7 @@ export function ToolOptions() {
   }
   if (tool === 'zoning') {
     return (
-      <section className="panel tool-options" aria-label="조닝 도구 옵션">
+      <section ref={ref} className="panel tool-options" aria-label="조닝 도구 옵션">
         <h3>조닝 (도로를 따라 자동 성장 필지)</h3>
         <div className="list">
           {(['residential', 'commercial', 'office'] as const).map((z) => (
@@ -186,7 +191,7 @@ export function ToolOptions() {
   }
   if (tool === 'street') {
     return (
-      <section className="panel tool-options" aria-label="교통 시설 도구 옵션">
+      <section ref={ref} className="panel tool-options" aria-label="교통 시설 도구 옵션">
         <h3>교통 시설</h3>
         <div className="list">
           {STREET_MODES.map((m) => (

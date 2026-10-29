@@ -1,6 +1,7 @@
 // Fields of one volume (매스): plan, height, use, facade, colors, roof.
 
 import { partArea, type BuildingPart, type Facade, type FacadeStyle, type GroundFloor, type RoofShape, type Zone } from '@smartcity/shared';
+import { ColorPicker } from '../ColorPicker';
 import { clampInt, clampNum } from '../RoadTypeEditor';
 import { ZONE_KO } from '../Toolbar';
 import { maxRound, partTop, toRectangle, withRound } from './designDraft';
@@ -146,11 +147,11 @@ export function VolumeFields({ part: p, zone, onChange }: Props) {
       </label>
       <label className="bp-span2">
         벽 색
-        <input type="color" value={p.color} onChange={(e) => set({ color: e.target.value })} />
+        <ColorPicker label="벽 색" value={p.color} onChange={(c) => set({ color: c })} />
       </label>
       <label className="bp-span2">
         지붕 색
-        <input type="color" value={p.roofColor} onChange={(e) => set({ roofColor: e.target.value })} />
+        <ColorPicker label="지붕 색" value={p.roofColor} onChange={(c) => set({ roofColor: c })} />
       </label>
       <span className="muted bp-wide">
         높이 {round1(p.baseHeight)}m → {round1(partTop(p))}m

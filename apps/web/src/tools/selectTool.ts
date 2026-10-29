@@ -122,7 +122,7 @@ export class SelectTool implements Tool {
     }
     const hint = this.selectedBuilding()
       ? '드래그 이동 · Alt+드래그 복제 · [ ] / Shift+휠 회전 (Alt 1°) · I 스포이드 · Delete 철거 · Esc 해제'
-      : '클릭 선택 · 건물/교차점 드래그 이동 · 빈 땅 드래그 화면 이동 · Delete 철거';
+      : '클릭 선택 · 건물/교차점 드래그 이동 · 빈 땅 드래그 화면 이동 · 우클릭 드래그 회전 · Delete 철거';
     if (this.ctx.store.getState().toolHint !== hint) this.ctx.store.set({ toolHint: hint });
   }
 
