@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { cloneJson, partOutline, partsToVoxels, SMART_CITY_PRESETS, type BuildingPart, type BuildingType, type CellKey, type Command, type Zone } from '@smartcity/shared';
-import { buildingPreview } from '../render/buildings';
+import { buildingPreview, buildingPreviewKey } from '../render/buildings';
 import { FootprintPainter } from './building/FootprintPainter';
 import { MetricsPanel } from './building/MetricsPanel';
 import { SmartPanel } from './building/SmartPanel';
@@ -154,7 +154,7 @@ export function BuildingEditor() {
     if (ref !== null) setSaving({ ref, id: cmd.buildingType.id, seq: editSeq.current, rev: baseRev });
   };
 
-  const previewKey = bt ? JSON.stringify([bt.parts, bt.smart ?? null, bt.props ?? null, plot]) : '';
+  const previewKey = bt ? buildingPreviewKey(bt, plot) : '';
   const conflict = (check && !check.ok && check.error === CONFLICT_KO) || saveError === CONFLICT_KO;
   const error = saveError ?? (check && !check.ok ? check.error : null);
   const painterKey = bt && part ? `${bt.id}|${partIdx}|${gen}|${part.footprint ? 'fp' : JSON.stringify([part.offset, part.width, part.depth])}` : '';

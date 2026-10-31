@@ -21,6 +21,7 @@ import { initialAi, reduceAi, type AiEvent, type AiState } from './aiChat';
 import { addHighlight, highlightFromBatch, initialHighlights, type Highlight, type HighlightState } from './highlights';
 import type { ProposalStatus } from './proposal';
 import type { TransitSummary } from './transit';
+import { storedQuality, type RenderQuality } from './quality';
 
 export type ToolId = 'select' | 'road' | 'building' | 'bulldoze' | 'busLine' | 'closure' | 'parcel' | 'street' | 'zoning' | 'sensor';
 /** Traffic facility tool sub-modes (교통 시설). */
@@ -192,6 +193,8 @@ export interface ClientState {
   /** Bumped when the connection is lost or the doc is replaced: waiters of the old session give up. */
   session: number;
   overlays: Overlays;
+  /** Render quality (ADR 0014 §8): personal, remembered per browser, never in the doc or the sim. */
+  quality: RenderQuality;
   panel: PanelId | null;
   render: RenderStats;
 }
@@ -326,6 +329,7 @@ export function initialState(room: string, name: string): ClientState {
     aiPending: {},
     session: 0,
     overlays: { flow: false, shadows: true, violations: true, zones: false, sensors: false },
+    quality: storedQuality(),
     panel: 'inspector',
     render: { fps: 0, drawCalls: 0, triangles: 0 },
   };

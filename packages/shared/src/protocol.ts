@@ -7,9 +7,10 @@ import type { CityDoc } from './model.js';
 /**
  * Bumped when clients of different versions must not edit together: v2 = rounded volumes (a v1 client
  * would ignore `round` and judge collisions on other outlines), v3 = roadside sensors (a v2 client does not
- * know the `sensor.*` commands or the `sensors` collection). The server refuses other versions.
+ * know the `sensor.*` commands or the `sensors` collection), v4 = road medians (a v3 client copies road types
+ * field by field and would silently drop `median` on its next edit). The server refuses other versions.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 /** Shown when the server refuses the client's protocol version (sent as `error` with code 'protocol'). */
 export const PROTOCOL_MISMATCH = '앱을 새로고침하세요 — 버전이 다릅니다';
 export const MAX_MESSAGE_BYTES = 512 * 1024;

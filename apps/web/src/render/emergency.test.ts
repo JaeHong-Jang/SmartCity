@@ -2,37 +2,13 @@ import { describe, expect, it } from 'vitest';
 import * as THREE from 'three';
 import { VEHICLE_STRIDE, type ScenarioView, type SimSnapshot } from '@smartcity/sim';
 import type { SimulationStream } from '../sim/simStream';
-import { EmergencyLayer, rigPose } from './emergency';
-import { interpAlpha, lerpAngle } from './vehicles';
+import { EmergencyLayer } from './emergency';
 
 const snap = (vehicles: [number, number, number, number][], extra: Partial<SimSnapshot> = {}): SimSnapshot => {
   const a = new Float32Array(vehicles.length * VEHICLE_STRIDE);
   vehicles.forEach(([id, x, z, h], i) => a.set([x, z, h, 0, 0, id], i * VEHICLE_STRIDE));
   return { tick: 0, graphRevision: 1, vehicles: a, vehicleCount: vehicles.length, ...extra } as unknown as SimSnapshot;
 };
-
-describe('dispatch rig pose', () => {
-  it('matches what VehicleLayer draws: same alpha, same previous/latest positions and heading', () => {
-    // Sol's repro: x 0 → 10, received at 1000 / 1100 ms, drawn at now = 1100: the car is at x = 5, so is the rig.
-    const prev = snap([[7, 0, 0, 0]]);
-    const cur = snap([[7, 10, 0, 0]]);
-    const p = rigPose(cur, prev, 7, 1100, 1000, 1100)!;
-    const alpha = interpAlpha(1100, 1000, 1100);
-    expect(alpha).toBeCloseTo(0.5, 6);
-    expect(p.x).toBeCloseTo(5, 5);
-    // the heading takes the short way round, like lerpAngle
-    const turn = rigPose(snap([[7, 0, 0, -3.0]]), snap([[7, 0, 0, 3.0]]), 7, 1100, 1000, 1100)!;
-    expect(turn.h).toBeCloseTo(lerpAngle(3.0, -3.0, alpha), 5);
-  });
-
-  it('uses the latest pose without a usable previous snapshot (other graph revision, or vehicle not there before)', () => {
-    const cur = snap([[7, 10, 0, 1]]);
-    expect(rigPose(cur, snap([[7, 0, 0, 0]], { graphRevision: 2 }), 7, 1100, 1000, 1100)!.x).toBe(10);
-    expect(rigPose(cur, snap([[8, 0, 0, 0]]), 7, 1100, 1000, 1100)!.x).toBe(10);
-    expect(rigPose(cur, null, 7, 1100, 1000, 1100)!.x).toBe(10);
-    expect(rigPose(cur, null, 99, 1100, 1000, 1100)).toBeNull();
-  });
-});
 
 describe('pre-emption ring', () => {
   const view = (p: ScenarioView['preempted']): SimSnapshot =>
@@ -77,5 +53,26 @@ describe('pre-emption ring', () => {
     const { layer, set } = setup();
     set([]);
     expect(layer.stats().drawn).toBe(false);
+  });
+});
+
+describe('dispatched vehicles', () => {
+  it('counts fire trucks and ambulances on the road and draws no body of its own (VehicleLayer draws them)', () => {
+    const dispatches = [
+      { eventId: 'e1', kind: 'fire', vehicleId: 7, stage: 'enroute', facilityId: 'f', buildingId: 'b' },
+      { eventId: 'e2', kind: 'medical', vehicleId: 8, stage: 'enroute', facilityId: 'f', buildingId: 'b' },
+      { eventId: 'e3', kind: 'medical', vehicleId: null, stage: 'working', facilityId: 'f', buildingId: 'b' },
+    ] as ScenarioView['dispatches'];
+    const cur = snap([[7, 0, 0, 0], [8, 5, 0, 0]], {
+      scenario: { incidents: [], damagedBuildings: [], dispatches, preempted: [], obstacles: [], closedLanes: [] } as unknown as ScenarioView,
+    });
+    const stream = { latest: () => cur, previous: () => null, latestAt: () => 0, previousAt: () => 0 } as unknown as SimulationStream;
+    const layer = new EmergencyLayer(stream);
+    layer.update(0);
+    expect(layer.stats()).toMatchObject({ drawn: true, fireTrucks: 1, ambulances: 1 });
+    let meshes = 0;
+    layer.group.traverse((o) => void ((o as THREE.Mesh).isMesh && meshes++));
+    expect(meshes).toBe(0);
+    layer.dispose();
   });
 });

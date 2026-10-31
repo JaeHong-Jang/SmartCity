@@ -78,7 +78,7 @@ describe('sensors in web save paths', () => {
     const wb = b.msgs[0]!;
     if (wb.t !== 'welcome') throw new Error('no welcome');
     expect(wb.doc.version).toBe(DOC_VERSION);
-    expect(DOC_VERSION).toBe(8);
+    expect(DOC_VERSION).toBe(9);
     expect(wb.doc.sensors).toEqual({});
     b.t.close();
   });

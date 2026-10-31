@@ -18,7 +18,7 @@ import {
   type Vec2,
 } from '../geometry.js';
 import { buildingBlocksRoad, buildingFootprints, partOutline, polygonsBlockRoad } from '../editing/buildings.js';
-import { roadHalfWidth } from '../roads.js';
+import { medianShapeError, roadHalfWidth } from '../roads.js';
 import { TxIndex } from './spatial.js';
 import type {
   BuildingType,
@@ -118,6 +118,8 @@ export function validateRoadType(rt: RoadType): void {
   checkNum(rt.laneWidth, 2.5, 5, 'laneWidth');
   checkNum(rt.speedLimit, 2, 40, 'speedLimit');
   if (typeof rt.sidewalk !== 'boolean' || typeof rt.busOnlyRightLane !== 'boolean') fail('invalid road type flags');
+  const median = medianShapeError(rt);
+  if (median) fail(median);
 }
 
 const ZONES = ['residential', 'commercial', 'office', 'industrial', 'public'];

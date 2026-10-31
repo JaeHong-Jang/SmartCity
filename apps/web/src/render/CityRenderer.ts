@@ -10,10 +10,11 @@ import type { GroundPan, ToolPreview } from '../tools/types';
 import { BuildingLayer } from './buildings';
 import { createCityCamera, type CityCamera } from './camera';
 import { cityFrame, cityViewPose, districtFrame, EMPTY_START, eyeLevelPose, type CameraPose } from './cityView';
-import { commandDomains, D_BUILDINGS, D_PARCELS, D_ROADS, D_SENSORS, D_VEHICLE_TYPES } from './dirty';
+import { commandDomains, D_BUILDINGS, D_BUS_STOPS, D_PARCELS, D_ROADS, D_SENSORS, D_VEHICLE_TYPES } from './dirty';
 import { computeDayNight, createDayNightState, NOON } from './dayNight';
 import { createGround, type Ground } from './ground';
 import { HighlightLayer, type HighlightStats } from './highlight';
+import { createMountains, type Mountains } from './mountains';
 import { OverlayLayer } from './overlays';
 import { PavingLayer } from './paving';
 import { PedestrianLayer } from './pedestrians';
@@ -28,6 +29,7 @@ import { configureRenderer, createSun } from './sceneKit';
 import { PedSignalLayer, SignalLayer } from './signals';
 import { SensorLayer, type SensorStats } from './sensors';
 import { createSky, fogRange, type Sky } from './sky';
+import { StreetscapeLayer, type StreetscapeStats } from './streetscape';
 import { VehicleLayer } from './vehicles';
 
 const _ray = new THREE.Raycaster();
@@ -55,6 +57,8 @@ export class CityRenderer {
   private roads = new RoadLayer();
   private paving = new PavingLayer();
   private sky: Sky = createSky();
+  private mountains: Mountains = createMountains();
+  private streetscape = new StreetscapeLayer();
   /** Frame the city once, on the first entry into a room that has one (never on later edits or resyncs). */
   private autoFitPending = true;
   /** Where the last district view put the camera (a second "도시 보기" there shows the whole city). */
@@ -74,7 +78,7 @@ export class CityRenderer {
   /** Night factor 0..1 of the last frame (blackout veil strength). */
   private night = 0;
   private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
-  private dirty = { roads: true, buildings: true, vehicleTypes: true, paving: true, sensors: true };
+  private dirty = { roads: true, buildings: true, vehicleTypes: true, paving: true, sensors: true, streetscape: true };
   private raf = 0;
   private last = performance.now();
   private frames = 0;
@@ -124,7 +128,7 @@ export class CityRenderer {
     const sky = new THREE.Color('#bccfdb');
     this.scene.background = sky;
     this.scene.fog = new THREE.Fog(sky, 1400, 5200);
-    this.scene.add(this.sky.mesh);
+    this.scene.add(this.sky.mesh, this.mountains.mesh);
 
     this.hemi = new THREE.HemisphereLight('#dbeafe', '#56603f', 1.25);
     this.scene.add(this.hemi);
@@ -145,7 +149,7 @@ export class CityRenderer {
     this.emergency = new EmergencyLayer(stream);
     this.blackout = new BlackoutLayer(stream);
     this.detection = new DetectionLayer(stream, labelRoot);
-    this.scene.add(this.paving.group, this.roads.group, this.buildings.group, this.sensors.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group, this.blackout.group, this.detection.group);
+    this.scene.add(this.paving.group, this.roads.group, this.streetscape.group, this.buildings.group, this.sensors.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group, this.blackout.group, this.detection.group);
 
     this.unsubs.push(
       store.onApplied((cmd) => {
@@ -156,6 +160,8 @@ export class CityRenderer {
         if (d & (D_ROADS | D_BUILDINGS | D_PARCELS)) this.dirty.paving = true;
         // A sensor's pose follows its road.
         if (d & (D_SENSORS | D_ROADS)) this.dirty.sensors = true;
+        // Trees and lamps keep clear of junctions, crosswalks, stops, sensors and building entrances.
+        if (d & (D_ROADS | D_BUS_STOPS | D_SENSORS | D_BUILDINGS | D_PARCELS)) this.dirty.streetscape = true;
         this.overlays.invalidate(cmd);
       }),
       store.onReset(() => {
@@ -164,6 +170,7 @@ export class CityRenderer {
         this.dirty.vehicleTypes = true;
         this.dirty.paving = true;
         this.dirty.sensors = true;
+        this.dirty.streetscape = true;
         this.overlays.invalidateAll();
       }),
       // Synchronously with the welcome (before React shows the room), so nothing the user or a test
@@ -268,6 +275,11 @@ export class CityRenderer {
     // View sectors: every sensor with the sensor tool or the layer toggle, else only a selected sensor.
     const one = s.selection?.kind === 'sensor' ? s.selection.id : null;
     this.sensors.setSectors(s.doc, this.network.graph, s.tool === 'sensor' || s.overlays.sensors ? 'all' : one !== null ? 'one' : 'none', one);
+    if (this.dirty.streetscape) {
+      // After the road network (placements follow its geometry and crosswalks).
+      this.dirty.streetscape = false;
+      this.streetscape.update(s.doc, this.network);
+    }
     if (this.dirty.vehicleTypes) {
       this.dirty.vehicleTypes = false;
       this.vehicles.syncTypes(s.doc);
@@ -330,6 +342,9 @@ export class CityRenderer {
     (this.scene.background as THREE.Color).copy(dn.sky);
     (this.scene.fog as THREE.Fog).color.copy(dn.sky);
     this.sky.setColors(dn.sky, dn.skyZenith);
+    this.mountains.setColors(dn.sky, dn.night, dn.lightDir);
+    this.streetscape.setNight(dn.night);
+    this.roads.setNight(dn.night);
     this.buildings.setNight(dn.night);
     this.paving.setNight(dn.night);
     this.buildings.setSky(dn.skyZenith);
@@ -349,11 +364,15 @@ export class CityRenderer {
     this.cam.update(dt);
     fogRange(this.cam.controls.distance, this.scene.fog as THREE.Fog);
     this.sky.follow(this.cam.camera);
+    this.mountains.setQuality(st.quality);
+    this.streetscape.setQuality(st.quality);
+    this.mountains.follow(this.cam.camera);
+    this.streetscape.frame(this.cam.camera.position, this.cam.controls.distance);
     this.applyDayNight();
     this.updateSun();
     const s = this.store.getState();
     const t0 = performance.now();
-    this.vehicles.update(now, s.doc);
+    this.vehicles.update(now, s.doc, this.cam.camera.position, this.night);
     const interp = performance.now() - t0;
     this.interpSum += interp;
     if (interp > this.interpMax) this.interpMax = interp;
@@ -505,6 +524,16 @@ export class CityRenderer {
     return this.sensors.stats();
   }
 
+  /** Test/debug: street trees and lamps placed and drawn per LOD. */
+  streetscapeStats(): StreetscapeStats & { mountainRings: number } {
+    return { ...this.streetscape.stats(), mountainRings: this.mountains.rings };
+  }
+
+  /** Test/debug: placed trees and lamps within `r` m of (x, z). */
+  streetscapeNear(x: number, z: number, r: number): { trees: Vec2[]; lamps: Vec2[] } {
+    return this.streetscape.near(x, z, r);
+  }
+
   /** Test/debug: highlight things currently drawn. */
   highlightStats(): HighlightStats {
     return this.highlights.stats();
@@ -518,6 +547,8 @@ export class CityRenderer {
     this.roads.dispose();
     this.paving.dispose();
     this.sky.dispose();
+    this.mountains.dispose();
+    this.streetscape.dispose();
     this.buildings.dispose();
     this.sensors.dispose();
     this.vehicles.dispose();

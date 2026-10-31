@@ -5,7 +5,9 @@
 //             volume base, w = wall length (> 0); on a rounded corner the "wall" is the whole run of
 //             arc chords (u = length along the arc). Other surfaces: (x, z) local position and a
 //             negative surface flag (SURFACE).
-//   aFacade = (floorHeight, styleId, windowRatio, groundId).
+//   aFacade = (floorHeight, styleId, windowRatio, groundId); styleId 4/5 = the Korean high-rise
+//             residential look (long face / short gable end), chosen per volume by isResidentialHighRise.
+//   aTop    = wall height of the volume (m) on those apartment walls, 0 elsewhere (crown band).
 
 import * as THREE from 'three';
 import {
@@ -21,10 +23,17 @@ import {
   type GroundFloor,
   type SmartFeatures,
   type Vec2,
+  type Zone,
 } from '@smartcity/shared';
 import { TONE_GLSL } from './buildingTone';
 
 export const FACADE_STYLE_ID: Record<FacadeStyle, number> = { grid: 0, ribbon: 1, curtain: 2, none: 3 };
+/** Shader styles of a residential high-rise volume: balcony face and gable end (측벽). */
+export const APT_STYLE = { face: 4, gable: 5 } as const;
+/** Floors from which a residential volume gets the high-rise apartment look. */
+export const APT_MIN_FLOORS = 10;
+/** A wall shorter than this share of the volume's longest wall is a gable end. */
+const GABLE_SHARE = 0.7;
 export const GROUND_ID: Record<GroundFloor, number> = { none: 0, shop: 1, lobby: 2, pilotis: 3 };
 /** Negative aWall.z flags for non-wall surfaces. */
 export const SURFACE = { roof: -1, solar: -2, green: -3, pad: -4, mark: -5, prop: -6 } as const;
@@ -37,6 +46,17 @@ const PAD_RING = '#facc15';
 const PAD_MARK = '#f8fafc';
 
 export const wallHeight = (p: BuildingPart): number => p.floors * p.floorHeight;
+
+/**
+ * Korean high-rise residential rule (ADR 0014 §5): a residential volume (its own use, else the design's zone)
+ * of APT_MIN_FLOORS+ floors with a punched or ribbon facade is drawn as an apartment block — balcony bands on
+ * its long faces, a vertical colour stripe on its gable ends, a crown band on top. Shape only, no preset ids,
+ * so designs from the editor follow the same rule.
+ */
+export function isResidentialHighRise(p: BuildingPart, zone?: Zone): boolean {
+  const style = (p.facade ?? DEFAULT_FACADE).style;
+  return (p.use ?? zone) === 'residential' && p.floors >= APT_MIN_FLOORS && (style === 'grid' || style === 'ribbon');
+}
 export const roofHeight = (p: BuildingPart): number =>
   p.roof === 'flat' || (p.footprint && p.footprint.length >= 3)
     ? 0
@@ -50,8 +70,10 @@ class GeometryBuilder {
   readonly col: number[] = [];
   readonly wall: number[] = [];
   readonly fac: number[] = [];
+  readonly top: number[] = [];
   private readonly c = new THREE.Color();
   private facade: [number, number, number, number] = [3, 0, 0.5, 0];
+  private topV = 0;
 
   color(hex: string): void {
     this.c.set(hex);
@@ -61,12 +83,22 @@ class GeometryBuilder {
     this.facade = f;
   }
 
+  setStyle(id: number): void {
+    this.facade = [this.facade[0], id, this.facade[2], this.facade[3]];
+  }
+
+  /** aTop of the following vertices (apartment wall height, 0 = none). */
+  setTop(h: number): void {
+    this.topV = h;
+  }
+
   vertex(p: V3, n: V3, w: V3): void {
     this.pos.push(p[0], p[1], p[2]);
     this.nor.push(n[0], n[1], n[2]);
     this.col.push(this.c.r, this.c.g, this.c.b);
     this.wall.push(w[0], w[1], w[2]);
     this.fac.push(...this.facade);
+    this.top.push(this.topV);
   }
 
   /** Triangle with a flat normal, flipped if needed so it faces along `want`. aWall = (x, z, flag). */
@@ -108,6 +140,7 @@ class GeometryBuilder {
     g.setAttribute('color', new THREE.Float32BufferAttribute(this.col, 3));
     g.setAttribute('aWall', new THREE.Float32BufferAttribute(this.wall, 3));
     g.setAttribute('aFacade', new THREE.Float32BufferAttribute(this.fac, 4));
+    g.setAttribute('aTop', new THREE.Float32BufferAttribute(this.top, 1));
     g.computeBoundingSphere();
     g.computeBoundingBox();
     return g;
@@ -125,8 +158,10 @@ function ccw(poly: readonly Vec2[]): Vec2[] {
  * length (window bays spread evenly over the chords, corner pillars only at the run's ends), and a
  * vertex shared by two chords of the run gets their average normal. Elsewhere (flat walls, the ends
  * of a run, roofs, floors) normals stay sharp. Without curved edges the output is unchanged.
+ * `apt`: walls of a residential high-rise volume get APT_STYLE.face, or .gable when shorter than
+ * GABLE_SHARE of the longest wall (a rounded run counts by its whole length).
  */
-function walls(gb: GeometryBuilder, outline: Vec2[], y0: number, h: number, curved: readonly boolean[] = []): void {
+function walls(gb: GeometryBuilder, outline: Vec2[], y0: number, h: number, curved: readonly boolean[] = [], apt = false): void {
   const y1 = y0 + h;
   const n = outline.length;
   const len: number[] = [];
@@ -159,6 +194,7 @@ function walls(gb: GeometryBuilder, outline: Vec2[], y0: number, h: number, curv
     }
     for (const k of run) total[k] = acc;
   }
+  const longest = Math.max(0, ...total);
   const avg = (p: V3, q: V3): V3 => {
     const x = p[0] + q[0];
     const z = p[2] + q[2];
@@ -176,6 +212,7 @@ function walls(gb: GeometryBuilder, outline: Vec2[], y0: number, h: number, curv
     const ua = u0[i]!;
     const ub = ua + l;
     const w = total[i]!;
+    if (apt) gb.setStyle(w < GABLE_SHARE * longest ? APT_STYLE.gable : APT_STYLE.face);
     const a0: V3 = [a.x, y0, a.z];
     const b0: V3 = [b.x, y0, b.z];
     const a1: V3 = [a.x, y1, a.z];
@@ -572,7 +609,7 @@ function bakeProp(pb: PropBaker, p: BuildingProp): void {
 }
 
 /** Bake all volumes of a design into one geometry in the building frame (ground at y = 0). */
-export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' | 'props'>): THREE.BufferGeometry {
+export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' | 'props'> & { zone?: Zone }): THREE.BufferGeometry {
   const gb = new GeometryBuilder();
   for (const p of type.parts) {
     const f = p.facade ?? DEFAULT_FACADE;
@@ -584,7 +621,11 @@ export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' 
     const h = wallHeight(p);
     const top = p.baseHeight + h;
     gb.color(p.color);
-    walls(gb, outline, p.baseHeight, h, outline[0] === edges.outline[0] ? edges.arcCorner.map((c) => c >= 0) : []);
+    const apt = isResidentialHighRise(p, type.zone);
+    gb.setTop(apt ? h : 0);
+    walls(gb, outline, p.baseHeight, h, outline[0] === edges.outline[0] ? edges.arcCorner.map((c) => c >= 0) : [], apt);
+    gb.setTop(0);
+    if (apt) gb.setStyle(FACADE_STYLE_ID[f.style]);
     if (p.baseHeight > 0.01) cap(gb, outline, p.baseHeight, false);
     // Drawn footprints always get a flat roof (the contract forbids pitched roofs on them).
     if (p.roof === 'flat' || hasFootprint(p)) {
@@ -609,7 +650,7 @@ export function bakeBuildingGeometry(type: Pick<BuildingType, 'parts' | 'smart' 
  */
 export function createBuildingMaterial(): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.02 });
-  mat.customProgramCacheKey = () => 'smartcity-building-v6';
+  mat.customProgramCacheKey = () => 'smartcity-building-v7';
   // uNight (0..1) and uSky (linear color) are shared by reference; set `material.userData.uNight.value` /
   // `uSky.value` each frame.
   const uNight = { value: 0 };
@@ -627,7 +668,9 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         attribute vec4 aFacade;
         attribute float aOccupancy;
         attribute vec3 aTone;
+        attribute float aTop;
         varying vec3 vTone;
+        varying float vTop;
         varying vec3 vWall;
         varying vec4 vFacade;
         varying float vOcc;
@@ -641,7 +684,8 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         vWall = aWall;
         vFacade = aFacade;
         vOcc = aOccupancy;
-        vTone = aTone;`,
+        vTone = aTone;
+        vTop = aTop;`,
       );
     shader.fragmentShader = shader.fragmentShader
       .replace(
@@ -651,6 +695,7 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         varying vec4 vFacade;
         varying float vOcc;
         varying vec3 vTone;
+        varying float vTop;
         varying float vGroundY;
         uniform float uNight;
         uniform vec3 uSky;
@@ -702,7 +747,44 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
             float slab = step(inFloor, max(0.04, solid * 0.5));
             win = step(mw, fract(u / 1.5)) * (1.0 - slab);
             glassC = mix(glassC, wallC * 0.55 + vec3(0.04, 0.07, 0.11), 0.35);
+            // Panels differ slightly in tint, as real insulated glass units do.
+            glassC *= 0.92 + 0.16 * bHash(vec2(floor(u / 1.5), floorIdx + L));
             avg = ratio;
+          } else if (style >= 4) {
+            // Korean high-rise apartment (ADR 0014 §5). One muted accent colour per volume (the same on all of
+            // its walls: hashed from its height and the instance's tone shift), used by the gable stripe and the crown.
+            float pick = bHash(vec2(floor(vTop * 7.0) + vTone.x, 4.7));
+            vec3 accent = pick < 0.34 ? vec3(0.08, 0.2, 0.29) : (pick < 0.67 ? vec3(0.36, 0.13, 0.07) : vec3(0.12, 0.22, 0.13));
+            if (style == 4) {
+              // Balcony face: a light railing band at the foot of every floor, recessed glass above it with
+              // white frames, and a solid party wall (pier) every three bays.
+              float pier = step(fract(u / (bw * 3.0)), 0.07);
+              float hi = 0.36 + 0.55 * clamp(ratio / 0.5, 0.6, 1.0);
+              float glass = step(0.36, inFloor) * step(inFloor, hi);
+              float frame = step(fract(u / 1.6), 0.05);
+              win = glass * (1.0 - frame) * (1.0 - pier);
+              float rail = step(inFloor, 0.3);
+              wallC = mix(wallC, wallC * 1.06 + 0.03, rail * (1.0 - pier));
+              // Shadow under the balcony slab.
+              wallC *= 1.0 - 0.3 * step(0.3, inFloor) * step(inFloor, 0.36) * (1.0 - pier);
+              glassC = vec3(0.07, 0.1, 0.13) + 0.06 * rnd;
+              avg = (hi - 0.36) * 0.92 * 0.93;
+            } else {
+              // Gable end (측벽): solid, a narrow column of small windows in the middle and a full-height
+              // accent stripe with a thin companion line towards one corner.
+              float c = abs(u - L * 0.5);
+              win = step(c, 0.55) * step(0.35, inFloor) * step(inFloor, 0.8);
+              float stripe = step(L * 0.12, u) * step(u, L * 0.12 + max(1.5, L * 0.12));
+              float line = step(L * 0.12 + max(1.5, L * 0.12) + 0.6, u) * step(u, L * 0.12 + max(1.5, L * 0.12) + 1.0);
+              wallC = mix(wallC, accent, clamp(stripe + line, 0.0, 1.0) * step(v, vTop - fh * 1.5));
+              avg = 0.04;
+            }
+            // Crown band (옥탑) over the top one and a half floors: solid, an accent band and a light coping line.
+            float crown = step(vTop - fh * 1.5, v);
+            float band = step(vTop - fh * 1.05, v) * step(v, vTop - fh * 0.45);
+            win *= 1.0 - crown;
+            wallC = mix(wallC, mix(wallC * 1.04 + 0.02, accent, band), crown);
+            wallC = mix(wallC, wallC * 1.12 + 0.05, step(vTop - 0.25, v));
           }
           if (ground > 0 && floorIdx < 0.5) {
             if (ground == 1) {
@@ -753,9 +835,14 @@ export function createBuildingMaterial(): THREE.MeshStandardMaterial {
         '#include <emissivemap_fragment>',
         `#include <emissivemap_fragment>
         totalEmissiveRadiance += winGlow * 1.1;
-        // Glass reflects the sky, more at grazing angles (Schlick-like), less at night.
-        float skyFres = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);
-        totalEmissiveRadiance += uSky * glassMask * (0.05 + 0.3 * skyFres) * (1.0 - 0.75 * uNight);`,
+        // Glass reflects a sky gradient along the reflection vector (no environment map): hazy near the
+        // horizon, deeper at the zenith, the darker ground below; more at grazing angles (Schlick-like), less at night.
+        vec3 toEye = normalize(vViewPosition);
+        float ry = dot(reflect(-toEye, normal), normalize((viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz));
+        vec3 horizonC = mix(uSky, vec3(1.0), 0.4);
+        vec3 skyRefl = ry >= 0.0 ? mix(horizonC, uSky * 0.8, sqrt(clamp(ry, 0.0, 1.0))) : mix(horizonC * 0.6, vec3(0.1, 0.11, 0.11), smoothstep(0.0, 0.5, -ry));
+        float skyFres = pow(1.0 - clamp(dot(normal, toEye), 0.0, 1.0), 3.0);
+        totalEmissiveRadiance += skyRefl * glassMask * (0.06 + 0.32 * skyFres) * (1.0 - 0.75 * uNight);`,
       );
   };
   return mat;

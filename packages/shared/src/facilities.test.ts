@@ -60,7 +60,7 @@ describe('v5 → v6 migration', () => {
     doc.buildingTypes['svc-hospital'] = { ...preset('svc-hospital'), name: '우리 병원', rev: 4 };
     normalizeDoc(doc);
     expect(doc.version).toBe(DOC_VERSION);
-    expect(DOC_VERSION).toBe(8);
+    expect(DOC_VERSION).toBe(9);
     for (const t of FACILITY_PRESETS) expect(doc.buildingTypes[t.id], t.id).toBeDefined();
     expect(doc.buildingTypes['svc-hospital']).toMatchObject({ name: '우리 병원', rev: 4 });
     expect(doc.buildingTypes['svc-power-plant']).toMatchObject({ service: 'powerPlant', rev: 1 });

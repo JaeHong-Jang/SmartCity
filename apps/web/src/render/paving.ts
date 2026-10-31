@@ -11,6 +11,7 @@
 
 import * as THREE from 'three';
 import { bounds, buildingFootprints, buildingMetrics, pointInPolygon, polygonArea, sampleSegmentCurve, signedArea, type Bounds, type BuildingType, type CityDoc, type Vec2 } from '@smartcity/shared';
+import { GRID_GLSL, GRID_UNIFORMS } from './ground';
 import { MeshBuilder } from './meshBuilder';
 
 /** Largest road-graph face still treated as a city block (bigger ones are open land), m². */
@@ -92,7 +93,7 @@ export interface PavingShapes {
 
 /** Local footprint box (rotation 0) and ground footprint area of a design, cached per design object. */
 const designInfo = new WeakMap<BuildingType, { box: Bounds; area: number }>();
-function design(t: BuildingType): { box: Bounds; area: number } {
+export function design(t: BuildingType): { box: Bounds; area: number } {
   let d = designInfo.get(t);
   if (!d) designInfo.set(t, (d = { box: bounds(buildingFootprints({ pos: { x: 0, z: 0 }, rotation: 0 }, t).flat()), area: buildingMetrics(t).footprintArea }));
   return d;
@@ -189,17 +190,21 @@ float pvNoise(vec2 p) {
   return mix(mix(pvHash(i), pvHash(i + vec2(1.0, 0.0)), u.x), mix(pvHash(i + vec2(0.0, 1.0)), pvHash(i + vec2(1.0, 1.0)), u.x), u.y);
 }`;
 
-/** Ground material with large and small scale tone variation in world space (no texture); `uNight` is shared. */
+/**
+ * Ground material with large and small scale tone variation in world space (no texture); `uNight` is shared.
+ * The editing grid (ground.ts) is drawn on it while an editing tool is active.
+ */
 function groundMaterial(color: string, key: string, big: number, small: number, tint: string, offset: number, uNight: { value: number }): THREE.MeshStandardMaterial {
   const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.96, metalness: 0, polygonOffset: true, polygonOffsetFactor: -offset, polygonOffsetUnits: -2 * offset });
   mat.customProgramCacheKey = () => key;
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uNight = uNight;
+    Object.assign(shader.uniforms, GRID_UNIFORMS);
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec2 vPaveXZ;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\nvPaveXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
     shader.fragmentShader = shader.fragmentShader
-      .replace('#include <common>', `#include <common>\nvarying vec2 vPaveXZ;\nuniform float uNight;\n${NOISE_GLSL}`)
+      .replace('#include <common>', `#include <common>\nvarying vec2 vPaveXZ;\nuniform float uNight;\n${NOISE_GLSL}\n${GRID_GLSL}`)
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
@@ -209,6 +214,7 @@ function groundMaterial(color: string, key: string, big: number, small: number, 
           diffuseColor.rgb *= 1.0 + (n1 - 0.5) * ${big.toFixed(3)} + (n2 - 0.5) * ${small.toFixed(3)};
           diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * ${tint}, smoothstep(0.6, 0.9, n1));
           diffuseColor.rgb *= mix(vec3(1.0), ${NIGHT_TINT}, uNight);
+          diffuseColor.rgb = cityGrid(diffuseColor.rgb, vec3(vPaveXZ.x, 0.0, vPaveXZ.y), uGrid * uGridPave, uGridPave, 0.6);
         }`,
       );
   };

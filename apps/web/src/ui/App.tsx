@@ -2,6 +2,7 @@ import { useRef, useState, type ChangeEvent } from 'react';
 import type { PanelId, SimSpeed } from '../app/store';
 import { SNAP_STEPS, snapLabel } from '../tools/snap';
 import { downloadText, exportDoc, startImport } from '../app/importExport';
+import { QUALITY_LABEL, setQuality } from '../app/quality';
 import { formatClock } from '../render/dayNight';
 import { AiPanel } from './AiPanel';
 import { BuildingEditor } from './BuildingEditor';
@@ -164,6 +165,7 @@ function StatusBar() {
   const simStatus = useStore((s) => s.simStatus);
   const speed = useStore((s) => s.simSpeed);
   const overlays = useStore((s) => s.overlays);
+  const quality = useStore((s) => s.quality);
   const density = useStore((s) => s.doc.meta.trafficDensity);
   const snapStep = useStore((s) => s.toolOptions.snapStep);
   const [densityDraft, setDensityDraft] = useState<number | null>(null);
@@ -260,6 +262,16 @@ function StatusBar() {
         <input type="checkbox" checked={overlays.shadows} onChange={(e) => store.set({ overlays: { ...overlays, shadows: e.target.checked } })} />
         그림자
       </label>
+      <div className="row speed">
+        <button
+          data-quality={quality}
+          className={quality === 'low' ? 'active' : ''}
+          title="그래픽 품질 · 낮음: 산 1겹, 가로수·가로등을 가까이만, 가로수 그림자 없음 (이 브라우저에 기억)"
+          onClick={() => setQuality(store, quality === 'low' ? 'normal' : 'low')}
+        >
+          그래픽: {QUALITY_LABEL[quality]}
+        </button>
+      </div>
       <label className="toggle">
         <input type="checkbox" checked={overlays.violations} onChange={(e) => store.set({ overlays: { ...overlays, violations: e.target.checked } })} />
         규제 위반

@@ -275,8 +275,8 @@ describe('server', () => {
     await b.closed;
   });
 
-  it.each([1, 2])('refuses a v%i client (before rounded volumes / sensors) with a reload notice and never lets it join', async (protocol) => {
-    expect(PROTOCOL_VERSION).toBe(3);
+  it.each([1, 2, 3])('refuses a v%i client (before rounded volumes / sensors / medians) with a reload notice and never lets it join', async (protocol) => {
+    expect(PROTOCOL_VERSION).toBe(4);
     const old = await TestClient.open(srv.port);
     old.send({ t: 'hello', protocol, room: 'room-a', name: 'old' });
     const e = await old.next('error');

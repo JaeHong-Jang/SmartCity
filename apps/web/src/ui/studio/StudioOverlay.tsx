@@ -97,7 +97,7 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
   const dirty = seq !== savedSeq;
 
   useEffect(() => {
-    const sc = new StudioScene(canvasRef.current!, editor);
+    const sc = new StudioScene(canvasRef.current!, editor, meta.zone);
     sceneRef.current = sc;
     sc.onTogglePanels = () => setCollapsed((c) => !c);
     if (import.meta.env.DEV) (window as unknown as { __studio?: unknown }).__studio = { editor, scene: sc };
@@ -106,7 +106,12 @@ export function StudioOverlay({ req }: { req: StudioRequest }) {
       sceneRef.current = null;
       if (import.meta.env.DEV) delete (window as unknown as { __studio?: unknown }).__studio;
     };
+    // The scene is made once per editor; zone changes reach it through the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor]);
+  useEffect(() => {
+    sceneRef.current?.setZone(meta.zone);
+  }, [meta.zone]);
 
   // Volumes for gauges, metrics and the save check: converted after a short pause, so stacking on a
   // large draft never waits for voxelsToParts (saving converts the current draft itself).

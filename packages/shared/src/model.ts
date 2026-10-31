@@ -3,6 +3,7 @@
 
 import { FACILITY_PRESETS } from './facilityPresets.js';
 import { BASE_GROWTH_PRESET_IDS, GROWTH_PRESETS } from './growthPresets.js';
+import { MODERN_BUILDING_PRESETS, MEDIAN_ROAD_PRESETS } from './modernPresets.js';
 import type { Vec2 } from './geometry.js';
 
 export type NodeId = string;
@@ -42,6 +43,17 @@ export interface RoadType {
   sidewalk: boolean;
   /** Rightmost lane in each direction is reserved for buses. */
   busOnlyRightLane: boolean;
+  /**
+   * Median strip (중앙분리대) between the two directions (ADR 0014 §4). Omitted = no median (every road
+   * before v9). Only on symmetric two-way roads (lanesForward === lanesBackward > 0); `width` is the
+   * whole strip (MEDIAN_MIN_WIDTH..MEDIAN_MAX_WIDTH m), `planted` only changes how it is drawn.
+   */
+  median?: RoadMedian;
+}
+
+export interface RoadMedian {
+  width: number;
+  planted: boolean;
 }
 
 export type Zone = 'residential' | 'commercial' | 'office' | 'industrial' | 'public';
@@ -342,7 +354,7 @@ export interface CityMeta {
 }
 
 /** Bumped when the doc layout changes; normalizeDoc migrates older docs forward. */
-export const DOC_VERSION = 8;
+export const DOC_VERSION = 9;
 
 export interface CityDoc {
   version: number;
@@ -370,6 +382,8 @@ export interface CityDoc {
  * v5 → v6: the facility designs (fire station, hospital, substation, power plant; same rule).
  * v6 → v7: rounded volumes (`BuildingPart.round`); no data changes, every v6 shape stays as it was.
  * v7 → v8: roadside sensors collection (ADR 0013 §4); no other data changes.
+ * v8 → v9: road median (`RoadType.median`, ADR 0014 §4; existing road types stay without one) and the
+ * modern presets: the median boulevards and the high-rise designs (only added, never over an existing id).
  */
 export function normalizeDoc(doc: CityDoc): CityDoc {
   // A missing collection is always safe to add; data rewrites happen only for real v1 docs.
@@ -400,6 +414,11 @@ export function normalizeDoc(doc: CityDoc): CityDoc {
   }
   if (doc.version < 7) doc.version = 7;
   if (doc.version < 8) doc.version = 8;
+  if (doc.version < 9) {
+    for (const t of MEDIAN_ROAD_PRESETS) if (doc.roadTypes && !doc.roadTypes[t.id]) doc.roadTypes[t.id] = cloneJson(t);
+    for (const t of MODERN_BUILDING_PRESETS) if (doc.buildingTypes && !doc.buildingTypes[t.id]) doc.buildingTypes[t.id] = { ...cloneJson(t), rev: 1 };
+    doc.version = 9;
+  }
   // A stored `round: null` or `0` means "not rounded", as in an upsert (which drops the key): drop it so
   // load and command validation agree. Malformed collections are left for docProblem to report.
   for (const t of Object.values(doc.buildingTypes ?? {})) {

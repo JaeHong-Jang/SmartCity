@@ -175,12 +175,12 @@ describe('sensor documents', () => {
   });
 
   it('v7 → v8 adds the empty sensors collection and changes nothing else; docProblem checks sensors', () => {
-    expect(DOC_VERSION).toBe(8);
+    expect(DOC_VERSION).toBe(9);
     const v7 = { ...cloneJson(corner()), version: 7 } as Partial<CityDoc>;
     delete v7.sensors;
     const before = cloneJson(v7);
     const v8 = normalizeDoc(v7 as CityDoc);
-    expect(v8.version).toBe(8);
+    expect(v8.version).toBe(DOC_VERSION);
     expect(v8.sensors).toEqual({});
     const { sensors: _added, ...rest } = v8;
     expect({ ...rest, version: 7 }).toEqual(before);

@@ -398,7 +398,7 @@ describe('v7 rounded volumes (ADR 0012 §4)', () => {
     const tower = { ...cloneJson(createEmptyDoc().buildingTypes.house!), id: 'tower', parts: [{ ...cloneJson(createEmptyDoc().buildingTypes.house!.parts[0]!), width: 12, depth: 12, roof: 'flat', round: 6 }] };
     writeFileSync(log, `${JSON.stringify({ seq: 3, cmd: { type: 'buildingType.upsert', buildingType: tower } })}\n`);
     const r = loadRoom(dir, 'r');
-    expect(DOC_VERSION).toBe(8);
+    expect(DOC_VERSION).toBe(9);
     expect(r.doc.version).toBe(DOC_VERSION);
     const { tower: added, ...rest } = r.doc.buildingTypes;
     expect(JSON.stringify(rest)).toBe(types);
@@ -483,8 +483,8 @@ describe('v8 roadside sensors (ADR 0013 §4)', () => {
     writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: v7 }));
     writeFileSync(log, road() + `${JSON.stringify({ seq: 4, cmd: { type: 'sensor.place', sensor } })}\n`);
     const r = loadRoom(dir, 'r');
-    expect(DOC_VERSION).toBe(8);
-    expect(r.doc.version).toBe(8);
+    expect(DOC_VERSION).toBe(9);
+    expect(r.doc.version).toBe(DOC_VERSION);
     expect(r.doc.sensors).toEqual({ cam: sensor });
     appendLog(dir, 'r', 5, JSON.stringify({ type: 'segment.remove', id: 'ab' }));
     expect(loadRoom(dir, 'r').doc.sensors).toEqual({});
@@ -494,7 +494,7 @@ describe('v8 roadside sensors (ADR 0013 §4)', () => {
     writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: { ...cloneJson(createEmptyDoc()), version: 7 } }));
     expect(oldServerOpens('r')).toBe(true);
     const room = new RoomManager(dir).get('r');
-    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(8);
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(DOC_VERSION);
     for (const c of [
       { type: 'node.add', node: { id: 'a', pos: { x: 0, z: 0 } } },
       { type: 'node.add', node: { id: 'b', pos: { x: 200, z: 0 } } },
@@ -516,5 +516,68 @@ describe('v8 roadside sensors (ADR 0013 §4)', () => {
     writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 3, doc }));
     writeFileSync(log, '');
     expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
+  });
+});
+
+describe('v9 road medians (ADR 0014 §4)', () => {
+  /** A doc as the v8 server saved it: no median presets, no modern designs. */
+  const v8 = (): Record<string, unknown> => {
+    const doc = cloneJson(createEmptyDoc()) as unknown as { version: number; roadTypes: Record<string, unknown>; buildingTypes: Record<string, unknown> };
+    for (const id of Object.keys(doc.roadTypes)) if (id.endsWith('-median')) delete doc.roadTypes[id];
+    for (const id of ['apt-slab-25', 'apt-tower-35', 'mixed-tower', 'glass-podium']) delete doc.buildingTypes[id];
+    doc.version = 8;
+    return doc as unknown as Record<string, unknown>;
+  };
+  const boulevard = { id: 'blvd', name: '대로', lanesForward: 2, lanesBackward: 2, laneWidth: 3.5, speedLimit: 16, sidewalk: true, busOnlyRightLane: false, median: { width: 3, planted: true } };
+  const lines = (cmds: unknown[], from = 1): string => cmds.map((cmd, i) => `${JSON.stringify({ seq: from + i, cmd })}\n`).join('');
+  const roadCmds = [
+    { type: 'roadType.upsert', roadType: boulevard },
+    { type: 'node.add', node: { id: 'a', pos: { x: 0, z: 0 } } },
+    { type: 'node.add', node: { id: 'b', pos: { x: 200, z: 0 } } },
+    { type: 'segment.add', segment: { id: 'ab', a: 'a', b: 'b', roadTypeId: 'blvd' } },
+  ];
+  // The v8 server (HEAD before P7c-1) refuses a checkpoint whose doc.version is above its DOC_VERSION 8.
+  const oldServerOpens = (room: string): boolean => !(JSON.parse(readFileSync(join(dir, `${room}.json`), 'utf8')).doc.version > 8);
+
+  it('loads a v8 checkpoint as v9 (presets added, old road types unchanged) and replays a logged median road', () => {
+    const old = v8();
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: old }));
+    writeFileSync(log, lines(roadCmds));
+    const r = loadRoom(dir, 'r');
+    expect(DOC_VERSION).toBe(9);
+    expect(r.doc.version).toBe(9);
+    expect(r.doc.roadTypes.blvd).toEqual(boulevard);
+    expect(r.doc.roadTypes['road-6-median']!.median).toEqual({ width: 4, planted: true });
+    expect(r.doc.buildingTypes['apt-tower-35']).toBeDefined();
+    for (const [id, rt] of Object.entries(old.roadTypes as Record<string, unknown>)) expect(JSON.stringify(r.doc.roadTypes[id])).toBe(JSON.stringify(rt));
+    expect(r.doc.segments.ab!.roadTypeId).toBe('blvd');
+  });
+
+  it('a migrated room is on disk at v9 before it logs a median, so the v8 server refuses it instead of dropping it', () => {
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: v8() }));
+    expect(oldServerOpens('r')).toBe(true);
+    const room = new RoomManager(dir).get('r');
+    expect(JSON.parse(readFileSync(join(dir, 'r.json'), 'utf8')).doc.version).toBe(9);
+    for (const c of roadCmds) expect(room.system(c as never).ok).toBe(true);
+    expect(readFileSync(log, 'utf8')).toContain('"median"');
+    expect(oldServerOpens('r')).toBe(false);
+    expect(loadRoom(dir, 'r').doc.roadTypes.blvd).toEqual(boulevard);
+    room.dispose();
+  });
+
+  it.each([{ median: { width: 0, planted: true } }, { median: null }, { lanesBackward: 1 }, { median: { width: 3 } }])('a malformed stored road type %o refuses the room (docProblem, same rule as roadType.upsert)', (bad) => {
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: v8() }));
+    writeFileSync(log, lines(roadCmds));
+    const doc = loadRoom(dir, 'r').doc;
+    doc.roadTypes.blvd = { ...boulevard, ...bad } as never;
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 4, doc }));
+    writeFileSync(log, '');
+    expect(() => loadRoom(dir, 'r')).toThrow(RoomLoadError);
+  });
+
+  it('a logged median road type that the rules refuse makes the log corrupt (not silently skipped)', () => {
+    writeFileSync(join(dir, 'r.json'), JSON.stringify({ schema: 1, seq: 0, doc: v8() }));
+    writeFileSync(log, lines([{ type: 'roadType.upsert', roadType: { ...boulevard, lanesBackward: 1 } }]));
+    expect(() => loadRoom(dir, 'r')).toThrow(LogCorruptedError);
   });
 });

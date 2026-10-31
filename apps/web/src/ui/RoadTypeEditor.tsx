@@ -1,8 +1,10 @@
 import { useState } from 'react';
-import { cloneJson, roadHalfWidth, type RoadType } from '@smartcity/shared';
+import { cloneJson, MEDIAN_MAX_WIDTH, MEDIAN_MIN_WIDTH, roadHalfWidth, type RoadType } from '@smartcity/shared';
 import { useDoc, useServices } from './context';
 
 const kmh = (ms: number): number => Math.round(ms * 3.6);
+/** A median is allowed only on symmetric two-way roads (ADR 0014 §4). */
+const symmetric = (rt: RoadType): boolean => rt.lanesBackward > 0 && rt.lanesForward === rt.lanesBackward;
 
 export function RoadTypeEditor() {
   const { store, dispatcher } = useServices();
@@ -16,7 +18,16 @@ export function RoadTypeEditor() {
     setSelected(id);
     setDraft(null);
   };
-  const patch = (p: Partial<RoadType>) => setDraft({ ...(rt as RoadType), ...p });
+  const patch = (p: Partial<RoadType>) => {
+    const next = { ...(rt as RoadType), ...p };
+    // Lanes made asymmetric drop the median rather than leaving a type the server refuses.
+    if (next.median && !symmetric(next)) delete next.median;
+    setDraft(next);
+  };
+  const setMedian = (on: boolean) => {
+    const { median, ...rest } = rt as RoadType;
+    setDraft(on ? { ...rest, median: median ?? { width: 4, planted: true } } : rest);
+  };
   const create = () => {
     const id = dispatcher.ids().next('rt');
     const src = rt ?? Object.values(doc.roadTypes)[0]!;
@@ -43,7 +54,7 @@ export function RoadTypeEditor() {
             <span className="swatch" style={{ background: t.busOnlyRightLane ? '#9a3434' : '#3b3f45' }} />
             <span style={{ flex: 1 }}>{t.name}</span>
             <span className="muted">
-              {t.lanesForward}+{t.lanesBackward} · {kmh(t.speedLimit)}km/h
+              {t.lanesForward}+{t.lanesBackward}{t.median ? ' · 분리대' : ''} · {kmh(t.speedLimit)}km/h
             </span>
           </button>
         ))}
@@ -75,6 +86,28 @@ export function RoadTypeEditor() {
             <label className="toggle">
               <input type="checkbox" checked={rt.busOnlyRightLane} onChange={(e) => patch({ busOnlyRightLane: e.target.checked })} /> 버스전용 (최우측 차선)
             </label>
+          </div>
+          <div className="row wrap">
+            <label className="toggle" title={symmetric(rt) ? undefined : '양방향 차선 수가 같은 도로만'}>
+              <input type="checkbox" data-median checked={!!rt.median} disabled={!symmetric(rt)} onChange={(e) => setMedian(e.target.checked)} /> 중앙분리대
+            </label>
+            {rt.median && (
+              <>
+                <label>폭 (m)</label>
+                <input
+                  type="number"
+                  data-median-width
+                  min={MEDIAN_MIN_WIDTH}
+                  max={MEDIAN_MAX_WIDTH}
+                  step={0.5}
+                  value={rt.median.width}
+                  onChange={(e) => patch({ median: { ...rt.median!, width: clampNum(e.target.value, MEDIAN_MIN_WIDTH, MEDIAN_MAX_WIDTH) } })}
+                />
+                <label className="toggle">
+                  <input type="checkbox" checked={rt.median.planted} onChange={(e) => patch({ median: { ...rt.median!, planted: e.target.checked } })} /> 녹지
+                </label>
+              </>
+            )}
           </div>
           <span className="muted">
             {rt.lanesBackward === 0 ? '일방통행' : '양방향'} · 전체 폭 {(roadHalfWidth(rt) * 2).toFixed(1)}m

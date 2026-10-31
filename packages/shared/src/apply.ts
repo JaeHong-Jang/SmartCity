@@ -198,6 +198,7 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
         speedLimit: rt.speedLimit,
         sidewalk: rt.sidewalk,
         busOnlyRightLane: rt.busOnlyRightLane,
+        ...(rt.median ? { median: { width: rt.median.width, planted: rt.median.planted } } : {}),
       });
       if (wider) pruneAutoLots(doc, Object.values(doc.segments).filter((s) => s.roadTypeId === rt.id).map((s) => s.id), tx);
       return;

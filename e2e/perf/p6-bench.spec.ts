@@ -8,6 +8,8 @@
 //   SC_PERF=1 SC_PERF_LABEL=before E2E_WEB_PORT=5191 npx playwright test e2e/perf/p6-bench.spec.ts
 // SC_PERF_GL=swiftshader measures with the software renderer the other e2e tests use instead;
 // SC_PERF_ADAPTER=NVIDIA picks a GPU, SC_PERF_VSYNC=1 keeps the 60 Hz cap, SC_PERF_PAUSE=1 stops traffic.
+// Heavier traffic: SC_PERF_VEHICLES=5000 SC_PERF_DENSITY=3 SC_PERF_WARMUP_S=360 (defaults 3000, 2, 180).
+// SC_PERF_POSES=street measures only those poses (no orbit / shadows-off); SC_PERF_NIGHT=1 also measures them at 22:00.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 
@@ -66,7 +68,8 @@ test('benchmark city frame stats', async ({ page }) => {
   const room = `perf-${Date.now().toString(36)}`;
   await page.goto(`/?offline=1&room=${room}`);
   await page.waitForFunction(() => !!(window as unknown as { __smartcity?: unknown }).__smartcity);
-  const made = await hook<{ buildings: number; segments: number }>(page, `h.perf.saveBenchCity(${JSON.stringify(room)})`);
+  const opts = process.env.SC_PERF_DENSITY ? { trafficDensity: Number(process.env.SC_PERF_DENSITY) } : {};
+  const made = await hook<{ buildings: number; segments: number }>(page, `h.perf.saveBenchCity(${JSON.stringify(room)}, ${JSON.stringify(opts)})`);
   await page.goto(`/?offline=1&room=${room}`);
   await page.waitForFunction(() => !!(window as unknown as { __smartcity?: unknown }).__smartcity);
   await expect.poll(() => hook<number>(page, 'Object.keys(h.store.getState().doc.buildings).length'), { timeout: 60_000 }).toBe(made.buildings);
@@ -82,7 +85,7 @@ test('benchmark city frame stats', async ({ page }) => {
   await hook(page, 'h.store.set({ simSpeed: 4 })');
   const target = Number(process.env.SC_PERF_VEHICLES ?? 3000);
   const t0 = Date.now();
-  while (Date.now() - t0 < 180_000) {
+  while (Date.now() - t0 < Number(process.env.SC_PERF_WARMUP_S ?? 180) * 1000) {
     const v = await hook<number>(page, 'h.store.getState().simStats?.vehicles ?? 0');
     if (v >= target) break;
     await page.waitForTimeout(2000);
@@ -91,10 +94,30 @@ test('benchmark city frame stats', async ({ page }) => {
   await hook(page, `h.store.set({ simSpeed: ${process.env.SC_PERF_PAUSE === '1' ? 0 : 1} })`);
 
   const results: Record<string, unknown> = {};
-  for (const [name, px, py, pz, tx, tz] of POSES) {
+  const save = (): void => {
+    mkdirSync('test-results/perf', { recursive: true });
+    const out = { label, gl, viewport: '1600x900@1', made, at: new Date().toISOString(), results };
+    writeFileSync(`test-results/perf/p6-${label}.json`, JSON.stringify(out, null, 2));
+    console.log(JSON.stringify(out, null, 2));
+  };
+  const only = process.env.SC_PERF_POSES?.split(',');
+  const poses = only ? POSES.filter(([name]) => only.includes(name)) : POSES;
+  for (const [name, px, py, pz, tx, tz] of poses) {
     await hook(page, `h.lookAt(${px}, ${py}, ${pz}, ${tx}, ${tz})`);
     results[name] = await measure(page, 5000);
     await page.screenshot({ path: `test-results/perf/p6-${label}-${name}.png` });
+  }
+  if (only) {
+    if (process.env.SC_PERF_NIGHT === '1') {
+      await hook(page, 'h.perf.setDayTime(22 * 3600)');
+      for (const [name, px, py, pz, tx, tz] of poses) {
+        await hook(page, `h.lookAt(${px}, ${py}, ${pz}, ${tx}, ${tz})`);
+        results[`${name}Night`] = await measure(page, 5000);
+        await page.screenshot({ path: `test-results/perf/p6-${label}-${name}-night.png` });
+      }
+    }
+    save();
+    return;
   }
   // Orbit: one full turn around the district view in 8 s, the azimuth set every frame in proportion
   // to the elapsed time (no damping), with frame times and draw calls aggregated over the whole turn.
@@ -136,8 +159,5 @@ test('benchmark city frame stats', async ({ page }) => {
   await hook(page, '(h.store.set({ overlays: { ...h.store.getState().overlays, shadows: false } }), 0)');
   results.districtNoShadow = await measure(page, 5000);
 
-  mkdirSync('test-results/perf', { recursive: true });
-  const out = { label, gl, viewport: '1600x900@1', made, at: new Date().toISOString(), results };
-  writeFileSync(`test-results/perf/p6-${label}.json`, JSON.stringify(out, null, 2));
-  console.log(JSON.stringify(out, null, 2));
+  save();
 });

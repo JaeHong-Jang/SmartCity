@@ -1,13 +1,13 @@
 // Simulator-mode emergency overlay (ADR 0010 §3/§4): burning buildings (flickering glow + smoke), charred
-// buildings, medical markers, dispatched fire trucks and ambulances, pre-empted intersections. Reads
-// `snapshot.scenario`; without incidents, dispatches or pre-emption nothing is drawn and a frame costs a few
-// property reads.
+// buildings, medical markers, pre-empted intersections. Dispatched fire trucks and ambulances are drawn by
+// VehicleLayer as fire engine / ambulance models with flashing beacons (ADR 0014 §6); this layer only counts
+// them. Reads `snapshot.scenario`; without incidents, dispatches or pre-emption nothing is drawn and a frame
+// costs a few property reads.
 
 import * as THREE from 'three';
 import type { Vec2 } from '@smartcity/shared';
 import { VEHICLE_STRIDE, type ScenarioView, type SimSnapshot } from '@smartcity/sim';
 import type { SimulationStream } from '../sim/simStream';
-import { interpAlpha, lerpAngle } from './vehicles';
 
 /** What the snapshot does not carry: where a building or a node is. */
 export interface EmergencySource {
@@ -41,51 +41,14 @@ interface Pulse {
   obj: THREE.Object3D;
   seed: number;
 }
-interface Rig {
-  group: THREE.Group;
-  lightA: THREE.MeshBasicMaterial;
-  lightB: THREE.MeshBasicMaterial;
-  kind: 'fire' | 'medical';
-}
 
 const box = (w: number, h: number, d: number): THREE.BoxGeometry => new THREE.BoxGeometry(w, h, d);
-
-/**
- * Pose of vehicle `id` exactly as VehicleLayer draws it (same interpAlpha, same previous/latest snapshots,
- * same angle interpolation), so a rig sits on the car it covers. Null when the vehicle is not in `cur`.
- */
-export function rigPose(cur: SimSnapshot, prev: SimSnapshot | null, id: number, now: number, prevAt: number, latestAt: number): { x: number; z: number; h: number } | null {
-  let i = -1;
-  for (let k = 0; k < cur.vehicleCount; k++) {
-    if (cur.vehicles[k * VEHICLE_STRIDE + 5] === id) {
-      i = k;
-      break;
-    }
-  }
-  if (i < 0) return null;
-  const o = i * VEHICLE_STRIDE;
-  let x = cur.vehicles[o]!;
-  let z = cur.vehicles[o + 1]!;
-  let h = cur.vehicles[o + 2]!;
-  const usePrev = prev !== null && prev.graphRevision === cur.graphRevision;
-  const alpha = usePrev ? interpAlpha(now, prevAt, latestAt) : 1;
-  if (usePrev && alpha < 1) {
-    for (let k = 0; k < prev.vehicleCount; k++) {
-      const q = k * VEHICLE_STRIDE;
-      if (prev.vehicles[q + 5] !== id) continue;
-      x = prev.vehicles[q]! + (x - prev.vehicles[q]!) * alpha;
-      z = prev.vehicles[q + 1]! + (z - prev.vehicles[q + 1]!) * alpha;
-      h = lerpAngle(prev.vehicles[q + 2]!, h, alpha);
-      break;
-    }
-  }
-  return { x, z, h };
-}
 
 export class EmergencyLayer {
   readonly group = new THREE.Group();
   private fixed = new THREE.Group();
-  private rigs = new Map<number, Rig>();
+  /** Dispatched vehicles on the road now, by vehicle id. */
+  private rigs = new Map<number, 'fire' | 'medical'>();
   private glows: Glow[] = [];
   private smokes: Smoke[] = [];
   private pulses: Pulse[] = [];
@@ -142,19 +105,10 @@ export class EmergencyLayer {
 
   private clearAll(): void {
     this.clearFixed();
-    for (const r of this.rigs.values()) this.disposeRig(r);
     this.rigs.clear();
     this.counts = { fires: 0, medical: 0, damaged: 0, preempted: 0 };
     this.sig = '';
     this.group.visible = false;
-  }
-
-  private disposeRig(r: Rig): void {
-    this.group.remove(r.group);
-    r.group.traverse((o) => {
-      const m = (o as THREE.Mesh).material as THREE.Material | undefined;
-      if (m) m.dispose();
-    });
   }
 
   private signature(sc: ScenarioView): string {
@@ -241,70 +195,11 @@ export class EmergencyLayer {
     this.counts = { fires, medical, damaged: sc.damagedBuildings.length, preempted };
   }
 
-  private makeRig(kind: 'fire' | 'medical'): Rig {
-    const g = new THREE.Group();
-    const lightA = new THREE.MeshBasicMaterial({ color: '#ef4444' });
-    const lightB = new THREE.MeshBasicMaterial({ color: '#3b82f6' });
-    const part = (w: number, h: number, d: number, color: string, x: number, y: number, z: number): void => {
-      const m = new THREE.Mesh(this.geo.unit, new THREE.MeshLambertMaterial({ color }));
-      m.scale.set(w, h, d);
-      m.position.set(x, y, z);
-      g.add(m);
-    };
-    if (kind === 'fire') {
-      part(9, 2.4, 2.7, '#c81e1e', 0, 1.9, 0); // body
-      part(2.6, 1.6, 2.5, '#9b1c1c', 3.2, 3.9, 0); // cab roof
-      part(6, 0.5, 0.9, '#cbd5e1', -1.2, 3.5, 0); // ladder
-      part(6, 0.15, 0.15, '#94a3b8', -1.2, 3.9, 0.35);
-      part(9.02, 0.35, 2.72, '#fbbf24', 0, 1.1, 0); // stripe
-    } else {
-      part(6.4, 2.6, 2.4, '#f8fafc', 0, 1.9, 0);
-      part(2.2, 1.4, 2.3, '#e2e8f0', 2.2, 3.7, 0);
-      part(6.42, 0.5, 2.42, '#dc2626', 0, 1.7, 0); // red stripe
-      part(1.6, 0.35, 0.1, '#dc2626', -0.6, 2.9, 1.23); // side cross
-      part(0.35, 1.6, 0.1, '#dc2626', -0.6, 2.9, 1.23);
-    }
-    const bar = (mat: THREE.Material, z: number): void => {
-      const m = new THREE.Mesh(this.geo.unit, mat);
-      m.scale.set(0.7, 0.45, 0.9);
-      m.position.set(kind === 'fire' ? 3.2 : 2.2, kind === 'fire' ? 4.9 : 4.6, z);
-      g.add(m);
-    };
-    bar(lightA, -0.7);
-    bar(lightB, 0.7);
-    this.group.add(g);
-    return { group: g, lightA, lightB, kind };
-  }
-
-  private updateVehicles(now: number, snap: SimSnapshot, sc: ScenarioView): void {
-    const prev = this.stream.previous();
+  private updateVehicles(snap: SimSnapshot, sc: ScenarioView): void {
     this.index.clear();
     for (let i = 0; i < snap.vehicleCount; i++) this.index.set(snap.vehicles[i * VEHICLE_STRIDE + 5]!, i);
-    const live = new Set<number>();
-    const flash = Math.floor(now / 170) % 2 === 0;
-    for (const d of sc.dispatches) {
-      if (d.vehicleId === null) continue;
-      const i = this.index.get(d.vehicleId);
-      if (i === undefined) continue;
-      live.add(d.vehicleId);
-      let rig = this.rigs.get(d.vehicleId);
-      if (!rig || rig.kind !== d.kind) {
-        if (rig) this.disposeRig(rig);
-        rig = this.makeRig(d.kind);
-        this.rigs.set(d.vehicleId, rig);
-      }
-      const pose = rigPose(snap, prev, d.vehicleId, now, this.stream.previousAt(), this.stream.latestAt())!;
-      const { x, z, h } = pose;
-      rig.group.position.set(x, 0.12, z);
-      rig.group.rotation.y = -h;
-      rig.lightA.color.set(flash ? '#ff2a2a' : '#4a0d0d');
-      rig.lightB.color.set(flash ? '#0d1a4a' : '#3b82f6');
-    }
-    for (const [id, rig] of this.rigs) {
-      if (live.has(id)) continue;
-      this.disposeRig(rig);
-      this.rigs.delete(id);
-    }
+    this.rigs.clear();
+    for (const d of sc.dispatches) if (d.vehicleId !== null && this.index.has(d.vehicleId)) this.rigs.set(d.vehicleId, d.kind);
   }
 
   update(now: number): void {
@@ -330,13 +225,13 @@ export class EmergencyLayer {
     }
     for (const p of this.pulses) p.obj.scale.setScalar(1 + 0.25 * Math.sin(now / 220 + p.seed));
     for (const p of this.sirens) (p.obj as THREE.Mesh<THREE.BufferGeometry, THREE.MeshBasicMaterial>).material.color.set(Math.floor(now / 170) % 2 === 0 ? '#ef4444' : '#3b82f6');
-    this.updateVehicles(now, snap, sc);
+    this.updateVehicles(snap, sc);
   }
 
   stats(): EmergencyStats {
     let fireTrucks = 0;
     let ambulances = 0;
-    for (const r of this.rigs.values()) r.kind === 'fire' ? fireTrucks++ : ambulances++;
+    for (const kind of this.rigs.values()) kind === 'fire' ? fireTrucks++ : ambulances++;
     return { drawn: this.group.visible, ...this.counts, fireTrucks, ambulances };
   }
 

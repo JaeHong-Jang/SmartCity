@@ -7,6 +7,7 @@ import {
   add,
   buildingFootprints,
   cumulativeLengths,
+  medianWidth,
   normalize,
   pointAtLength,
   rightNormal,
@@ -458,7 +459,7 @@ export class OverlayLayer {
         const ahead = pointAtLength(pts, cum, Math.min(cum[cum.length - 1]!, sAt + 0.5));
         const behind = pointAtLength(pts, cum, Math.max(0, sAt - 0.5));
         const n = rightNormal(normalize(sub(ahead, behind)));
-        const off = (rt.lanesBackward === 0 ? 0.5 : 1) * (rt.lanesForward + rt.lanesBackward) * rt.laneWidth * 0.5 + 1.2;
+        const off = (rt.lanesBackward === 0 ? 0.5 : 1) * (rt.lanesForward + rt.lanesBackward) * rt.laneWidth * 0.5 + medianWidth(rt) / 2 + 1.2;
         pos = add(p, scale(n, st.dir === 'forward' ? off : -off));
       }
       disc(b, pos, 1.8, '#ffffff', Y_OVER);
@@ -511,7 +512,7 @@ export class OverlayLayer {
         const start = atA ? Math.min(g.length, end + 18) : Math.max(0, end - 18);
         let pts = slicePolyline(g.centerline, Math.min(start, end), Math.max(start, end));
         if (atA) pts = pts.reverse();
-        const off = g.roadType.lanesBackward === 0 ? 0 : (atA ? -1 : 1) * g.roadType.laneWidth * 0.8;
+        const off = g.roadType.lanesBackward === 0 ? 0 : (atA ? -1 : 1) * (g.roadType.laneWidth * 0.8 + medianWidth(g.roadType) / 2);
         const shifted = pts.map((p, i) => {
           const q = pts[Math.min(pts.length - 1, i + 1)]!;
           const r = pts[Math.max(0, i - 1)]!;

@@ -6,9 +6,10 @@
 
 import * as THREE from 'three';
 import CameraControls from 'camera-controls';
-import { parseVoxel, voxelKey, voxelsToParts, VOXEL_LIMITS, type BuildingProp, type VoxelModel } from '@smartcity/shared';
+import { parseVoxel, voxelKey, voxelsToParts, VOXEL_LIMITS, type BuildingProp, type VoxelModel, type Zone } from '@smartcity/shared';
 import { bakeBuildingGeometry, createBuildingMaterial } from '../render/buildingGeometry';
 import { configureRenderer, createSun } from '../render/sceneKit';
+import { studioBakeInput } from './design';
 import { pickVoxel, planeCell, rayBox, type V3, type VoxelHit } from './picking';
 import { propBox } from './props';
 import { StudioEditor, TOOL_INFO, type RectMode } from './StudioEditor';
@@ -88,6 +89,8 @@ export class StudioScene {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly editor: StudioEditor,
+    /** The design's zone (용도): part of the facade look (ADR 0014 §5); change it with setZone. */
+    private zone: Zone,
   ) {
     const r = new THREE.WebGLRenderer({ canvas, antialias: true });
     configureRenderer(r);
@@ -296,11 +299,18 @@ export class StudioScene {
     return { x: rect.left + ((_v.x + 1) / 2) * rect.width, y: rect.top + ((1 - _v.y) / 2) * rect.height };
   }
 
+  /** The design's zone changed (용도): rebake, since the residential high-rise look depends on it. */
+  setZone(zone: Zone): void {
+    if (zone === this.zone) return;
+    this.zone = zone;
+    this.sync();
+  }
+
   // ── Sync with the editor ──
 
   private sync = (): void => {
     const ed = this.editor;
-    const key = `${ed.draftVersion}|${ed.floor}|${ed.upperHidden}`;
+    const key = `${ed.draftVersion}|${ed.floor}|${ed.upperHidden}|${this.zone}`;
     if (key !== this.bakeKey) {
       this.bakeKey = key;
       if (this.lastBakeMs < SLOW_BAKE_MS) this.bake();
@@ -344,7 +354,7 @@ export class StudioScene {
     const top = ed.floor === null ? Infinity : (ed.floor + 1) * m.floorHeight + 0.01;
     const props = ed.doc.props.filter((p) => p.pos.y <= top);
     const old = this.building.geometry;
-    this.building.geometry = bakeBuildingGeometry({ parts, props, ...(ed.doc.smart ? { smart: ed.doc.smart } : {}) });
+    this.building.geometry = bakeBuildingGeometry(studioBakeInput(parts, props, ed.doc, this.zone));
     old.dispose();
     this.building.visible = true;
     this.cells.visible = false;

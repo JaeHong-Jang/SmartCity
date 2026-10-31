@@ -18,3 +18,8 @@
 - `growth.ts`: `demand(doc)`는 RCI 수요를 계산한다. `growthStep`과 `growthTick`은 문서만 읽고 해시 RNG를 쓰는 성장 명령을 만든다. 서버 `GrowthDirector`와 웹 `LocalTransport`가 호출한다.
 - 도로 편집(`segment.add`, `node.move`, 폭이 넓어지는 `segment.setType`·`roadType.upsert`)은 같은 트랜잭션에서 차도와 겹치는 auto 필지와 그 안의 auto 건물을 지운다(`apply/roads.ts pruneAutoLots`). 분할 시에는 frontage를 재매핑한다.
 - `protocol.ts`: AI 도우미 메시지(`ai.ask`, `ai.cancel`, `ai.status`, `ai.progress`, `ai.proposal`, `ai.error`).
+
+## Phase 7 도로 단면·프리셋 (ADR 0014 §4·§5)
+- `roads.ts`: `RoadType.median?: {width, planted}`(중앙분리대, 생략 = 없음). `drivableWidth` = 차선 폭 합(주행 가능 폭), `medianWidth`, `carriagewayWidth` = **보도 사이 전체 폭**(차선 + 분리대; 분리대 없으면 차선 합과 같음). 보도·연석·횡단보도·센서·보행 경로·`roadHalfWidth`는 모두 `carriagewayWidth` 기준. `laneOffset`은 분리대가 있으면 `±(width/2 + (i+0.5)·laneWidth)`.
+- 분리대는 `lanesForward === lanesBackward > 0`인 도로만, 폭 `MEDIAN_MIN_WIDTH..MEDIAN_MAX_WIDTH`. 검사는 `medianShapeError` 하나(`roadType.upsert`·`docProblem` 공용).
+- `modernPresets.ts`: 중앙녹지 대로 2종(`road-6-median`·`road-8-median`)과 고층 설계 4종(`apt-slab-25`·`apt-tower-35`·`mixed-tower`·`glass-podium`, `growth` 없음). `createEmptyDoc`와 v8→v9 마이그레이션에서 문서에 없는 id만 추가한다. DOC_VERSION 9·PROTOCOL_VERSION 4.

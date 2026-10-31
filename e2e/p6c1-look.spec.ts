@@ -144,18 +144,58 @@ async function horizonPixels(page: Page) {
   );
 }
 
-test('no seam where the sky meets the fully fogged ground, by day and by night', async ({ page }) => {
+/** Renders once and reads the canvas pixel at world (x, y, z) (mountains as they are). */
+async function pixelAt(page: Page, at: string) {
+  return hook<number[]>(
+    page,
+    `(() => {
+      const r = h.renderer;
+      const cam = r.cam.camera;
+      const canvas = r.renderer.domElement;
+      const gl = r.renderer.getContext();
+      const fwd = new cam.position.constructor();
+      cam.getWorldDirection(fwd);
+      fwd.y = 0;
+      fwd.normalize();
+      const p = ${at};
+      const v = p.clone().project(cam);
+      const x = Math.round(((v.x + 1) / 2) * canvas.width);
+      const y = Math.round(((1 - v.y) / 2) * canvas.height);
+      r.renderer.render(r.scene, cam);
+      const px = new Uint8Array(4);
+      gl.readPixels(x, canvas.height - 1 - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      return [px[0], px[1], px[2]];
+    })()`,
+  );
+}
+const lum = (c: number[]) => 0.2126 * c[0]! + 0.7152 * c[1]! + 0.0722 * c[2]!;
+
+test('no seam where the sky meets the fully fogged ground, by day and by night; mountains rise out of the haze', async ({ page }) => {
   await page.goto(`/?offline=1&room=e2e-p6c1-sky-${Date.now().toString(36)}`);
   await ready(page);
   // Low camera looking toward the horizon (polar ≈ 84°), from inside the buildable square.
   await hook(page, 'h.lookAt(0, 30, 300, 0, 0)');
+  const mountains = (on: boolean) => hook(page, `(h.renderer.scene.getObjectByName('mountains').visible = ${on}, 0)`);
+  // Points ahead of the camera: the foot of the nearest mountain ring (0.3 m up, just inside it), and its
+  // body 0.5° above eye level (every ridge is higher: ADR 0014 §3, P7a).
+  const ring = 'cam.far * 0.9 * 0.7';
+  const foot = `cam.position.clone().addScaledVector(fwd, ${ring} * 0.995).setY(0.3)`;
+  const body = 'cam.position.clone().addScaledVector(fwd, 1e5).setY(cam.position.y + Math.tan(0.5 * Math.PI / 180) * 1e5)';
   for (const [label, time] of [['day', 12], ['night', 22]] as const) {
     await hook(page, `h.perf.setDayTime(${time} * 3600)`);
     await page.waitForTimeout(800);
+    // Without the mountains: different rows (the ground sample is below the horizon), same color within 2/255 per channel.
+    await mountains(false);
     const px = await horizonPixels(page);
-    // Different rows (the ground sample is below the horizon), same color within 2/255 per channel.
     expect(px.rows[1]! - px.rows[0]!, label).toBeGreaterThan(4);
     for (let i = 0; i < 3; i++) expect(Math.abs(px.sky[i]! - px.ground[i]!), `${label} ${px.sky} vs ${px.ground}`).toBeLessThanOrEqual(2);
+    const sky = await pixelAt(page, body);
+    // With them: the foot is the fully fogged ground's color (no seam), the body clearly stands out of the sky.
+    await mountains(true);
+    const f = await pixelAt(page, foot);
+    for (let i = 0; i < 3; i++) expect(Math.abs(f[i]! - px.ground[i]!), `${label} foot ${f} vs ground ${px.ground}`).toBeLessThanOrEqual(2);
+    const m = await pixelAt(page, body);
+    expect(lum(sky) - lum(m), `${label} mountain ${m} vs sky ${sky}`).toBeGreaterThan(label === 'day' ? 20 : 4);
     await page.screenshot({ path: `test-results/p6c1-look-horizon-${label}.png` });
   }
 });

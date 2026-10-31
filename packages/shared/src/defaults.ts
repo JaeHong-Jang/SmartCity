@@ -2,6 +2,7 @@
 
 import { FACILITY_PRESETS } from './facilityPresets.js';
 import { GROWTH_PRESETS } from './growthPresets.js';
+import { MEDIAN_ROAD_PRESETS, MODERN_BUILDING_PRESETS } from './modernPresets.js';
 import { cloneJson, DOC_VERSION, type BuildingPart, type BuildingType, type CityDoc, type Facade, type RoadType, type SmartFeatures, type VehiclePart, type VehicleType } from './model.js';
 
 const kmh = (v: number): number => Math.round((v / 3.6) * 100) / 100;
@@ -215,8 +216,8 @@ export function createEmptyDoc(name = '새 도시', seed = 1): CityDoc {
     meta: { name, seed, halfSize: 2000, trafficDensity: 1 },
     nodes: {},
     segments: {},
-    roadTypes: byId(DEFAULT_ROAD_TYPES),
-    buildingTypes: byId(withRev([...DEFAULT_BUILDING_TYPES, ...SMART_CITY_PRESETS, ...GROWTH_PRESETS, ...FACILITY_PRESETS])),
+    roadTypes: byId([...DEFAULT_ROAD_TYPES, ...MEDIAN_ROAD_PRESETS]),
+    buildingTypes: byId(withRev([...DEFAULT_BUILDING_TYPES, ...SMART_CITY_PRESETS, ...GROWTH_PRESETS, ...FACILITY_PRESETS, ...MODERN_BUILDING_PRESETS])),
     buildings: {},
     vehicleTypes: byId(DEFAULT_VEHICLE_TYPES),
     intersections: {},

@@ -10,6 +10,7 @@ import {
   VOXEL_LIMITS,
   voxelsToParts,
   type BuildingPart,
+  type BuildingProp,
   type BuildingType,
   type CityDoc,
   type Command,
@@ -25,6 +26,14 @@ export interface StudioMeta {
   zone: Zone;
   /** Kept from the opened design (AI designs stay marked after an edit); new designs have none. */
   origin?: 'ai';
+}
+
+/**
+ * What the studio scene bakes: the draft's volumes and props with the design's zone, so the facade (the
+ * residential high-rise rule of ADR 0014 §5 reads the zone when a volume has no own use) matches the saved design.
+ */
+export function studioBakeInput(parts: BuildingType['parts'], props: BuildingProp[], doc: StudioDoc, zone: Zone): Pick<BuildingType, 'parts' | 'props' | 'smart' | 'zone'> {
+  return { parts, props, zone, ...(doc.smart ? { smart: doc.smart } : {}) };
 }
 
 /** The design as it would be stored (parts from cells, props as placed). */

@@ -4,6 +4,7 @@
 // `nodes` is an array, say, accepts edits that the next save silently drops.
 
 import type { CityDoc } from './model.js';
+import { medianShapeError } from './roads.js';
 import { sensorShapeError } from './sensors.js';
 
 type Obj = Record<string, unknown>;
@@ -53,7 +54,8 @@ export function docProblem(doc: unknown): string | null {
   const rules: [(typeof DOC_COLLECTIONS)[number], string, (e: Obj) => boolean][] = [
     ['nodes', 'id', (e) => vec(e.pos)],
     ['segments', 'id', (e) => has('nodes', e.a) && has('nodes', e.b) && has('roadTypes', e.roadTypeId)],
-    ['roadTypes', 'id', (e) => str(e.name) && num(e.lanesForward) && num(e.lanesBackward) && num(e.laneWidth) && num(e.speedLimit)],
+    // The median (v9) feeds every lane offset and road width: the same rule as roadType.upsert.
+    ['roadTypes', 'id', (e) => str(e.name) && num(e.lanesForward) && num(e.lanesBackward) && num(e.laneWidth) && num(e.speedLimit) && medianShapeError(e) === null],
     ['buildingTypes', 'id', (e) => str(e.name) && Array.isArray(e.parts) && e.parts.every(roundOk)],
     ['buildings', 'id', (e) => has('buildingTypes', e.typeId) && vec(e.pos) && num(e.rotation)],
     ['vehicleTypes', 'id', (e) => str(e.name) && num(e.length) && Array.isArray(e.parts)],

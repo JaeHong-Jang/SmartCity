@@ -49,7 +49,8 @@ interface TypeEntry {
   capacity: number;
 }
 
-const designSig = (t: BuildingType): string => JSON.stringify([t.parts, t.smart ?? null, t.props ?? null]);
+// The zone picks the residential high-rise look of volumes without their own use (isResidentialHighRise).
+const designSig = (t: BuildingType): string => JSON.stringify([t.parts, t.smart ?? null, t.props ?? null, t.zone]);
 
 export class BuildingLayer {
   readonly group = new THREE.Group();
@@ -215,11 +216,15 @@ export class BuildingLayer {
   }
 }
 
+/** Rebuild key of the editor preview: everything buildingPreview's look depends on (the zone picks the residential high-rise facade). */
+export const buildingPreviewKey = (type: Pick<BuildingType, 'parts' | 'smart' | 'props' | 'zone'>, plot?: number): string =>
+  JSON.stringify([type.parts, type.smart ?? null, type.props ?? null, type.zone, plot]);
+
 /**
  * Editor preview: the design with the same geometry and facade material as the city, standing on
  * its square plot (side `plot` m) with an arrow marking the front (+Z, road side).
  */
-export function buildingPreview(type: Pick<BuildingType, 'parts' | 'smart'>, plot?: number): THREE.Group {
+export function buildingPreview(type: Pick<BuildingType, 'parts' | 'smart'> & Partial<Pick<BuildingType, 'zone'>>, plot?: number): THREE.Group {
   const g = new THREE.Group();
   const mesh = new THREE.Mesh(bakeBuildingGeometry(type), createBuildingMaterial());
   mesh.castShadow = true;
