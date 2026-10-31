@@ -208,6 +208,7 @@ const TOAST_MS = 4000;
 
 /** Korean wording for the most common applyCommand errors; anything else is shown verbatim. */
 const ERROR_KO: [RegExp, string][] = [
+  [/the city is not empty/, '방이 이미 비어 있지 않아 적용하지 않았습니다'],
   [/segment shorter than/, '도로가 너무 짧습니다'],
   [/nodes already connected/, '이미 연결된 지점입니다'],
   [/unknown segment/, '도로가 이미 바뀌었습니다. 다시 시도하세요'],

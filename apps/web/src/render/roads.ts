@@ -3,12 +3,14 @@
 // Each update diffs per-item geometry signatures and rebuilds only the chunks that changed.
 // Sidewalks are red paving bricks drawn by the shared material in world X/Z (ADR 0014 §2, P7a: no
 // texture, no extra draw call); far away they fade into the bricks' average color (C_WALK).
+// Medians (P7c-2, ADR 0014 §4) are raised curbed islands — grass and a low hedge when planted, concrete
+// otherwise — cut where the lanes stop at a junction and at every crosswalk; speed bumps skip them.
 
 import * as THREE from 'three';
-import { add, carriagewayWidth, medianWidth, scale, slicePolyline, sub, type RoadType, type Vec2 } from '@smartcity/shared';
+import { add, carriagewayWidth, cumulativeLengths, medianWidth, offsetPolyline, scale, slicePolyline, sub, type RoadType, type Vec2 } from '@smartcity/shared';
 import { MeshBuilder } from './meshBuilder';
 import type { RoadNetworkGeom, RoadSegGeom, RoadNodeGeom } from './roadNetwork';
-import { speedBump, zebra } from './streetMarks';
+import { BUMP_LENGTH, speedBump, zebra } from './streetMarks';
 
 export const CHUNK_SIZE = 256;
 export const Y_ROAD = 0.06;
@@ -28,15 +30,24 @@ const BRICK = { x: 0.3, z: 0.15, joint: 0.012 };
 /** Share of a sidewalk covered by joints (drawn at 85 % mortar). */
 const JOINT_SHARE = 1 - (1 - (2 * BRICK.joint) / BRICK.x) * (1 - (2 * BRICK.joint) / BRICK.z);
 /** Sidewalk vertex color: the bricks' average, which the shader also uses to find the sidewalk. */
-const C_WALK = BRICK_TONES.reduce((c, t, i) => c.add(t.clone().multiplyScalar(BRICK_WEIGHTS[i]!)), new THREE.Color(0, 0, 0))
+export const C_WALK = BRICK_TONES.reduce((c, t, i) => c.add(t.clone().multiplyScalar(BRICK_WEIGHTS[i]!)), new THREE.Color(0, 0, 0))
   .multiplyScalar(1 - 0.85 * JOINT_SHARE)
   .add(C_MORTAR.clone().multiplyScalar(0.85 * JOINT_SHARE));
 const C_CURB = new THREE.Color('#9d9a92');
 const C_SHOULDER = new THREE.Color('#6d7077');
 const C_SCHOOL = new THREE.Color('#7a4638');
-// Median strip as a plain surface until its own geometry (P7c-2).
-const C_MEDIAN_PLANTED = new THREE.Color('#5f7d47');
-const C_MEDIAN = new THREE.Color('#a8a59d');
+/** Median: grass and hedge (exact vertex colors: the shader gives them the lawn's night tone), concrete. */
+export const C_MEDIAN_GRASS = new THREE.Color('#5f7d47');
+export const C_HEDGE = new THREE.Color('#3d6234');
+export const C_MEDIAN = new THREE.Color('#a8a59d');
+/** Concrete curb top along the edges of a planted median, meters. */
+const MEDIAN_EDGE = 0.25;
+/** Low hedge (관목 띠) along a planted median: height, widest, ends kept back from a cut median end, meters. */
+const HEDGE = { height: 0.6, maxWidth: 1.4, inset: 1 };
+/** The median stops this far from a crosswalk's zebra, meters. */
+export const MEDIAN_CROSS_GAP = 0.6;
+/** Shorter median pieces (between two close crosswalks) are left out, meters. */
+const MEDIAN_MIN_PIECE = 1;
 
 export const chunkKey = (p: Vec2): string => `${Math.floor(p.x / CHUNK_SIZE)},${Math.floor(p.z / CHUNK_SIZE)}`;
 
@@ -185,9 +196,9 @@ export class RoadLayer {
   }
 }
 
-/** Sidewalk bricks on the road material: where the vertex color is C_WALK, in world X/Z. */
+/** Sidewalk bricks on the road material: where the vertex color is C_WALK, in world X/Z; median greenery's night tone. */
 function brickSidewalks(mat: THREE.MeshStandardMaterial, uNight: { value: number }): void {
-  mat.customProgramCacheKey = () => 'smartcity-road-brick-v1';
+  mat.customProgramCacheKey = () => 'smartcity-road-brick-v2';
   mat.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, {
       uNight,
@@ -196,6 +207,8 @@ function brickSidewalks(mat: THREE.MeshStandardMaterial, uNight: { value: number
       uBrick1: { value: BRICK_TONES[1] },
       uBrick2: { value: BRICK_TONES[2] },
       uMortar: { value: C_MORTAR },
+      uGrass: { value: C_MEDIAN_GRASS },
+      uHedge: { value: C_HEDGE },
     });
     shader.vertexShader = shader.vertexShader
       .replace('#include <common>', '#include <common>\nvarying vec3 vRoadWorld;')
@@ -211,6 +224,8 @@ function brickSidewalks(mat: THREE.MeshStandardMaterial, uNight: { value: number
         uniform vec3 uBrick1;
         uniform vec3 uBrick2;
         uniform vec3 uMortar;
+        uniform vec3 uGrass;
+        uniform vec3 uHedge;
         float rbHash(vec2 p) {
           vec3 p3 = fract(vec3(p.xyx) * 0.1031);
           p3 += dot(p3, p3.yzx + 33.33);
@@ -237,6 +252,9 @@ function brickSidewalks(mat: THREE.MeshStandardMaterial, uNight: { value: number
           float detail = smoothstep(1.5, 4.0, 1.0 / max(max(fw.x, fw.y), 1e-4));
           diffuseColor.rgb = mix(diffuseColor.rgb, mix(tone, uMortar, mortar * 0.85), detail);
           diffuseColor.rgb *= mix(vec3(1.0), vec3(0.56, 0.55, 0.5), uNight);
+        } else if (all(lessThan(abs(vColor.rgb - uGrass), vec3(0.003))) || all(lessThan(abs(vColor.rgb - uHedge), vec3(0.003)))) {
+          // Median grass and hedge: the lawns' night tone (no moonlit blue on greenery).
+          diffuseColor.rgb *= mix(vec3(1.0), vec3(0.56, 0.55, 0.5), uNight);
         }
         #endif`,
       );
@@ -257,6 +275,67 @@ function dividerOffsets(rt: RoadType): { forward: number[]; backward: number[] }
     for (let k = 1; k < rt.lanesBackward; k++) backward.push(-m - k * w);
   }
   return { forward, backward };
+}
+
+/**
+ * Arc-length stretches of a segment's median: the lane stretch [l0, l1] (it stops where the lanes do, before
+ * a junction's crosswalk zone) cut at every crosswalk on the segment as at a junction (ADR 0014 §4).
+ */
+export function medianPieces(l0: number, l1: number, crossings: readonly { s: number; width: number }[]): [number, number][] {
+  const cuts = crossings.map((c): [number, number] => [c.s - c.width / 2 - MEDIAN_CROSS_GAP, c.s + c.width / 2 + MEDIAN_CROSS_GAP]).sort((p, q) => p[0] - q[0]);
+  const out: [number, number][] = [];
+  let a = l0;
+  for (const [c0, c1] of cuts) {
+    if (c1 <= a) continue;
+    if (c0 >= l1) break;
+    if (c0 - a >= MEDIAN_MIN_PIECE) out.push([a, c0]);
+    a = c1;
+  }
+  if (l1 - a >= MEDIAN_MIN_PIECE) out.push([a, l1]);
+  return out;
+}
+
+/** Vertical face across the start and/or end of a polyline, between lateral offsets o1 and o2. */
+function endCaps(b: MeshBuilder, pts: readonly Vec2[], o1: number, o2: number, y0: number, y1: number, c: THREE.Color, start: boolean, end: boolean): void {
+  const l = offsetPolyline(pts, o1);
+  const r = offsetPolyline(pts, o2);
+  for (const i of [...(start ? [0] : []), ...(end ? [pts.length - 1] : [])]) {
+    const p = l[i]!, q = r[i]!;
+    b.tri(p.x, y0, p.z, q.x, y0, q.z, q.x, y1, q.z, c);
+    b.tri(p.x, y0, p.z, q.x, y1, q.z, p.x, y1, p.z, c);
+  }
+}
+
+/**
+ * One median piece of half width `m` along `pts`: an island raised to the sidewalk height (trees stand on it
+ * at Y_WALK) behind curbs; planted = grass with concrete edges and a low hedge, else concrete. Ends on a
+ * smooth joint stay open (the median continues on the next road).
+ */
+function buildMedian(b: MeshBuilder, pts: Vec2[], m: number, planted: boolean, openStart: boolean, openEnd: boolean): void {
+  const y0 = Y_ROAD - 0.02;
+  b.wall(pts, m, y0, Y_WALK, C_CURB);
+  b.wall(pts, -m, y0, Y_WALK, C_CURB);
+  endCaps(b, pts, -m, m, y0, Y_WALK, C_CURB, !openStart, !openEnd);
+  if (!planted || m <= 2 * MEDIAN_EDGE) {
+    b.band(pts, -m, m, Y_WALK, C_MEDIAN);
+    return;
+  }
+  b.band(pts, m - MEDIAN_EDGE, m, Y_WALK, C_CURB);
+  b.band(pts, -m, -m + MEDIAN_EDGE, Y_WALK, C_CURB);
+  b.band(pts, -m + MEDIAN_EDGE, m - MEDIAN_EDGE, Y_WALK, C_MEDIAN_GRASS);
+  // The hedge leaves 0.4 m of grass each side.
+  const hh = Math.min(HEDGE.maxWidth / 2, m - MEDIAN_EDGE - 0.4);
+  const cum = cumulativeLengths(pts);
+  const len = cum[cum.length - 1]!;
+  const h0 = openStart ? 0 : HEDGE.inset;
+  const h1 = openEnd ? len : len - HEDGE.inset;
+  if (hh < 0.2 || h1 - h0 < 0.5) return;
+  const hp = h0 > 0 || h1 < len ? slicePolyline(pts, h0, h1) : pts;
+  const top = Y_WALK + HEDGE.height;
+  b.band(hp, -hh, hh, top, C_HEDGE);
+  b.wall(hp, hh, Y_WALK, top, C_HEDGE);
+  b.wall(hp, -hh, Y_WALK, top, C_HEDGE);
+  endCaps(b, hp, -hh, hh, Y_WALK, top, C_HEDGE, !openStart, !openEnd);
 }
 
 /** Travel direction (a → b) of `g` at its end on a smooth joint node, or null. */
@@ -330,13 +409,19 @@ function buildSegment(g: RoadSegGeom, net: RoadNetworkGeom, b: MeshBuilder): voi
   const l0 = ja ? 0 : Math.max(s0, g.laneStartA);
   const l1 = jb ? g.length : Math.min(s1, g.length - g.laneStartB);
   const len = l1 - l0;
+  const pieces = m > 0 && len > 0.2 ? medianPieces(l0, l1, g.crossings) : [];
   if (len > 0.2) {
     const lanePts = pinEnds(slicePolyline(g.centerline, l0, l1), ja, jb);
-    // Center line: double solid yellow on two-way roads; with a median, its surface and a yellow edge line each side.
+    // Center line: double solid yellow on two-way roads; with a median, the island and a yellow line along each curb.
     if (m > 0) {
-      b.band(lanePts, -m, m, Y_MARK - 0.005, rt.median!.planted ? C_MEDIAN_PLANTED : C_MEDIAN);
-      b.band(lanePts, m + 0.1, m + 0.25, Y_MARK, C_YELLOW);
-      b.band(lanePts, -m - 0.25, -m - 0.1, Y_MARK, C_YELLOW);
+      for (const [p0, p1] of pieces) {
+        const openStart = p0 === l0 && !!ja;
+        const openEnd = p1 === l1 && !!jb;
+        const mp = pinEnds(slicePolyline(g.centerline, p0, p1), openStart ? ja : null, openEnd ? jb : null);
+        buildMedian(b, mp, m, rt.median!.planted, openStart, openEnd);
+        b.band(mp, m + 0.1, m + 0.25, Y_MARK, C_YELLOW);
+        b.band(mp, -m - 0.25, -m - 0.1, Y_MARK, C_YELLOW);
+      }
     } else if (!oneWay) {
       b.band(lanePts, -0.27, -0.12, Y_MARK, C_YELLOW);
       b.band(lanePts, 0.12, 0.27, Y_MARK, C_YELLOW);
@@ -366,5 +451,9 @@ function buildSegment(g: RoadSegGeom, net: RoadNetworkGeom, b: MeshBuilder): voi
   }
 
   for (const c of g.crossings) zebra(b, c.polygon, c.a, c.b, Y_MARK, C_WHITE);
-  for (const s of g.speedBumps) speedBump(b, g.centerline, s, hc, Y_MARK + 0.005);
+  // Speed bumps cover the two driving areas only where the median runs (not across it).
+  for (const s of g.speedBumps) {
+    const onMedian = pieces.some(([p0, p1]) => s + BUMP_LENGTH / 2 > p0 && s - BUMP_LENGTH / 2 < p1);
+    speedBump(b, g.centerline, s, hc, Y_MARK + 0.005, onMedian ? m : 0);
+  }
 }

@@ -22,3 +22,4 @@ export * from './growth.js';
 export * from './docCheck.js';
 export * from './editing/fillet.js';
 export * from './sensors.js';
+export * from './editing/sampleCity.js';

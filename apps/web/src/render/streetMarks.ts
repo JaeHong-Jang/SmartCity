@@ -2,7 +2,7 @@
 // Pure functions that append triangles to a MeshBuilder.
 
 import * as THREE from 'three';
-import { cumulativeLengths, pointAtLength, rightNormal, tangentAtLength, type Vec2 } from '@smartcity/shared';
+import { add, bumpSpans, cumulativeLengths, normalize, pointAtLength, rightNormal, scale, sub, type Vec2 } from '@smartcity/shared';
 import type { MeshBuilder } from './meshBuilder';
 
 export const ZEBRA_STRIPE = 0.5;
@@ -70,37 +70,121 @@ export function zebra(b: MeshBuilder, polygon: readonly Vec2[], a: Vec2, bb: Vec
   return stripes.length;
 }
 
+/** Bump cells with a corner closer than `inner` − this to the center line are left out (float tolerance), meters. */
+const MEDIAN_CLIP_EPS = 1e-4;
+
+/** Point-to-chord distance evaluations of the median clip since the last reset (a deterministic work measure for tests). */
+let clipChecks = 0;
+export const medianClipChecks = (): number => clipChecks;
+export const resetMedianClipChecks = (): void => {
+  clipChecks = 0;
+};
+
+/** Whether `p` is closer than `d` to one of the chords. */
+function nearerThan(chords: readonly Vec2[][], p: Vec2, d: number): boolean {
+  const d2 = d * d;
+  for (const [a, b] of chords) {
+    clipChecks++;
+    const ux = b!.x - a!.x, uz = b!.z - a!.z;
+    const len2 = ux * ux + uz * uz;
+    const t = len2 > 0 ? Math.min(1, Math.max(0, ((p.x - a!.x) * ux + (p.z - a!.z) * uz) / len2)) : 0;
+    const dx = p.x - (a!.x + ux * t), dz = p.z - (a!.z + uz * t);
+    if (dx * dx + dz * dz < d2) return true;
+  }
+  return false;
+}
+
 /**
  * A speed bump across the carriageway at arc length `s` of `centerline`: a low wedge (BUMP_HEIGHT at the
- * crest) with diagonal yellow/black stripes. Returns the cell count.
+ * crest) with diagonal yellow/black stripes, over `bumpSpans(halfWidth, inner)` (never across a median).
+ * Its cross-sections follow the curve (offsets between the center line's mitred vertex normals). With a
+ * median, any cell with a corner closer than `inner` to the whole center line (true point-to-polyline
+ * distance) is left out, so on a hairpin, where the offsets fold over other parts of the curve, the bump
+ * still never enters the median. Straight roads lose no cell. Returns the cell count.
  */
-export function speedBump(b: MeshBuilder, centerline: readonly Vec2[], s: number, halfWidth: number, y: number): number {
+export function speedBump(b: MeshBuilder, centerline: readonly Vec2[], s: number, halfWidth: number, y: number, inner = 0): number {
   if (centerline.length < 2 || halfWidth <= 0) return 0;
   const cum = cumulativeLengths(centerline);
   const total = cum[cum.length - 1]!;
-  const sc = Math.min(Math.max(s, BUMP_LENGTH / 2), total - BUMP_LENGTH / 2);
-  const c = pointAtLength(centerline, cum, sc);
-  const t = tangentAtLength(centerline, cum, sc);
-  const nrm = rightNormal(t);
   const half = BUMP_LENGTH / 2;
-  const alongCells = Math.round(BUMP_LENGTH / BUMP_CELL_ALONG);
-  const acrossCells = Math.max(1, Math.round((2 * halfWidth) / BUMP_CELL_ACROSS));
-  const dAcross = (2 * halfWidth) / acrossCells;
+  const sc = Math.min(Math.max(s, half), total - half);
+  // Cross-sections: every BUMP_CELL_ALONG, plus the center line's own vertices under the bump (so no cell
+  // spans a vertex and cuts its corner).
+  const xs: number[] = [];
+  for (let j = 0; j <= Math.round(BUMP_LENGTH / BUMP_CELL_ALONG); j++) xs.push(-half + j * BUMP_CELL_ALONG);
+  for (let i = 1; i < centerline.length - 1; i++) {
+    const x = cum[i]! - sc;
+    if (x > -half && x < half && !xs.some((q) => Math.abs(q - x) < 1e-6)) xs.push(x);
+  }
+  xs.sort((p, q) => p - q);
+  // Offset direction per vertex, scaled so that c + N·l lies on the offset lines (distance l) of both chords
+  // meeting there (the miter; the plain normal at the ends). Between two vertices it is interpolated, so a
+  // lateral offset l runs along the chord's offset line between the miter points: never closer than l to the
+  // center line, on either side of a curve.
+  const chordN = (i: number): Vec2 => rightNormal(normalize(sub(centerline[i + 1]!, centerline[i]!)));
+  const vertexN = (i: number): Vec2 => {
+    if (i === 0) return chordN(0);
+    if (i === centerline.length - 1) return chordN(i - 1);
+    const n0 = chordN(i - 1);
+    const m = normalize(add(n0, chordN(i)));
+    return scale(m, 1 / Math.max(0.5, m.x * n0.x + m.z * n0.z));
+  };
+  const frames = xs.map((x) => {
+    const at = sc + x;
+    let i = 1;
+    while (i < cum.length - 1 && cum[i]! < at) i++;
+    const len = cum[i]! - cum[i - 1]!;
+    const u = len > 0 ? Math.min(1, Math.max(0, (at - cum[i - 1]!) / len)) : 0;
+    const n0 = vertexN(i - 1);
+    const n1 = vertexN(i);
+    return { c: pointAtLength(centerline, cum, at), n: { x: n0.x + (n1.x - n0.x) * u, z: n0.z + (n1.z - n0.z) * u } };
+  });
   const height = (x: number): number => BUMP_HEIGHT * (1 - Math.abs(x) / half);
-  const px = (x: number, l: number): Vec2 => ({ x: c.x + t.x * x + nrm.x * l, z: c.z + t.z * x + nrm.z * l });
-  for (let j = 0; j < alongCells; j++) {
-    const x0 = -half + j * BUMP_CELL_ALONG;
-    const x1 = x0 + BUMP_CELL_ALONG;
-    for (let i = 0; i < acrossCells; i++) {
-      const l0 = -halfWidth + i * dAcross;
-      const l1 = l0 + dAcross;
-      const stripe = Math.floor((l0 + l1 + x0 + x1) / 2 / BUMP_STRIPE);
-      const col = (stripe & 1) === 0 ? C_BUMP_YELLOW : C_BUMP_BLACK;
-      const a = px(x0, l0), bq = px(x1, l0), cq = px(x1, l1), d = px(x0, l1);
-      const h0 = y + height(x0), h1 = y + height(x1);
-      b.tri(a.x, h0, a.z, bq.x, h1, bq.z, cq.x, h1, cq.z, col);
-      b.tri(a.x, h0, a.z, cq.x, h1, cq.z, d.x, h0, d.z, col);
+  const px = (j: number, l: number): Vec2 => ({ x: frames[j]!.c.x + frames[j]!.n.x * l, z: frames[j]!.c.z + frames[j]!.n.z * l });
+  // Only center line chords within `inner` of the bump can be closer than `inner` to one of its corners:
+  // keep those whose box meets the bump's box grown by `inner` (exact, and no whole-line scan per corner).
+  let near: Vec2[][] | null = null;
+  if (inner > 0) {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let j = 0; j < xs.length; j++) {
+      for (const l of [-halfWidth, halfWidth]) {
+        const q = px(j, l);
+        minX = Math.min(minX, q.x);
+        maxX = Math.max(maxX, q.x);
+        minZ = Math.min(minZ, q.z);
+        maxZ = Math.max(maxZ, q.z);
+      }
+    }
+    // Offsets are linear in l, so the corners at ±halfWidth bound every grid corner of a section.
+    near = [];
+    for (let i = 1; i < centerline.length; i++) {
+      const p = centerline[i - 1]!, q = centerline[i]!;
+      if (Math.max(p.x, q.x) < minX - inner || Math.min(p.x, q.x) > maxX + inner || Math.max(p.z, q.z) < minZ - inner || Math.min(p.z, q.z) > maxZ + inner) continue;
+      near.push([p, q]);
     }
   }
-  return alongCells * acrossCells;
+  let cells = 0;
+  for (const [from, to] of bumpSpans(halfWidth, inner)) {
+    const acrossCells = Math.max(1, Math.round((to - from) / BUMP_CELL_ACROSS));
+    const dAcross = (to - from) / acrossCells;
+    // Grid corners inside the median (only computed with one).
+    const inMedian = near ? xs.map((_, j) => Array.from({ length: acrossCells + 1 }, (_, i) => nearerThan(near, px(j, from + i * dAcross), inner - MEDIAN_CLIP_EPS))) : null;
+    for (let j = 0; j + 1 < xs.length; j++) {
+      const x0 = xs[j]!;
+      const x1 = xs[j + 1]!;
+      for (let i = 0; i < acrossCells; i++) {
+        if (inMedian && (inMedian[j]![i] || inMedian[j]![i + 1] || inMedian[j + 1]![i] || inMedian[j + 1]![i + 1])) continue;
+        const l0 = from + i * dAcross;
+        const l1 = l0 + dAcross;
+        const stripe = Math.floor((l0 + l1 + x0 + x1) / 2 / BUMP_STRIPE);
+        const col = (stripe & 1) === 0 ? C_BUMP_YELLOW : C_BUMP_BLACK;
+        const a = px(j, l0), bq = px(j + 1, l0), cq = px(j + 1, l1), d = px(j, l1);
+        const h0 = y + height(x0), h1 = y + height(x1);
+        b.tri(a.x, h0, a.z, bq.x, h1, bq.z, cq.x, h1, cq.z, col);
+        b.tri(a.x, h0, a.z, cq.x, h1, cq.z, d.x, h0, d.z, col);
+        cells++;
+      }
+    }
+  }
+  return cells;
 }

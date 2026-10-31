@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { carriagewayWidth, closestPointOnPolyline, createEmptyDoc, type CityDoc, type Vec2 } from '@smartcity/shared';
 import * as THREE from 'three';
 import { buildRoadNetwork } from './roadNetwork';
+import { medianPieces } from './roads';
 import {
+  CROSSING_CLEAR,
   ENTRY_CLEAR,
   JUNCTION_CLEAR,
   LAMP_INSET,
+  MEDIAN_TREE_MIN_WIDTH,
   placeSegment,
   segmentContexts,
   SENSOR_CLEAR,
@@ -299,5 +302,131 @@ describe('street trees and lamps (streetscape)', () => {
     m.setQuality('normal');
     expect(m.rings).toBe(3);
     m.dispose();
+  });
+});
+
+describe('median trees (P7c-2)', () => {
+  const SEG = 'x1_1';
+  const medianTrees = (doc: CityDoc, p: SegmentStreetscape) => p.trees.filter((t) => Math.abs(along(doc, SEG, t).off) < 1e-6);
+
+  it('one row on the center line of a planted median, clear of the junctions and a crosswalk, inside the island', () => {
+    const doc = grid(3, 160, 'road-8-median');
+    doc.features.cw = { id: 'cw', segmentId: SEG, kind: 'crosswalk', t: 0.5 };
+    const net = buildRoadNetwork(doc);
+    const g = net.segments.get(SEG)!;
+    const p = placeSegment(g, segmentContexts(doc, net).get(SEG)!);
+    const row = medianTrees(doc, p);
+    expect(row.length).toBeGreaterThanOrEqual(8);
+    expect(placeSegment(g, segmentContexts(doc, net).get(SEG)!)).toEqual(p);
+    // Same species as the sidewalks (one per street); the sidewalks keep their rows.
+    expect(new Set(p.trees.map((t) => t.species)).size).toBe(1);
+    expect(p.trees.length - row.length).toBeGreaterThanOrEqual(12);
+    const cw = g.crossings.find((c) => c.kind === 'midblock')!;
+    const pieces = medianPieces(g.laneStartA, g.length - g.laneStartB, g.crossings);
+    for (const t of row) {
+      const { s } = along(doc, SEG, t);
+      expect(s).toBeGreaterThanOrEqual(g.laneStartA + JUNCTION_CLEAR - 1e-6);
+      expect(s).toBeLessThanOrEqual(g.length - g.laneStartB - JUNCTION_CLEAR + 1e-6);
+      expect(Math.abs(s - cw.s)).toBeGreaterThanOrEqual(cw.width / 2 + CROSSING_CLEAR);
+      // On the drawn island (the median is cut at the crosswalk).
+      expect(pieces.some(([a, b]) => s > a && s < b)).toBe(true);
+    }
+    // Trees on both sides of the crosswalk.
+    expect(row.some((t) => along(doc, SEG, t).s < cw.s) && row.some((t) => along(doc, SEG, t).s > cw.s)).toBe(true);
+  });
+
+  // Sol's repro: on a narrow road a stop's clear radius (9 m) reaches the median row.
+  it('a narrow median road: the median row keeps clear of a stop and a sensor on either side', () => {
+    const doc = createEmptyDoc();
+    doc.roadTypes.narrow = { ...doc.roadTypes['road-2']!, id: 'narrow', median: { width: 2, planted: true } };
+    doc.nodes.a = { id: 'a', pos: { x: 0, z: 0 } };
+    doc.nodes.b = { id: 'b', pos: { x: 200, z: 0 } };
+    doc.segments.s = { id: 's', a: 'a', b: 'b', roadTypeId: 'narrow' };
+    const onMedian = (p: SegmentStreetscape) => p.trees.filter((t) => Math.abs(t.z) < 1e-6);
+    const placed = () => {
+      const net = buildRoadNetwork(doc);
+      return { p: placeSegment(net.segments.get('s')!, segmentContexts(doc, net).get('s')!), g: net.segments.get('s')! };
+    };
+    const before = onMedian(placed().p);
+    expect(before.length).toBeGreaterThan(10);
+    const t0 = before[Math.floor(before.length / 2)]!;
+    const curb = carriagewayWidth(doc.roadTypes.narrow!) / 2;
+    doc.busStops.st = { id: 'st', segmentId: 's', t: t0.x / 200, dir: 'forward' };
+    const { p } = placed();
+    const after = onMedian(p);
+    expect(after.length).toBeLessThan(before.length);
+    // The stop's clear circle is on the forward sidewalk's planting line (right of a → b: −z here or +z, either way |z| = curb + inset).
+    for (const t of after) expect(Math.hypot(t.x - t0.x, Math.abs(t.z) - (curb + TREE_INSET))).toBeGreaterThanOrEqual(STOP_CLEAR);
+    delete doc.busStops.st;
+    doc.sensors.cam = { id: 'cam', kind: 'cctv', segmentId: 's', t: t0.x / 200, side: 'left', heading: 0, fov: 1, range: 60 };
+    const withSensor = onMedian(placed().p);
+    for (const t of withSensor) expect(Math.hypot(t.x - t0.x, Math.abs(t.z) - (curb + TREE_INSET))).toBeGreaterThanOrEqual(SENSOR_CLEAR);
+  });
+
+  it('none on a concrete or too narrow median; a planted median without sidewalks keeps its row', () => {
+    const doc = grid(3, 100, 'road-8-median');
+    const rt = doc.roadTypes['road-8-median']!;
+    doc.roadTypes['road-8-median'] = { ...rt, median: { width: 6, planted: false } };
+    expect(medianTrees(doc, place(doc, SEG))).toEqual([]);
+    doc.roadTypes['road-8-median'] = { ...rt, median: { width: MEDIAN_TREE_MIN_WIDTH - 0.5, planted: true } };
+    expect(medianTrees(doc, place(doc, SEG))).toEqual([]);
+    doc.roadTypes['road-8-median'] = { ...rt, sidewalk: false };
+    const bare = place(doc, SEG);
+    expect(bare.lamps).toEqual([]);
+    expect(bare.trees.length).toBeGreaterThan(0);
+    expect(medianTrees(doc, bare)).toEqual(bare.trees);
+  });
+
+  it('the signature sees every median change: planted, width, sidewalks, a crosswalk', () => {
+    const doc = grid(3, 100, 'road-8-median');
+    const layer = new StreetscapeLayer();
+    layer.update(doc, buildRoadNetwork(doc));
+    const fresh = () => {
+      const f = new StreetscapeLayer();
+      f.update(doc, buildRoadNetwork(doc));
+      const out = { spots: spots(f), trees: f.stats().trees };
+      f.dispose();
+      return out;
+    };
+    const planted = layer.stats().trees;
+    const rt = doc.roadTypes['road-8-median']!;
+    const steps: (() => void)[] = [
+      () => (doc.roadTypes['road-8-median'] = { ...rt, median: { width: 6, planted: false } }),
+      () => (doc.roadTypes['road-8-median'] = { ...rt, median: { width: 6, planted: true } }),
+      () => (doc.features.cw = { id: 'cw', segmentId: SEG, kind: 'crosswalk', t: 0.5 }),
+      () => (doc.roadTypes['road-8-median'] = { ...rt, sidewalk: false }),
+      () => (doc.roadTypes['road-8-median'] = { ...rt, sidewalk: false, median: { width: 6.000001, planted: true } }),
+    ];
+    for (const [i, step] of steps.entries()) {
+      step();
+      layer.update(doc, buildRoadNetwork(doc));
+      expect(layer.stats().lastRebuilt, `step ${i}`).toBeGreaterThan(0);
+      const f = fresh();
+      expect(spots(layer), `step ${i}`).toBe(f.spots);
+      expect(layer.stats().trees).toBe(f.trees);
+    }
+    expect(planted).toBeGreaterThan(0);
+    layer.dispose();
+  });
+
+  it('low quality: median trees go to the cheaper LODs like the sidewalk ones', () => {
+    const doc = grid(4, 200, 'road-8-median');
+    const layer = new StreetscapeLayer();
+    layer.update(doc, buildRoadNetwork(doc));
+    // On the median of x1_1 (z = 200), at eye level.
+    const cam = new THREE.Vector3(300, 2, 200);
+    layer.frame(cam, 50);
+    const normal = layer.stats();
+    const nearRow = layer.near(300, 200, 30).trees.filter((t) => Math.abs(t.z - 200) < 1e-6).length;
+    expect(nearRow).toBeGreaterThan(2);
+    expect(normal.drawn.tree0).toBeGreaterThanOrEqual(layer.near(300, 200, TREE_NEAR - 3).trees.length);
+    layer.setQuality('low');
+    layer.frame(cam, 50);
+    const low = layer.stats();
+    expect(low.drawn.tree0).toBeLessThan(normal.drawn.tree0);
+    expect(low.drawn.tree0).toBeGreaterThanOrEqual(layer.near(300, 200, 35 - 3).trees.length);
+    expect(low.drawn.tree1).toBeLessThan(normal.drawn.tree1);
+    expect(low.treeShadows).toBe(false);
+    layer.dispose();
   });
 });

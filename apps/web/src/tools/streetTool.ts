@@ -5,8 +5,10 @@
 // clicking a junction selects it so the inspector can set its control and per-leg crosswalks.
 
 import {
+  bumpSpans,
   carriagewayWidth,
   cumulativeLengths,
+  medianWidth,
   pointAtLength,
   rightNormal,
   tangentAtLength,
@@ -43,8 +45,9 @@ export interface FeatureProjection {
   /** Unit vectors along the road and to its right. */
   tangent: Vec2;
   normal: Vec2;
-  /** Half width of the carriageway. */
+  /** Half width of the carriageway, and of its median (0 without one). */
   halfWidth: number;
+  medianHalf: number;
 }
 
 /** Project a ground point onto the nearest road: segment, arc length (0.5 m snap) and frame. */
@@ -69,6 +72,7 @@ export function projectOnSegment(doc: CityDoc, idx: PickIndex, pos: Vec2): Featu
     tangent,
     normal: rightNormal(tangent),
     halfWidth: carriagewayWidth(rt) / 2,
+    medianHalf: medianWidth(rt) / 2,
   };
 }
 
@@ -115,6 +119,13 @@ export function crossingGhost(p: FeatureProjection): Vec2[] {
     { x: p.point.x - p.normal.x * p.halfWidth, z: p.point.z - p.normal.z * p.halfWidth },
     { x: p.point.x + p.normal.x * p.halfWidth, z: p.point.z + p.normal.z * p.halfWidth },
   ];
+}
+
+/** Ghost lines of a facility: a speed bump spans the driving areas only (not the median, as drawn), a crosswalk the whole carriageway. */
+export function featureGhost(p: FeatureProjection, kind: RoadFeatureKind): Vec2[][] {
+  if (kind !== 'speedBump') return [crossingGhost(p)];
+  const at = (l: number): Vec2 => ({ x: p.point.x + p.normal.x * l, z: p.point.z + p.normal.z * l });
+  return bumpSpans(p.halfWidth, p.medianHalf).map(([from, to]) => [at(from), at(to)]);
 }
 
 const MODE_HINT: Record<StreetMode, string> = {
@@ -262,11 +273,11 @@ export class StreetTool implements Tool {
     const doc = this.doc;
     switch (h.kind) {
       case 'place':
-        out.lines.push({ pts: crossingGhost(h.proj), width: GHOST_WIDTH[h.feature.kind], color: h.error ? BAD : OK });
+        for (const pts of featureGhost(h.proj, h.feature.kind)) out.lines.push({ pts, width: GHOST_WIDTH[h.feature.kind], color: h.error ? BAD : OK });
         out.points.push({ pos: h.proj.point, radius: 1.2, color: h.error ? BAD : OK });
         break;
       case 'existing':
-        out.lines.push({ pts: crossingGhost(h.proj), width: GHOST_WIDTH[h.feature.kind] + 0.6, color: this.mode === 'remove' ? BAD : '#fbbf24' });
+        for (const pts of featureGhost(h.proj, h.feature.kind)) out.lines.push({ pts, width: GHOST_WIDTH[h.feature.kind] + 0.6, color: this.mode === 'remove' ? BAD : '#fbbf24' });
         break;
       case 'school':
         return highlightPreview(doc, this.index(), { kind: 'segment', id: h.segmentId }, h.on ? WARN : OK);

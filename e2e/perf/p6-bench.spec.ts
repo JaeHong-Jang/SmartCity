@@ -10,6 +10,7 @@
 // SC_PERF_ADAPTER=NVIDIA picks a GPU, SC_PERF_VSYNC=1 keeps the 60 Hz cap, SC_PERF_PAUSE=1 stops traffic.
 // Heavier traffic: SC_PERF_VEHICLES=5000 SC_PERF_DENSITY=3 SC_PERF_WARMUP_S=360 (defaults 3000, 2, 180).
 // SC_PERF_POSES=street measures only those poses (no orbit / shadows-off); SC_PERF_NIGHT=1 also measures them at 22:00.
+// SC_PERF_CITY=sample measures the P7d sample new town (sampleCityPlan) instead of the benchmark city, same poses.
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 
@@ -69,7 +70,17 @@ test('benchmark city frame stats', async ({ page }) => {
   await page.goto(`/?offline=1&room=${room}`);
   await page.waitForFunction(() => !!(window as unknown as { __smartcity?: unknown }).__smartcity);
   const opts = process.env.SC_PERF_DENSITY ? { trafficDensity: Number(process.env.SC_PERF_DENSITY) } : {};
-  const made = await hook<{ buildings: number; segments: number }>(page, `h.perf.saveBenchCity(${JSON.stringify(room)}, ${JSON.stringify(opts)})`);
+  const made =
+    process.env.SC_PERF_CITY === 'sample'
+      ? await page.evaluate(async ([room, opts]) => {
+          const mod = (await import(/* @vite-ignore */ '/@id/@smartcity/shared')) as typeof import('@smartcity/shared');
+          const doc = mod.createEmptyDoc('sample', 7);
+          if (!mod.applyCommand(doc, mod.sampleCityPlan().batch).ok) throw new Error('sample city rejected');
+          if (opts.trafficDensity !== undefined && !mod.applyCommand(doc, { type: 'meta.update', trafficDensity: opts.trafficDensity }).ok) throw new Error('traffic density rejected');
+          localStorage.setItem(`smartcity:offline:${room}`, JSON.stringify({ seq: 1, doc, savedAt: Date.now() }));
+          return { buildings: Object.keys(doc.buildings).length, segments: Object.keys(doc.segments).length };
+        }, [room, opts] as [string, { trafficDensity?: number }])
+      : await hook<{ buildings: number; segments: number }>(page, `h.perf.saveBenchCity(${JSON.stringify(room)}, ${JSON.stringify(opts)})`);
   await page.goto(`/?offline=1&room=${room}`);
   await page.waitForFunction(() => !!(window as unknown as { __smartcity?: unknown }).__smartcity);
   await expect.poll(() => hook<number>(page, 'Object.keys(h.store.getState().doc.buildings).length'), { timeout: 60_000 }).toBe(made.buildings);

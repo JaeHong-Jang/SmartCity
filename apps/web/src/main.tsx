@@ -6,6 +6,7 @@ import { buildingFootprints, cumulativeLengths, pointAtLength, ROOM_ID_RE, senso
 import { compileSensorCoverage } from '@smartcity/sim';
 import { createDispatcher } from './app/dispatch';
 import { resumeImport } from './app/importExport';
+import { resumeSampleCity } from './app/sampleCity';
 import { sameDisplayedStats } from './app/simStats';
 import { watchProposal } from './app/proposalWatch';
 import { sameTransit, summarizeTransit } from './app/transit';
@@ -107,7 +108,10 @@ function attach(t: Transport): void {
   t.onMessage((m) => {
     const wasReady = store.getState().ready;
     store.receive(m);
-    if (m.t === 'welcome' && !wasReady && storage) resumeImport(store, dispatcher, sessionStorage);
+    if (m.t === 'welcome' && !wasReady && storage) {
+      resumeImport(store, dispatcher, sessionStorage);
+      resumeSampleCity(store, dispatcher, sessionStorage, () => renderer.viewCity());
+    }
   });
   store.onResyncNeeded = () => t.reconnect();
 }

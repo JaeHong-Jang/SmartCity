@@ -2,6 +2,7 @@ import { useRef, useState, type ChangeEvent } from 'react';
 import type { PanelId, SimSpeed } from '../app/store';
 import { SNAP_STEPS, snapLabel } from '../tools/snap';
 import { downloadText, exportDoc, startImport } from '../app/importExport';
+import { startSampleCity } from '../app/sampleCity';
 import { QUALITY_LABEL, setQuality } from '../app/quality';
 import { formatClock } from '../render/dayNight';
 import { AiPanel } from './AiPanel';
@@ -144,6 +145,23 @@ function TopBar() {
       <button title="JSON 파일을 새 방으로 가져오기" disabled={simActive} onClick={() => fileRef.current?.click()}>
         <span className="row" style={{ gap: 5 }}>
           <IconUpload /> 가져오기
+        </span>
+      </button>
+      <button
+        data-sample-city
+        aria-label="현대 신도시 샘플 만들기"
+        title="현대 신도시 샘플 만들기: 새 방에 계획도시(중앙녹지 대로·남향 아파트 단지·업무지구)를 만듭니다. 지금 도시는 그대로 남습니다"
+        disabled={simActive}
+        onClick={() =>
+          startSampleCity(sessionStorage, (r) => {
+            const q = new URLSearchParams(location.search);
+            q.set('room', r);
+            location.search = `?${q.toString()}`;
+          })
+        }
+      >
+        <span className="row" style={{ gap: 5 }}>
+          <IconCity /> 신도시 샘플
         </span>
       </button>
       <input ref={fileRef} className="hidden-file" type="file" accept="application/json,.json" onChange={onImport} />

@@ -78,6 +78,13 @@ export type Command =
   | { type: 'sensor.update'; id: string; kind?: SensorKind; heading?: number; fov?: number; range?: number }
   | { type: 'sensor.remove'; id: string }
   | { type: 'meta.update'; name?: string; trafficDensity?: number; growth?: boolean }
+  /**
+   * Precondition, no effect (ADR 0014 §7): refused unless the city has no content yet — no nodes, segments,
+   * buildings, parcels, bus stops, bus lines or sensors (features, closures and junction controls hang on
+   * those). Road/building/vehicle designs and meta are settings, not content. Put first in a batch that must
+   * only land on an empty room (the sample city); the server checks it in the same apply. Trusted replay skips it.
+   */
+  | { type: 'doc.expect'; empty: true }
   /** Applied atomically: if any command fails, none take effect. Not nestable. */
   | { type: 'batch'; commands: Command[] };
 

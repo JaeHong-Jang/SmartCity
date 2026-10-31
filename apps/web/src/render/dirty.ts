@@ -19,7 +19,7 @@ export const D_ALL = D_ROADS | D_BUILDINGS | D_VEHICLE_TYPES | D_BUS_STOPS | D_B
  */
 const D_ROAD_PRUNE = D_ROADS | D_BUILDINGS | D_PARCELS;
 
-/** `batch` is resolved from its children. `meta.update` changes nothing drawn. */
+/** `batch` is resolved from its children. `meta.update` and `doc.expect` change nothing drawn. */
 const DOMAINS: Record<Exclude<CommandType, 'batch'>, number> = {
   'node.add': D_ROADS,
   'node.move': D_ROAD_PRUNE,
@@ -50,6 +50,7 @@ const DOMAINS: Record<Exclude<CommandType, 'batch'>, number> = {
   'parcel.upsert': D_PARCELS,
   'parcel.remove': D_PARCELS,
   'meta.update': 0,
+  'doc.expect': 0,
   'sensor.place': D_SENSORS,
   'sensor.update': D_SENSORS,
   'sensor.remove': D_SENSORS,

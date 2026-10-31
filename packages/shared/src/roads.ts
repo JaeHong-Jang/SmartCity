@@ -34,6 +34,16 @@ export const drivableWidth = (rt: RoadType): number => (rt.lanesForward + rt.lan
  */
 export const carriagewayWidth = (rt: RoadType): number => (rt.median ? drivableWidth(rt) + rt.median.width : drivableWidth(rt));
 
+/**
+ * Lateral spans (offsets from the center line, + = right) a speed bump covers on a carriageway of half
+ * width `halfWidth`: all of it, or with a median of half width `inner` > 0 the two driving areas only.
+ * Render-only geometry shared by the road mesh and the street tool's ghost (P7c-2).
+ */
+export function bumpSpans(halfWidth: number, inner = 0): [number, number][] {
+  if (inner <= 0) return [[-halfWidth, halfWidth]];
+  return inner >= halfWidth ? [] : [[inner, halfWidth], [-halfWidth, -inner]];
+}
+
 /** Half of the full road width including sidewalks; used for setbacks, picking and building clearance. */
 export const roadHalfWidth = (rt: RoadType): number =>
   carriagewayWidth(rt) / 2 + (rt.sidewalk ? SIDEWALK_WIDTH : CURB_MARGIN);

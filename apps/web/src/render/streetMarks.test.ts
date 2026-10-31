@@ -73,6 +73,24 @@ describe('speed bump geometry', () => {
     expect(Math.min(...ys)).toBeCloseTo(0.085, 6);
   });
 
+  it('with a median (inner half width) covers only the two driving areas', () => {
+    const mb = new MeshBuilder();
+    // 4 cells along × 10 across on each side (1 … 3.5 m).
+    expect(speedBump(mb, centerline, 40, 3.5, 0.085, 1)).toBe(4 * 10 * 2);
+    const zs: number[] = [];
+    for (let i = 2; i < mb.pos.length; i += 3) zs.push(mb.pos[i]!);
+    expect(Math.min(...zs.map(Math.abs))).toBeCloseTo(1, 5);
+    expect(Math.max(...zs.map(Math.abs))).toBeCloseTo(3.5, 5);
+    expect(zs.some((z) => z < 0) && zs.some((z) => z > 0)).toBe(true);
+    // No median: the same triangles as before (inner 0 is the default).
+    const plain = new MeshBuilder();
+    const zero = new MeshBuilder();
+    speedBump(plain, centerline, 40, 3.5, 0.085);
+    speedBump(zero, centerline, 40, 3.5, 0.085, 0);
+    expect(zero.pos).toEqual(plain.pos);
+    expect(zero.col).toEqual(plain.col);
+  });
+
   it('alternates yellow and black bands', () => {
     const mb = new MeshBuilder();
     speedBump(mb, centerline, 40, 3.5, 0.085);

@@ -5,6 +5,9 @@
 // the curb (both sides, staggered), deterministic (phases, species, size and turn hashed from the segment
 // id), clear of junctions, crosswalks, bus stops, sensors and the entrance side of buildings facing the
 // road. One species per street (Korean streets are planted with one: ginkgo, zelkova or cherry tones).
+// A planted median (P7c-2) gets one more row of the same trees on its center line, cut like the median
+// itself at junctions and crosswalks, and kept clear of stops, sensors and entrances by distance (on a
+// narrow road a stop's clear radius reaches the median).
 //
 // Updates: placements are cached per 256 m chunk (the road chunk of the segment's midpoint) and rebuilt
 // only for chunks whose segments changed signature — geometry, crossings, the stops and sensors on it and
@@ -35,6 +38,8 @@ export const CROSSING_CLEAR = 1.5;
 export const STOP_CLEAR = 9;
 export const SENSOR_CLEAR = 3;
 export const ENTRY_CLEAR = 3.5;
+/** Planted medians at least this wide get a row of trees, meters. */
+export const MEDIAN_TREE_MIN_WIDTH = 2;
 const LAMP_TREE_CLEAR = 3;
 /** Building fronts this far from the curb (or closer) count as entrances on the sidewalk, meters. */
 const ENTRY_DEPTH = 30;
@@ -148,11 +153,30 @@ function blockedAt(ctx: SegmentContext, x: number, z: number, nx: number, nz: nu
   return false;
 }
 
-/** Trees and lamps of one segment (pure, deterministic). Roads without sidewalks get none. */
+/** Planted medians at least MEDIAN_TREE_MIN_WIDTH wide get a row of trees. */
+const hasMedianTrees = (rt: RoadSegGeom['roadType']): boolean => !!rt.median?.planted && rt.median.width >= MEDIAN_TREE_MIN_WIDTH;
+
+/**
+ * Whether a median tree at (x, z) is too close to an avoider (whichever sidewalk it is on: the median
+ * faces both directions) or to a building entrance (within ENTRY_CLEAR).
+ */
+function medianBlockedAt(ctx: SegmentContext, x: number, z: number): boolean {
+  for (const a of ctx.avoiders) {
+    const r = a.half + a.clear;
+    if ((a.x - x) ** 2 + (a.z - z) ** 2 < r * r) return true;
+  }
+  return ctx.entries.some((e) => (e.x - x) ** 2 + (e.z - z) ** 2 < ENTRY_CLEAR ** 2);
+}
+
+/**
+ * Trees and lamps of one segment (pure, deterministic). Roads without sidewalks get none on the sidewalks;
+ * a planted median gets its row of trees either way.
+ */
 export function placeSegment(g: RoadSegGeom, ctx: SegmentContext): SegmentStreetscape {
   const out: SegmentStreetscape = { trees: [], lamps: [] };
   const rt = g.roadType;
-  if (!rt.sidewalk || g.centerline.length < 2) return out;
+  const medianTrees = hasMedianTrees(rt);
+  if ((!rt.sidewalk && !medianTrees) || g.centerline.length < 2) return out;
   const u0 = endClear(g, true, ctx.degA, ctx.jointA);
   const u1 = g.length - endClear(g, false, ctx.degB, ctx.jointB);
   if (u1 - u0 < 2) return out;
@@ -168,6 +192,19 @@ export function placeSegment(g: RoadSegGeom, ctx: SegmentContext): SegmentStreet
     return { p: { x: p.x + r.x * offset, z: p.z + r.z * offset }, n: { x: r.x * k, z: r.z * k }, yaw: Math.atan2(-r.z * k, -r.x * k) };
   };
   const h = (key: string): number => hash01(0, 0, `${g.id}:${key}`);
+  const species = Math.floor(h('species') * 3) as Species;
+  const spacing = TREE_SPACING * (0.95 + 0.1 * h('spacing'));
+  if (medianTrees) {
+    // On the median's center line, clear of crosswalks (the median is cut there), the junction ends, stops, sensors and entrances.
+    let k = 0;
+    for (let s = u0 + h('tree0') * spacing * 0.5 + 0.5; s <= u1; s += spacing, k++) {
+      if (g.crossings.some((c) => Math.abs(c.s - s) < c.width / 2 + CROSSING_CLEAR)) continue;
+      const { p } = at(s, 0);
+      if (medianBlockedAt(ctx, p.x, p.z)) continue;
+      out.trees.push({ x: p.x, z: p.z, yaw: h(`t0:${k}`) * Math.PI * 2, scale: 0.88 + 0.24 * h(`s0:${k}`), species });
+    }
+  }
+  if (!rt.sidewalk) return out;
   const lampS: Record<number, number[]> = { 1: [], [-1]: [] };
   for (const side of [1, -1] as const) {
     const phase = (h('lamp') + (side < 0 ? 0.5 : 0)) % 1;
@@ -178,8 +215,6 @@ export function placeSegment(g: RoadSegGeom, ctx: SegmentContext): SegmentStreet
       lampS[side]!.push(s);
     }
   }
-  const species = Math.floor(h('species') * 3) as Species;
-  const spacing = TREE_SPACING * (0.95 + 0.1 * h('spacing'));
   for (const side of [1, -1] as const) {
     let k = 0;
     for (let s = u0 + h(`tree${side}`) * spacing * 0.5 + 0.5; s <= u1; s += spacing, k++) {
@@ -262,13 +297,14 @@ export function segmentContexts(doc: CityDoc, net: RoadNetworkGeom): Map<string,
     const nb = net.nodes.get(g.b);
     // Every avoider or entrance that can reach a spot on this road's sidewalks.
     const reach = carriagewayWidth(g.roadType) / 2 + TREE_INSET + 1;
+    const planted = g.roadType.sidewalk || hasMedianTrees(g.roadType);
     out.set(g.id, {
       degA: na?.segments.length ?? 1,
       degB: nb?.segments.length ?? 1,
       jointA: !!na?.joint,
       jointB: !!nb?.joint,
-      avoiders: g.roadType.sidewalk ? gather(avoiders, g.centerline, reach + AVOID_REACH) : [],
-      entries: g.roadType.sidewalk ? gather(entries, g.centerline, reach + Math.hypot(ENTRY_DEPTH, ENTRY_CLEAR)) : [],
+      avoiders: planted ? gather(avoiders, g.centerline, reach + AVOID_REACH) : [],
+      entries: planted ? gather(entries, g.centerline, reach + Math.hypot(ENTRY_DEPTH, ENTRY_CLEAR)) : [],
     });
   }
   return out;
@@ -282,6 +318,7 @@ export function segmentSig(g: RoadSegGeom, ctx: SegmentContext): string {
   const rt = g.roadType;
   return [
     g.id, g.centerline.map((p) => `${p.x},${p.z}`).join(';'), g.length, g.laneStartA, g.laneStartB, carriagewayWidth(rt), rt.sidewalk,
+    rt.median ? `${rt.median.width},${rt.median.planted}` : '', g.crossings.map((c) => `${c.s},${c.width}`).join(';'),
     ctx.degA, ctx.degB, ctx.jointA, ctx.jointB,
     ctx.avoiders.map((a) => `${a.x},${a.z},${a.nx},${a.nz},${a.half},${a.clear}`).join(';'),
     ctx.entries.map((e) => `${e.x},${e.z},${e.dx},${e.dz}`).join(';'),

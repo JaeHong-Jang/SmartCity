@@ -408,6 +408,13 @@ function applyOne(doc: CityDoc, cmd: Command, tx: Tx): void {
       if (!has(doc.sensors, cmd.id)) fail('unknown sensor');
       tx.set(doc.sensors, cmd.id, undefined);
       return;
+    case 'doc.expect': {
+      if (cmd.empty !== true) fail('invalid doc.expect');
+      if (!policy.enforce) return;
+      const content = [doc.nodes, doc.segments, doc.buildings, doc.parcels, doc.busStops, doc.busLines, doc.sensors];
+      if (content.some((rec) => Object.keys(rec ?? {}).length > 0)) fail('the city is not empty');
+      return;
+    }
     case 'meta.update':
       if (cmd.name !== undefined) {
         checkName(cmd.name, 'city');

@@ -3,7 +3,7 @@ import { applyCommand, createEmptyDoc, IdGen, type Command, type RoadFeature } f
 import { ClientStore } from '../app/store';
 import { crossDoc, road } from '../test/fixtures';
 import { PickIndex } from './picking';
-import { crossingGhost, featureError, featureNear, featureOf, featureReason, FEATURE_SNAP, projectOnSegment, segmentFeatures, StreetTool } from './streetTool';
+import { crossingGhost, featureError, featureGhost, featureNear, featureOf, featureReason, FEATURE_SNAP, projectOnSegment, segmentFeatures, StreetTool } from './streetTool';
 import type { ToolContext, ToolPointer } from './types';
 
 // crossDoc: x axis -96..96 and z axis -96..96 crossing at the origin; each arm is a 96 m segment.
@@ -24,6 +24,26 @@ describe('projection onto a segment', () => {
     expect(p.halfWidth).toBeGreaterThan(0);
     const ghost = crossingGhost(p);
     expect(Math.abs(ghost[1]!.z - ghost[0]!.z)).toBeCloseTo(2 * p.halfWidth, 6);
+  });
+
+  it('a speed bump ghost leaves the median out (same spans as the drawn bump); a crosswalk ghost spans it all', () => {
+    const d = createEmptyDoc();
+    road(d, { x: 0, z: 0 }, { x: 200, z: 0 }, new IdGen('n'), 'road-8-median');
+    const p = projectOnSegment(d, new PickIndex(d), { x: 100.2, z: 8 })!;
+    expect(p.medianHalf).toBe(3);
+    const bump = featureGhost(p, 'speedBump');
+    expect(bump).toHaveLength(2);
+    const offs = bump.map((l) => l.map((q) => q.z).sort((u, v) => Math.abs(u) - Math.abs(v)));
+    for (const [inner, outer] of offs) {
+      expect(Math.abs(inner!)).toBeCloseTo(3, 6);
+      expect(Math.abs(outer!)).toBeCloseTo(17, 6);
+    }
+    expect(Math.sign(offs[0]![0]!)).toBe(-Math.sign(offs[1]![0]!));
+    expect(featureGhost(p, 'crosswalk')).toEqual([crossingGhost(p)]);
+    // No median: one line across, as before.
+    const { doc } = crossDoc();
+    const q = projectOnSegment(doc, new PickIndex(doc), { x: 50.3, z: 2 })!;
+    expect(featureGhost(q, 'speedBump')).toEqual([crossingGhost(q)]);
   });
 
   it('finds nothing away from roads', () => {

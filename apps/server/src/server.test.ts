@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
-import { PROTOCOL_MISMATCH, PROTOCOL_VERSION } from '@smartcity/shared';
+import { PROTOCOL_MISMATCH, PROTOCOL_VERSION, sampleCityPlan } from '@smartcity/shared';
 import type { Command, ServerMessage } from '@smartcity/shared';
 import { startServer } from './server.js';
 import { AiService } from './ai/service.js';
@@ -117,6 +117,35 @@ describe('server', () => {
     expect(refsB.filter((r) => r !== undefined)).toEqual([7]);
     a.close();
     b.close();
+  });
+
+  it('builds the sample city only while the room is still empty (doc.expect in the same apply; P7d review #1)', async () => {
+    const { batch } = sampleCityPlan();
+    // Race: A saw an empty room, but B's shop is applied first. The whole batch is refused, the shop stays.
+    const a = await TestClient.join(srv.port, 'race-room', 'a');
+    const b = await TestClient.join(srv.port, 'race-room', 'b');
+    b.send({ t: 'cmd', ref: 1, cmd: { type: 'building.place', building: { id: 'other-user-shop', typeId: 'shop', pos: { x: 100, z: 0 }, rotation: 0 } } });
+    await b.next('applied');
+    a.send({ t: 'cmd', ref: 9, cmd: batch });
+    const r = await a.next('rejected');
+    expect(r.ref).toBe(9);
+    expect(r.error).toBe('the city is not empty');
+    a.close();
+    b.close();
+    const d = await TestClient.open(srv.port);
+    d.send({ t: 'hello', protocol: PROTOCOL_VERSION, room: 'race-room', name: 'd' });
+    const welcome = await d.next('welcome');
+    expect(Object.keys(welcome.doc.buildings)).toEqual(['other-user-shop']);
+    expect(Object.keys(welcome.doc.segments)).toEqual([]);
+    expect(welcome.seq).toBe(1);
+    d.close();
+    // An empty room takes it as one command.
+    const e = await TestClient.join(srv.port, 'fresh-room', 'e');
+    e.send({ t: 'cmd', ref: 1, cmd: batch });
+    const ok = await e.next('applied');
+    expect(ok.seq).toBe(1);
+    expect(ok.ref).toBe(1);
+    e.close();
   });
 
   it('rejects an invalid command to the sender only', async () => {
