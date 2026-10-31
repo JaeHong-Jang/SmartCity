@@ -23,6 +23,7 @@ import { buildRoadNetwork, type RoadNetworkGeom } from './roadNetwork';
 import { RoadLayer, Y_WALK } from './roads';
 import { BlackoutLayer } from './blackout';
 import { DetectionLayer } from './detection';
+import { ControlMarkLayer } from './controlMark';
 import { EmergencyLayer } from './emergency';
 import { ScenarioLayer } from './scenario';
 import { configureRenderer, createSun } from './sceneKit';
@@ -75,6 +76,7 @@ export class CityRenderer {
   readonly emergency: EmergencyLayer;
   readonly blackout: BlackoutLayer;
   readonly detection: DetectionLayer;
+  readonly controlMark: ControlMarkLayer;
   /** Night factor 0..1 of the last frame (blackout veil strength). */
   private night = 0;
   private network: RoadNetworkGeom = { segments: new Map(), nodes: new Map(), crossings: [], graph: null };
@@ -149,6 +151,8 @@ export class CityRenderer {
     this.emergency = new EmergencyLayer(stream);
     this.blackout = new BlackoutLayer(stream);
     this.detection = new DetectionLayer(stream, labelRoot);
+    this.controlMark = new ControlMarkLayer(labelRoot);
+    this.scene.add(this.controlMark.group);
     this.scene.add(this.paving.group, this.roads.group, this.streetscape.group, this.buildings.group, this.sensors.group, this.vehicles.group, this.pedestrians.group, this.signals.group, this.pedSignals.group, this.overlays.group, this.highlights.group, this.scenario.group, this.emergency.group, this.blackout.group, this.detection.group);
 
     this.unsubs.push(
@@ -386,6 +390,7 @@ export class CityRenderer {
     this.emergency.update(now);
     this.blackout.update(now, this.night, this.cam.controls.distance);
     this.detection.update(now, this.cam.camera, this.width, this.height);
+    this.controlMark.update(now, this.cam.camera, this.width, this.height);
     this.overlays.update(Date.now(), this.cam.camera, this.cam.controls.distance, this.width, this.height);
     this.renderer.info.reset();
     this.shadowCalls = 0;
@@ -561,6 +566,7 @@ export class CityRenderer {
     this.emergency.dispose();
     this.blackout.dispose();
     this.detection.dispose();
+    this.controlMark.dispose();
     this.ground.dispose();
     this.renderer.dispose();
   }

@@ -1,7 +1,7 @@
 // Messages between the main thread and sim.worker.ts.
 
 import type { CityDoc, Command } from '@smartcity/shared';
-import { DETECTION_MODES, SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS } from '@smartcity/sim';
+import { DETECTION_MODES, RESERVED_FACTORS, SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS } from '@smartcity/sim';
 import type { DetectionMode, ResponsePolicy, ScenarioInput, ScenarioKpi, ScenarioOutcome, ScenarioRecord, ScenarioResult, Simulation, SimSnapshot, SnapshotBuffers } from '@smartcity/sim';
 
 export type WorkerSpeed = 0 | 1 | 2 | 4;
@@ -127,6 +127,7 @@ export function inputShapeError(x: unknown): string | null {
     if (x.params.battery !== undefined && x.params.battery !== 0 && x.params.battery !== 1) return 'battery는 0 또는 1이어야 합니다';
     const det = x.params.detection;
     if (det !== undefined && !(typeof det === 'number' && Number.isInteger(det) && det >= 0 && det < DETECTION_MODES.length)) return 'detection은 0(즉시), 1(신고), 2(센서+신고)여야 합니다';
+    for (const k of RESERVED_FACTORS) if (x.params[k] !== undefined && x.params[k] !== 0) return `${k}: 아직 지원하지 않는 요인입니다 (0만 허용)`;
   }
   return null;
 }

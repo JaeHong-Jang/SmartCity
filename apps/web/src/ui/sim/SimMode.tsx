@@ -13,6 +13,7 @@ import { DEFAULT_ARMED, useSimMode, type EventKind, type EventRow } from '../../
 import { ticksToGameMin, WARMUP_GAME_MIN, WARMUP_TICKS } from '../../simmode/time';
 import { useServices, useStore } from '../context';
 import { KpiChart } from './KpiChart';
+import { ControlRoom } from './ControlRoom';
 
 export function SimModeEnterButton() {
   const phase = useSimMode((s) => s.phase);
@@ -493,6 +494,7 @@ export function SimModeRoot() {
     <>
       <Banner />
       <Palette />
+      <ControlRoom />
       <ComparePanel />
       <div className="panel sim-lock-note">공유 도시 편집 도구는 시뮬레이터 모드에서 잠겨 있습니다</div>
     </>

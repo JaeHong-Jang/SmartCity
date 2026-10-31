@@ -30,6 +30,9 @@ import { reapplyDark, writeDark } from './traffic/signalDark.js';
 import { minutesOf, powerCoverage, updatePower, type PowerCoverage } from './scenario/blackout.js';
 import { processReroutes } from './scenario/reroute.js';
 import { processDetections, undetectedView } from './scenario/detection.js';
+import { controlView } from './control/control.js';
+import { observationView } from './control/observation.js';
+import type { ObservationView } from './control/types.js';
 import { hasOnSite, processOnSite } from './scenario/onsite.js';
 import { scenarioHolds } from './scenario/state.js';
 import { processSurge } from './scenario/surge.js';
@@ -232,7 +235,10 @@ export class Simulation {
 
   snapshot(reuse?: SnapshotBuffers): SimSnapshot {
     const snap = writeSnapshot(this.w, this.snapScratch, this.stats(), reuse);
-    if (this.w.sc !== null) snap.scenario = this.scenarioView();
+    if (this.w.sc !== null) {
+      snap.scenario = this.scenarioView();
+      snap.control = controlView(this.w);
+    }
     return snap;
   }
 
@@ -276,6 +282,14 @@ export class Simulation {
     const out = sc.outcomes.map((e) => ({ eventId: e.eventId, tick: e.tick, kind: e.kind, applied: e.applied, ...(e.note !== undefined ? { reason: e.note } : {}) }));
     sc.outcomes = [];
     return out;
+  }
+
+  /**
+   * What agents and the central control see now (ADR 0015 §2): known events only, live congestion, the
+   * emergency fleet, the normalized policy. Read-only; null while the scenario state is inactive.
+   */
+  observation(): ObservationView | null {
+    return this.w.sc !== null ? observationView(this.w) : null;
   }
 
   /** Every accepted scenario input so far (policy changes included), in acceptance order: ScenarioRecord.inputs. */

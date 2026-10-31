@@ -3,6 +3,7 @@
 
 import type { NodeId, RoadType, SegmentId, TravelDir, Vec2 } from '@smartcity/shared';
 import type { ScenarioView } from './scenario/types.js';
+import type { ControlView } from './control/types.js';
 
 // ---------- compiled road network (derived from CityDoc, never edited directly) ----------
 
@@ -208,6 +209,8 @@ export interface SimSnapshot {
   stats: SimStats;
   /** Simulator mode (ADR 0010): obstacles, closed lanes and KPIs; absent unless the scenario API was used. */
   scenario?: ScenarioView;
+  /** AI control room (ADR 0015 §6): agent states and recent decisions; present exactly when `scenario` is. */
+  control?: ControlView;
 }
 
 /** Buffers handed back by the consumer so the next snapshot can reuse them (no per-tick allocation). */

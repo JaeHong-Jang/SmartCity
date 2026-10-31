@@ -249,6 +249,15 @@ renderer.detection.setSource({
   flashMs: DETECTION_FLASH_MS,
   position: (id) => simModeStore.getState().events.find((e) => e.eventId === id)?.pos ?? null,
 });
+renderer.controlMark.setSource({
+  selected() {
+    const s = simModeStore.getState();
+    const d = s.selectedDecision;
+    if (s.phase === 'off' || !d?.target) return null;
+    const radius = d.target.kind === 'node' ? 16 : d.target.kind === 'segment' ? 28 : 22;
+    return { x: d.target.x, z: d.target.z, radius, label: `${d.agent} · ${d.text}` };
+  },
+});
 // Before the ToolController: while simulator mode is active the shared editing tools never see the left button.
 installSimModeInput(renderer.renderer.domElement, simMode, renderer.pickGround, renderer.groundPan);
 new ToolController(
@@ -334,6 +343,7 @@ if (import.meta.env.DEV) {
       scene: () => renderer.scenario.stats(),
       emergency: () => renderer.emergency.stats(),
       detection: () => renderer.detection.stats(),
+      controlMark: () => renderer.controlMark.stats(),
     },
     worldToScreen(x: number, z: number) {
       const rect = renderer.renderer.domElement.getBoundingClientRect();

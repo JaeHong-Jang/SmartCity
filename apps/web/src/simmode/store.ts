@@ -1,7 +1,7 @@
 // Small independent store for simulator-mode UI state (the shared ClientStore is not touched).
 
 import { useSyncExternalStore } from 'react';
-import { DEFAULT_POLICY, type DetectionKpi, type ResponseBreakdown, type ResponsePolicy, type ScenarioKpi } from '@smartcity/sim';
+import { DEFAULT_POLICY, type ControlView, type Decision, type DetectionKpi, type ResponseBreakdown, type ResponsePolicy, type ScenarioKpi } from '@smartcity/sim';
 import type { CoverageRing } from './coverage';
 import type { FacilityCounts } from './facilities';
 import type { SimPhase } from './machine';
@@ -118,6 +118,10 @@ export interface SimModeState {
   response: ResponseBreakdown | null;
   /** Recent detection moments, oldest first (at most 8). */
   detections: DetectionFlash[];
+  /** AI control room (ADR 0015 §6): agent states and recent decisions of the copy, null before the first. */
+  control: ControlView | null;
+  /** Decision picked in the control room: its target is highlighted on the map. */
+  selectedDecision: Decision | null;
   /** Live workers (copy + compare), for the leak test hook. */
   workers: number;
 }
@@ -153,6 +157,8 @@ export function initialSimModeState(): SimModeState {
     detection: null,
     response: null,
     detections: [],
+    control: null,
+    selectedDecision: null,
     workers: 0,
   };
 }

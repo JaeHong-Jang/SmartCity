@@ -12,11 +12,13 @@
 // (min(5 s, the phase's planned green)), with every pedestrian head of that phase past its clearance by the
 // end of the yellow (steady WALK is cut short, the flashing CLEARANCE always runs in full), then the
 // plan's full yellow and all-red. A pedestrian-only (scramble) phase is left only after its clearance. No
-// new WALK starts while a controller drives the junction. Requests: an emergency vehicle on a call (to
-// the scene, or carrying a patient) whose next signalized stop line is within max(150 m, 15 s × speed) asks
-// for the phase of its approach. Per junction requests are served one at a time in ETA order (whole ticks,
-// then vehicle id): the vehicle being served keeps the junction until its request disappears — once it is
-// past the stop line (on the connector) — so two requests never make the junction switch back and forth.
+// new WALK starts while a controller drives the junction. This is the single safety executor of ADR 0015
+// §2: its only input is a target phase per junction (control/a4Emergency.ts `signalTargets`: an emergency
+// vehicle on a call — to the scene, or carrying a patient — whose next signalized stop line is within
+// max(150 m, 15 s × speed) asks for the phase of its approach; A0 keeps one request per junction, the one
+// being served, else ETA in whole ticks then vehicle id). The vehicle being served keeps the junction until
+// its request disappears — once it is past the stop line (on the connector) — so two requests never make
+// the junction switch back and forth.
 // Plan clock: the fixed-time clock keeps running underneath; when no request is left the controller ends
 // the served green safely and hands back at the START of the plan's next phase, re-phasing the plan's
 // offset (kept across rebuilds in `sc.offsets` while the plan is unchanged) — never mid-interval.
@@ -35,13 +37,10 @@ import { PedSignal } from '../types.js';
 import { clearingFrom, planOf, shownAt, startPlanAt, stepClearings, type PlanShown } from '../traffic/signalClearing.js';
 import type { PlanIdentity, SignalPlan } from '../traffic/signals.js';
 import type { World } from '../traffic/world.js';
-import { preemptOn } from './types.js';
+import { signalTargets } from './controlAdapter.js';
 
 export type SignalMode = 'normal' | 'preempt' | 'dark';
 
-/** A request reaches this far ahead of the stop line: max(PREEMPT_DISTANCE, PREEMPT_ETA × speed). */
-export const PREEMPT_DISTANCE = 150;
-export const PREEMPT_ETA = 15;
 /** Minimum green before a controller ends a green (capped by the phase's own planned green). */
 export const PREEMPT_MIN_GREEN = 5;
 
@@ -53,55 +52,6 @@ export interface SignalCtl extends PlanShown {
   /** Request served now (vehicle id, phase), −1 = none: ending the green and handing back to the plan. */
   vehicleId: number;
   target: number;
-}
-
-interface Request {
-  vehicleId: number;
-  eta: number;
-  phase: number;
-}
-
-/** Every emergency vehicle on a call asks its next signalized junction for its approach's phase. */
-function collectRequests(w: World): Map<string, Request[]> {
-  const out = new Map<string, Request[]>();
-  const sc = w.sc!;
-  if (!preemptOn(sc.policy)) return out;
-  const net = w.net;
-  const nLanes = net.nLanes;
-  for (const m of sc.missions) {
-    const v = m.v;
-    if (v === null || !v.alive || (m.stage !== 'enroute' && m.stage !== 'transport')) continue;
-    const reach = Math.max(PREEMPT_DISTANCE, PREEMPT_ETA * v.v);
-    let e = v.edge;
-    let j = v.ri;
-    let d = net.len[e]! - v.s;
-    while (d <= reach) {
-      const nxt = v.route[j + 1];
-      if (nxt === undefined) break;
-      if (e < nLanes && nxt >= nLanes) {
-        const node = net.connNode[nxt - nLanes]!;
-        if (net.nodeSignalized[node]) {
-          // A dark (unpowered) signal cannot be pre-empted: the vehicle takes the all-way stop like everyone.
-          if (w.dark !== null && w.dark.nodeDark[node]) break;
-          const nodeId = net.nodeIds[node]!;
-          const p = planOf(w, nodeId);
-          const seg = w.graph.lanes[e]!.segmentId;
-          const phase = p ? p.phases.findIndex((ph) => ph.approaches.includes(seg)) : -1;
-          if (phase >= 0) {
-            const r = { vehicleId: v.id, eta: Math.ceil((d / Math.max(v.v, 1)) * w.tickRate), phase };
-            const list = out.get(nodeId);
-            if (list) list.push(r);
-            else out.set(nodeId, [r]);
-          }
-          break;
-        }
-      }
-      d += net.len[nxt]!;
-      e = nxt;
-      j++;
-    }
-  }
-  return out;
 }
 
 /** Take over a junction in the state the fixed-time plan shows at tick t (updateSignals ran this tick). */
@@ -169,37 +119,34 @@ function write(w: World, p: SignalPlan, c: SignalCtl): void {
   p.ctl = { phase: c.phase, color: c.color, remaining: Math.max(0, left), segs };
 }
 
-const bestRequest = (list: Request[] | undefined, keep: number): Request | undefined => {
-  let r: Request | undefined = list?.find((x) => x.vehicleId === keep);
-  if (r === undefined && list !== undefined) for (const x of list) if (r === undefined || x.eta < r.eta || (x.eta === r.eta && x.vehicleId < r.vehicleId)) r = x;
-  return r;
-};
-
 const darkCrossing = (w: World) => (id: string): boolean => w.dark !== null && w.dark.crossings.has(id);
 
-/** Per tick, after updateSignals: clearances, then requests → controllers (create, advance, hand back) → outputs. */
+/**
+ * Per tick, after updateSignals: the signal stage's target phases (A4 → A0), then clearances, then targets →
+ * controllers (create, advance, hand back) → outputs.
+ */
 export function updatePreemption(w: World): void {
   const sc = w.sc!;
   const minGreen = Math.round(PREEMPT_MIN_GREEN * w.tickRate);
-  const reqs = collectRequests(w);
+  const targets = signalTargets(w);
   const t = w.tick;
   // A finished clearance goes to a pending request on the new plan's phases at once, else to the plan.
   const clearing = new Set(w.signalClearing.keys());
   stepClearings(w, (p) => {
-    const r = bestRequest(reqs.get(p.nodeId), -1);
+    const r = targets.get(p.nodeId);
     if (r === undefined) return false;
     const c: SignalCtl = { nodeId: p.nodeId, mode: 'preempt', id: p.id, phase: r.phase, color: 'green', since: t, greenStart: t, walkEnd: p.peds.map(() => -1), clrEnd: p.peds.map(() => -1), vehicleId: r.vehicleId, target: r.phase };
     sc.ctl.set(p.nodeId, c);
     write(w, p, c);
     return true;
   }, darkCrossing(w));
-  const nodes = new Set<string>([...reqs.keys(), ...sc.ctl.keys()]);
+  const nodes = new Set<string>([...targets.keys(), ...sc.ctl.keys()]);
   for (const nodeId of [...nodes].sort()) {
     if (clearing.has(nodeId)) continue;
     const p = planOf(w, nodeId);
     if (p === undefined) continue;
     let c = sc.ctl.get(nodeId);
-    const r = bestRequest(reqs.get(nodeId), c?.vehicleId ?? -1);
+    const r = targets.get(nodeId);
     if (c === undefined) {
       if (r === undefined) continue;
       c = takeOver(w, p, t);

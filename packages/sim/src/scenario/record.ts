@@ -5,6 +5,7 @@ import { Simulation } from '../simulation.js';
 import type { World } from '../traffic/world.js';
 import type { SimOptions } from '../types.js';
 import { ensureScenario } from './apply.js';
+import { RESERVED_FACTORS } from '../control/policy.js';
 import { DETECTION_MODES, ENGINE_VERSIONS, policyError, SCENARIO_VERSION, type DetectionMode, type ResponsePolicy, type ScenarioRecord } from './types.js';
 
 export interface ReplayOptions {
@@ -51,6 +52,10 @@ export function simulationFromRecord(record: ScenarioRecord, opts: Omit<SimOptio
   if (bad) throw new Error(bad);
   if (!Array.isArray(record.inputs)) throw new Error('inputs는 배열이어야 합니다');
   if (legacy && record.inputs.some((i) => i?.kind === 'policy.set' && i.params?.detection !== undefined)) throw new Error('engineVersion 1 기록에는 detection 입력이 없어야 합니다');
+  // Reserved factor keys exist from engine 3 on (ADR 0015 §3).
+  const reservedIn = (o: unknown): boolean => typeof o === 'object' && o !== null && RESERVED_FACTORS.some((k) => (o as Record<string, unknown>)[k] !== undefined);
+  if (record.engineVersion < 3 && (reservedIn(record.policy) || record.inputs.some((i) => i?.kind === 'policy.set' && reservedIn(i.params))))
+    throw new Error(`engineVersion ${record.engineVersion} 기록에는 예약 요인(${RESERVED_FACTORS.join(', ')}) 입력이 없어야 합니다`);
   const doc = cloneJson(record.doc);
   doc.meta.seed = record.seed;
   const sim = new Simulation(doc, { ...opts, tickRate: record.tickRate, scenario: at === 0 });

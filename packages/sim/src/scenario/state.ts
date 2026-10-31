@@ -10,6 +10,7 @@ import type { Goal, Vehicle, World } from '../traffic/world.js';
 import type { Blackout } from './blackout.js';
 import type { DetectionState } from './detection.js';
 import type { SignalCtl } from './preempt.js';
+import { newControlState, type ControlState } from '../control/control.js';
 import { DEFAULT_POLICY, type ResponsePolicy, type ScenarioInput } from './types.js';
 
 function newDetectionState(): DetectionState {
@@ -222,6 +223,8 @@ export interface ScenarioState {
   dispatchFailed: number;
   /** Detection queue, coverage cache and detection / response-stage KPI accumulators (ADR 0013). */
   det: DetectionState;
+  /** Central control frame (ADR 0015): observation boundary and audit log. Never read by the physical model. */
+  control: ControlState;
 }
 
 export function newScenarioState(w: World): ScenarioState {
@@ -273,6 +276,7 @@ export function newScenarioState(w: World): ScenarioState {
     medicalCompleted: 0,
     dispatchFailed: 0,
     det: newDetectionState(),
+    control: newControlState(),
   };
 }
 

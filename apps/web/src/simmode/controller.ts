@@ -205,6 +205,8 @@ export class SimModeController {
       detection: null,
       response: null,
       detections: [],
+      control: null,
+      selectedDecision: null,
     });
 
     const copy = this.spawn();
@@ -270,6 +272,10 @@ export class SimModeController {
       const resp: ResponseBreakdown | null = k.response ?? null;
       const st = this.store.getState();
       if (!sameJson(det, st.detection) || !sameJson(resp, st.response)) this.store.set({ detection: det, response: resp });
+      // Control room: only when a decision or an agent state changed (not every snapshot).
+      const cv = snap.control ?? null;
+      const prev = st.control;
+      if (cv && (!prev || cv.total !== prev.total || cv.repeated !== prev.repeated || cv.agents.some((a, i) => a.state !== prev.agents[i]?.state))) this.store.set({ control: cv });
     }
     if (this.store.getState().phase !== 'warming') this.publish({ tick: snap.tick });
   }

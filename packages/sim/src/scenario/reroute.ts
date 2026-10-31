@@ -7,7 +7,7 @@
 
 import { routeVehicle } from '../traffic/ops.js';
 import type { Vehicle, World } from '../traffic/world.js';
-import { isInformed } from './state.js';
+import { rerouteNotice } from './controlAdapter.js';
 
 /**
  * Scenario route searches per tick (re-routes + recoveries), on top of the regular `routeBudget`. On the
@@ -53,25 +53,13 @@ function enqueue(w: World, sorted: readonly Vehicle[]): void {
   sc.rq = out;
 }
 
-/** Queue the vehicles an event start/end concerns. `ended`: also retry every vehicle waiting with no route. */
-export function enqueueAffected(w: World, lanes: readonly number[], ended: boolean): void {
+/**
+ * Queue the vehicles an event start/end concerns: A5's accepted re-route notice (control/a5Reroute.ts) and,
+ * when `ended`, every vehicle waiting with no route (recovery retry, policy independent).
+ */
+export function enqueueAffected(w: World, lanes: readonly number[], ended: boolean, eventId: string): void {
   const sc = w.sc!;
-  const nLanes = w.net.nLanes;
-  const batch: Vehicle[] = [];
-  if (sc.policy.reroute && lanes.length > 0) {
-    const mark = new Uint8Array(nLanes);
-    for (const l of lanes) mark[l] = 1;
-    for (const v of w.vehicles) {
-      if (!v.alive || v.scQueued || !isInformed(w, v, sc.policy.informedShare)) continue;
-      for (let j = v.ri + 1; j < v.route.length; j++) {
-        const e = v.route[j]!;
-        if (e < nLanes && mark[e]) {
-          batch.push(v);
-          break;
-        }
-      }
-    }
-  }
+  const batch: Vehicle[] = sc.policy.reroute && lanes.length > 0 ? rerouteNotice(w, lanes, eventId, ended) : [];
   if (ended) {
     for (const v of w.vehicles) {
       if (!v.alive || v.scWait !== NO_ROUTE) continue;

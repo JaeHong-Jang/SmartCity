@@ -19,6 +19,8 @@ import { enqueueAffected } from './reroute.js';
 import { compose, logOutcome, type Incident } from './state.js';
 import { detectionOf, type DetectionKpi, type ResponseBreakdown, type ScenarioView } from './types.js';
 import type { SensorKind } from '@smartcity/shared';
+import type { ObservationReport } from '../control/a1Detection.js';
+import { observeReport, reportVoid } from './controlAdapter.js';
 
 /**
  * Detection model, game seconds (model values, NOT calibrated — research 14 §4.3): a delay of base + u·spread
@@ -236,17 +238,26 @@ function known(w: World, p: PendingDetection, c: Candidate): void {
   det.maxDelayTicks = Math.max(det.maxDelayTicks, delay);
   det.exposed += p.exposed.size;
   logOutcome(sc, { eventId: p.eventId, tick: w.tick, kind: 'detection.known', applied: true, note: `${c.sensorId === null ? 'report' : `sensor ${c.sensorId}`}, ${gameMinutes(w, delay).toFixed(1)}분` });
+  // The report was accepted by A0 before (processDetections): the event is known, A5 / A4 act on it.
   if (p.kind === 'accident') {
     const e = sc.effects.find((x) => x.kind === 'accident' && x.eventId === p.eventId);
     if (!e || e.kind !== 'accident') return;
     e.known = true;
     compose(w);
     const lane = w.graph.laneById.get(e.laneId);
-    if (lane !== undefined) enqueueAffected(w, [lane], false);
+    if (lane !== undefined) enqueueAffected(w, [lane], false, p.eventId);
     return;
   }
   const inc = sc.incidents.find((x) => x.eventId === p.eventId);
   if (inc) incidentKnown(w, inc);
+}
+
+/** The report A1 would give for a pending event (its location from the physical event record). */
+function reportOf(w: World, p: PendingDetection, sensorId: string | null): ObservationReport {
+  const sc = w.sc!;
+  const e = p.kind === 'accident' ? sc.effects.find((x) => x.eventId === p.eventId) : undefined;
+  const inc = p.kind === 'fire' ? sc.incidents.find((x) => x.eventId === p.eventId) : undefined;
+  return { eventId: p.eventId, kind: p.kind, source: sensorId !== null ? 'sensor' : 'report', sensorId, segmentId: e?.segmentId ?? null, lane: e?.lane ?? -1, buildingId: inc?.buildingId ?? null };
 }
 
 /** Per tick, after the due inputs and before power: due candidates → known (once), then exposure of the rest. */
@@ -264,7 +275,13 @@ export function processDetections(w: World): void {
       const c = p.cand.shift()!;
       if (c.sensorId !== null && unpowered(w, c.x, c.z)) {
         logOutcome(w.sc!, { eventId: p.eventId, tick: t, kind: 'detection.unpowered', applied: false, note: c.sensorId });
+        reportVoid(w, reportOf(w, p, c.sensorId));
         continue;
+      }
+      // The report goes to A0 first (observe budget): over it, the candidate stays due and reports again next tick.
+      if (!observeReport(w, reportOf(w, p, c.sensorId), `${gameMinutes(w, t - p.startTick).toFixed(1)}분`)) {
+        p.cand.unshift(c);
+        break;
       }
       known(w, p, c);
       break;

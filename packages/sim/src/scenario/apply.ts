@@ -9,6 +9,9 @@ import { endIncident, startIncident } from './emergency.js';
 import { enqueueAffected } from './reroute.js';
 import { generateSurge } from './surge.js';
 import { detectionMissed, trackAccident } from './detection.js';
+import { buildingTarget, placeText, segmentTarget } from '../control/control.js';
+import { RESERVED_FACTORS, reservedError } from '../control/policy.js';
+import { observeInput, retryDeferredObservations } from './controlAdapter.js';
 import { DETECTION_MODES, detectionOf, SCENARIO_INPUT_KEYS, SCENARIO_PARAM_KEYS, SCENARIO_TARGET_KEYS, type ResponsePolicy, type ScenarioInput, type ScenarioInputKind, type ScenarioResult } from './types.js';
 
 export const ACCIDENT_TICKS = 2400;
@@ -118,7 +121,7 @@ function validate(w: World, input: ScenarioInput): string | null {
       if (p.preempt !== undefined && p.preempt !== 0 && p.preempt !== 1) return 'preempt는 0 또는 1이어야 합니다';
       if (p.battery !== undefined && p.battery !== 0 && p.battery !== 1) return 'battery는 0 또는 1이어야 합니다';
       if (p.detection !== undefined && p.detection !== 0 && p.detection !== 1 && p.detection !== 2) return 'detection은 0(legacy), 1(reports), 2(sensors)여야 합니다';
-      return null;
+      return reservedError((k) => p[k], 0);
   }
   return null;
 }
@@ -133,7 +136,8 @@ export function queueScenarioInput(w: World, input: ScenarioInput): ScenarioResu
   const target: ScenarioInput['target'] = {};
   for (const k of SCENARIO_TARGET_KEYS) if (input.target[k] !== undefined) (target as Record<string, unknown>)[k] = input.target[k];
   const params: Record<string, number> = {};
-  for (const k of SCENARIO_PARAM_KEYS[input.kind]) if (input.params[k] !== undefined) params[k] = input.params[k]!;
+  // Reserved factors (always 0 here) are accepted and dropped: never recorded, never applied (ADR 0015 §3).
+  for (const k of SCENARIO_PARAM_KEYS[input.kind]) if (input.params[k] !== undefined && !(input.kind === 'policy.set' && (RESERVED_FACTORS as readonly string[]).includes(k))) params[k] = input.params[k]!;
   const copy: ScenarioInput = { eventId: input.eventId, tick: input.tick, order: input.order, kind: input.kind, target, params };
   sc.pending.push(copy);
   sc.accepted.push(copy);
@@ -175,6 +179,8 @@ export function applyDueInputs(w: World): void {
   const expired = sc.effects.filter((e) => e.endTick <= w.tick).sort((a, b) => (a.eventId < b.eventId ? -1 : 1));
   for (const e of expired) endEffect(w, e, null);
   if (sc.blackouts.length > 0) for (const b of sc.blackouts.filter((x) => x.endTick <= w.tick).sort((a, c) => (a.eventId < c.eventId ? -1 : 1))) endBlackout(w, b, null);
+  // Observations deferred by last tick's observe budget come first (ADR 0015 §2; empty below the cap).
+  if (sc.control.deferred.length > 0) retryDeferredObservations(w);
   if (sc.pending.length === 0) return;
   if (!sc.pendingSorted) {
     sc.pending.sort(byKey);
@@ -204,7 +210,7 @@ function endEffect(w: World, e: Effect, by: string | null): void {
   compose(w);
   logOutcome(sc, { eventId: e.eventId, tick: w.tick, kind: `${e.kind}.end`, applied: true, note: by === null ? 'duration' : `by ${by}` });
   if (unknown) detectionMissed(w, e.eventId, 'ended before detection');
-  enqueueAffected(w, lanes, true);
+  enqueueAffected(w, lanes, true, e.eventId);
 }
 
 function effectLanes(w: World, e: Effect): number[] {
@@ -300,7 +306,8 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
       sc.effects.push(e);
       compose(w);
       log(w, input, true);
-      enqueueAffected(w, effectLanes(w, e), false);
+      const where = segmentTarget(w, e.segmentId);
+      if (observeInput(w, { eventId: e.eventId, kind: 'closure', segmentId: e.segmentId, lane: e.lane, buildingId: null }, where, `도로 통제 인지: ${placeText(where, e.segmentId)}`, `${e.eventId} · 통제는 즉시 인지`)) enqueueAffected(w, effectLanes(w, e), false, e.eventId);
       return;
     }
     case 'accident.start': {
@@ -330,7 +337,15 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
       log(w, input, true, rear !== t.s && t.s !== undefined ? `moved to s=${rear.toFixed(2)}` : undefined);
       // ADR 0013 §2: the obstacle is physical from now; costs and re-route notices wait for detection.
       if (!e.known) trackAccident(w, e.eventId, e.laneId, rear + len / 2);
-      else enqueueAffected(w, [lane], false);
+      else {
+        const where = segmentTarget(w, e.segmentId);
+        if (observeInput(w, { eventId: e.eventId, kind: 'accident', segmentId: e.segmentId, lane: e.lane, buildingId: null }, where, `사고 인지: ${placeText(where, e.segmentId)} ${e.lane + 1}차선`, `${e.eventId} · 즉시 인지 (감지 모드 legacy)`)) enqueueAffected(w, [lane], false, e.eventId);
+        else {
+          // Over the observe budget: physical at once, known (router cost, notices) next tick.
+          e.known = false;
+          compose(w);
+        }
+      }
       return;
     }
     case 'closure.end':
@@ -349,6 +364,8 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
     case 'surge.start': {
       const n = generateSurge(w, input);
       log(w, input, n > 0, n > 0 ? `${n} trips` : 'no origin');
+      const where = buildingTarget(w, t.buildingId!);
+      if (n > 0) observeInput(w, { eventId: input.eventId, kind: 'surge', segmentId: null, lane: -1, buildingId: t.buildingId! }, where, `수요 급증 인지: ${placeText(where, t.buildingId!)}`, `${input.eventId} · 행사 ${n}통행 (사전 공지된 계획)`);
       return;
     }
     case 'fire.start':
@@ -372,7 +389,10 @@ export function applyScenarioInput(w: World, input: ScenarioInput): void {
     }
     case 'blackout.start': {
       const why = startBlackout(w, input);
-      return log(w, input, why === null, why ?? undefined);
+      log(w, input, why === null, why ?? undefined);
+      const where = t.buildingId !== undefined ? buildingTarget(w, t.buildingId) : { kind: 'point' as const, id: input.eventId, name: '구역', x: p.x!, z: p.z! };
+      if (why === null) observeInput(w, { eventId: input.eventId, kind: 'blackout', segmentId: null, lane: -1, buildingId: t.buildingId ?? null }, where, `정전 인지: ${placeText(where, input.eventId)}`, `${input.eventId} · 정전은 즉시 인지`);
+      return;
     }
     case 'blackout.end': {
       const b = findBlackout(w, input);

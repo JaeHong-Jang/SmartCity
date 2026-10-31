@@ -1497,6 +1497,149 @@ body[data-conn-banner] .sim-panel {
   max-height: calc(100% - 142px - 96px);
 }
 
+/* AI 관제실 (ADR 0015 §6): right column; the comparison panel moves to its left (no overlap). */
+.sim-control {
+  position: absolute;
+  top: 112px;
+  right: 12px;
+  width: 360px;
+  max-height: calc(100% - 112px - 96px);
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--panel-solid);
+  font-size: 12px;
+}
+
+.sim-control h3 {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+body[data-simmode] .sim-compare {
+  right: 384px;
+  max-width: calc(100% - 400px - 372px);
+}
+
+body[data-conn-banner] .sim-control {
+  top: 142px;
+  max-height: calc(100% - 142px - 96px);
+}
+
+.ctl-agents,
+.ctl-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ctl-agents li {
+  display: grid;
+  grid-template-columns: 58px 1fr auto;
+  align-items: center;
+  gap: 0 6px;
+}
+
+.ctl-agents li[data-state='off'] .ctl-name {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.ctl-roles {
+  display: flex;
+  gap: 2px;
+}
+
+.ctl-roles i {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 700;
+  color: #0f172a;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.ctl-state {
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+}
+
+.ctl-state.active {
+  color: #0f172a;
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.ctl-state.idle {
+  color: var(--accent);
+}
+
+.ctl-state.off {
+  color: var(--text-dim);
+}
+
+.ctl-evidence {
+  grid-column: 2 / 4;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctl-log button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 38px 24px 1fr;
+  gap: 0 6px;
+  text-align: left;
+  padding: 3px 6px;
+  font-size: 11.5px;
+}
+
+.ctl-log button.active {
+  border-color: #fde047;
+  box-shadow: inset 0 0 0 1px #fde047;
+}
+
+.ctl-time {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.ctl-agent {
+  font-weight: 700;
+}
+
+.ctl-reason {
+  grid-column: 3;
+  font-size: 10.5px;
+}
+
+.ctl-verdict {
+  font-style: normal;
+  font-weight: 700;
+  margin-right: 4px;
+  color: var(--danger);
+}
+
+.ctl-verdict.cancelled {
+  color: var(--warn);
+}
+
+.ctl-note {
+  margin: 2px 0 0;
+  font-size: 10.5px;
+}
+
 .offline-notice {
   position: absolute;
   left: 50%;

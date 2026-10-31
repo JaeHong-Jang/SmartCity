@@ -14,6 +14,8 @@ import { logOutcome, type Incident, type Mission } from './state.js';
 import { CLOCK_SCALE } from '../types.js';
 import { detectionMissed, trackFire } from './detection.js';
 import { detectionOf, type ScenarioInput } from './types.js';
+import { dispatchCancelledDecision, dispatchDecision, dispatchFailedDecision, dispatchLostDecision, observeInput } from './controlAdapter.js';
+import { buildingTarget, KIND_LABEL, placeText } from '../control/control.js';
 
 /** Defaults in ticks (20 Hz): fire 0 → 100 % in 20 game min, suppression 5 game min, treatment 3 game min. */
 export const FIRE_BURN_TICKS = 2400;
@@ -28,15 +30,15 @@ export const DISPATCH_RETRY_TICKS = 600;
 const SPAWN_BUDGET = 8;
 const SPAWN_MARGIN = 2.5;
 
-const SERVICE: Record<Incident['kind'], FacilityService> = { fire: 'fireStation', medical: 'hospital' };
+export const SERVICE: Record<Incident['kind'], FacilityService> = { fire: 'fireStation', medical: 'hospital' };
 
 /** Fire progress 0..100 at tick t (it keeps burning during suppression). */
 export const fireProgress = (inc: Incident, t: number): number => Math.min(100, ((t - inc.startTick) * 100) / inc.burnTicks);
 
-const accessGoal = (a: Access): Goal => ({ segId: a.segId, dir: a.dir, anyDir: true, laneIndex: -1, mode: 't', t: a.t });
+export const accessGoal = (a: Access): Goal => ({ segId: a.segId, dir: a.dir, anyDir: true, laneIndex: -1, mode: 't', t: a.t });
 
 /** Entry point on the network for an access: rightmost lane of that direction, at the access fraction. */
-function placement(w: World, a: Access, len: number): { lane: number; s: number } | null {
+export function placement(w: World, a: Access, len: number): { lane: number; s: number } | null {
   const lane = originLane(w.net, a.segId, a.dir);
   if (lane < 0) return null;
   const L = w.net.len[lane]!;
@@ -44,7 +46,7 @@ function placement(w: World, a: Access, len: number): { lane: number; s: number 
   return { lane, s: Math.max(len + 3, Math.min(L, laneSAtT(w.net, lane, a.t))) };
 }
 
-function emergencyType(w: World, kind: Incident['kind']): string | null {
+export function emergencyType(w: World, kind: Incident['kind']): string | null {
   const want = kind === 'fire' ? FIRE_TRUCK_TYPE : AMBULANCE_TYPE;
   if (w.types.get(want)?.kind === 'emergency') return want;
   for (const id of w.typeIds) if (w.types.get(id)!.kind === 'emergency') return id;
@@ -63,6 +65,7 @@ function dispatchFailed(w: World, inc: Incident, reason: string): void {
   inc.failed = true;
   w.sc!.dispatchFailed++;
   log(w, inc, 'dispatch.failed', `출동 불가: ${reason}`);
+  dispatchFailedDecision(w, inc, reason);
 }
 
 function removeMission(w: World, m: Mission): void {
@@ -80,7 +83,7 @@ const isFacility = (w: World, id: string, service: FacilityService): boolean => 
   return b !== undefined && w.doc.buildingTypes[b.typeId]?.service === service;
 };
 
-const facilitiesOf = (w: World, service: FacilityService): string[] =>
+export const facilitiesOf = (w: World, service: FacilityService): string[] =>
   Object.keys(w.doc.buildings)
     .sort()
     .filter((id) => isFacility(w, id, service));
@@ -122,7 +125,9 @@ function lose(w: World, m: Mission, reason: string): void {
   removeMission(w, m);
   const inc = m.incident;
   log(w, inc, 'dispatch.lost', reason);
-  if (inc.mission !== m) return;
+  const current = inc.mission === m;
+  dispatchLostDecision(w, inc, m.stage, reason, !current ? '' : m.stage === 'transport' ? '환자 이송 실패로 종료' : m.stage === 'enroute' ? '즉시 다시 출동' : '');
+  if (!current) return;
   inc.mission = null;
   if (m.stage === 'transport') {
     removeIncident(w, inc);
@@ -143,31 +148,26 @@ function redirectHome(w: World, m: Mission): void {
   }
 }
 
-/** Choose the facility and queue the vehicle's departure (placed by processEmergency, this tick if there is room). */
+/**
+ * The dispatch decision (A4 proposes the facility, A0 arbitrates: control/a4Emergency.ts), then the executor
+ * part: queue the vehicle's departure (placed by processEmergency, this tick if there is room).
+ */
 function dispatch(w: World, inc: Incident): void {
-  const sc = w.sc!;
-  const typeId = emergencyType(w, inc.kind);
-  if (typeId === null) return dispatchFailed(w, inc, '긴급 차종 없음');
-  const len = w.types.get(typeId)!.length;
-  const facilities = facilitiesOf(w, SERVICE[inc.kind]);
-  if (facilities.length === 0) return dispatchFailed(w, inc, '시설 없음');
-  const scene = w.demand.access.get(inc.buildingId);
-  if (!scene) return dispatchFailed(w, inc, '경로 없음');
-  const goals = resolveGoal(w, accessGoal(scene), false);
-  let best: { id: string; from: Access; cost: number } | null = null;
-  for (const id of facilities) {
-    const from = w.demand.access.get(id);
-    const at = from ? placement(w, from, len) : null;
-    if (!from || !at || (sc.ban !== null && sc.ban[at.lane])) continue;
-    // Free-flow travel time (the same costs as scenario re-routes); ids ascend, so ties keep the smaller id.
-    const res = w.router.find(at.lane, at.s, goals, false, sc.zero);
-    if (res && (best === null || res.cost < best.cost)) best = { id, from, cost: res.cost };
+  const d = dispatchDecision(w, inc);
+  if (!d.ok) {
+    // Outside the observation boundary nothing happens (never reached: dispatch follows observe).
+    if (d.boundary) return;
+    // Over the dispatch stage's per-tick budget: the same call again next tick (not a failed dispatch).
+    if (d.retry) {
+      inc.retryAt = w.tick + 1;
+      return;
+    }
+    return dispatchFailed(w, inc, d.reason);
   }
-  if (best === null) return dispatchFailed(w, inc, '경로 없음');
-  const m: Mission = { incident: inc, facilityId: best.id, scene, typeId, stage: 'enroute', v: null, spawn: { from: best.from, goal: accessGoal(scene) }, departTick: -1 };
+  const m: Mission = { incident: inc, facilityId: d.facilityId, scene: d.scene, typeId: d.typeId, stage: 'enroute', v: null, spawn: { from: d.from, goal: accessGoal(d.scene) }, departTick: -1 };
   inc.mission = m;
   inc.retryAt = -1;
-  sc.missions.push(m);
+  w.sc!.missions.push(m);
 }
 
 export function startIncident(w: World, input: ScenarioInput): void {
@@ -195,6 +195,14 @@ export function startIncident(w: World, input: ScenarioInput): void {
     trackFire(w, inc);
     return;
   }
+  const where = buildingTarget(w, inc.buildingId);
+  // Known at once — unless the observe stage is over its budget this tick: then known (and dispatched) next tick.
+  if (observeInput(w, { eventId: inc.eventId, kind: inc.kind, segmentId: null, lane: -1, buildingId: inc.buildingId }, where, `${KIND_LABEL[inc.kind]} 인지: ${placeText(where, inc.buildingId)}`, `${inc.eventId} · ${fire ? '즉시 인지 (감지 모드 legacy)' : '응급 호출은 즉시 인지'}`)) dispatch(w, inc);
+  else inc.knownTick = -1;
+}
+
+/** Dispatch for an incident whose input-time observation was deferred (scenario/controlAdapter.ts). */
+export function dispatchIncident(w: World, inc: Incident): void {
   dispatch(w, inc);
 }
 
@@ -231,6 +239,7 @@ function recall(w: World, inc: Incident): void {
   if (m.v === null) {
     removeMission(w, m);
     log(w, inc, 'dispatch.cancel', 'incident over');
+    dispatchCancelledDecision(w, inc, '출발 전에 사건 종료');
     return;
   }
   // Turn back from the current position; if no route home exists it drives on to the scene and returns from there.
@@ -293,6 +302,7 @@ export function recheckIncidents(w: World): void {
     inc.mission = null;
     if (m === null) continue;
     log(w, inc, 'dispatch.cancel', 'target gone');
+    dispatchCancelledDecision(w, inc, '대상 건물 삭제됨');
     if (m.stage === 'working') leaveScene(w, m, 'returning');
     else if (m.v === null) removeMission(w, m);
     else {
@@ -305,6 +315,7 @@ export function recheckIncidents(w: World): void {
     if (m.stage === 'enroute' && m.v === null) {
       removeMission(w, m);
       log(w, m.incident, 'dispatch.cancel', 'facility gone');
+      dispatchCancelledDecision(w, m.incident, '출동 시설 삭제됨 → 남은 시설에서 다시 출동');
       if (m.incident.mission === m) {
         m.incident.mission = null;
         dispatch(w, m.incident);

@@ -2,15 +2,19 @@
 // CityDoc: they change only the running simulation, through `applyScenarioInput` at a tick boundary.
 
 import type { CityDoc } from '@smartcity/shared';
+import { reservedError } from '../control/policy.js';
 
 /**
- * Bumped whenever a change alters what a ScenarioRecord replays to. 2 = detection model (ADR 0013 §1–§3:
- * `policy.detection`, the delay / miss constants of scenario/detection.ts). Records of engine 1 still replay,
- * read as `detection: 'legacy'` (exactly the engine-1 behaviour).
+ * Bumped whenever a change alters what a ScenarioRecord replays to, or what a record may contain. 2 =
+ * detection model (ADR 0013 §1–§3: `policy.detection`, the delay / miss constants of scenario/detection.ts).
+ * 3 = policy normalization (ADR 0015 §3): the reserved factor keys `adaptive` / `drone` / `precheck` /
+ * `onboard` (0 only) are allowed in `policy.set`; the replayed behaviour is unchanged. Records of engine 1
+ * replay as `detection: 'legacy'` (exactly the engine-1 behaviour); engine 1 and 2 records replay unchanged
+ * and may not carry the reserved keys.
  */
-export const ENGINE_VERSION = 2;
+export const ENGINE_VERSION = 3;
 /** Engine versions simulationFromRecord accepts. */
-export const ENGINE_VERSIONS: readonly number[] = [1, 2];
+export const ENGINE_VERSIONS: readonly number[] = [1, 2, 3];
 export const SCENARIO_VERSION = 1;
 
 /** `policy.set` = a response-policy change; `Simulation.setPolicy` records one, so replays stay exact. */
@@ -64,7 +68,8 @@ export interface ScenarioInput {
    * *.end: none; ends the earliest-started active event of that kind with the same segmentId and lane
    *   (fire / medical / blackout: buildingId).
    * policy.set: reroute (0 | 1), informedShare (0..1), preempt (optional 0 | 1), battery (optional 0 | 1),
-   *   detection (optional 0 = legacy | 1 = reports | 2 = sensors, `DETECTION_MODES` index; omitted = legacy); target {}.
+   *   detection (optional 0 = legacy | 1 = reports | 2 = sensors, `DETECTION_MODES` index; omitted = legacy),
+   *   adaptive / drone / precheck / onboard (optional, 0 only: reserved, ignored — ADR 0015 §3); target {}.
    */
   params: Record<string, number>;
 }
@@ -89,6 +94,14 @@ export interface ResponsePolicy {
    * `sensors`: at min(report, every valid sensor detection). Other events are always known at once.
    */
   detection?: DetectionMode;
+  /**
+   * Reserved factors (ADR 0015 §3, control/policy.ts): fixed OFF until their agents exist. Omitted or false is
+   * accepted and ignored (not recorded); true is rejected.
+   */
+  adaptive?: false;
+  drone?: false;
+  precheck?: false;
+  onboard?: false;
 }
 
 export const DETECTION_MODES = ['legacy', 'reports', 'sensors'] as const;
@@ -121,7 +134,7 @@ export const SCENARIO_PARAM_KEYS: Record<ScenarioInputKind, readonly string[]> =
   'medical.end': [],
   'blackout.start': ['x', 'z', 'radius', 'durationTicks'],
   'blackout.end': [],
-  'policy.set': ['reroute', 'informedShare', 'preempt', 'battery', 'detection'],
+  'policy.set': ['reroute', 'informedShare', 'preempt', 'battery', 'detection', 'adaptive', 'drone', 'precheck', 'onboard'],
 };
 
 /** Strict policy check shared by setPolicy, records and the worker (no type coercion). Null = valid. */
@@ -133,7 +146,7 @@ export function policyError(p: unknown): string | null {
   if (preempt !== undefined && typeof preempt !== 'boolean') return 'policy.preempt는 boolean이어야 합니다';
   if (battery !== undefined && typeof battery !== 'boolean') return 'policy.battery는 boolean이어야 합니다';
   if (detection !== undefined && !(DETECTION_MODES as readonly unknown[]).includes(detection)) return 'policy.detection은 legacy | reports | sensors여야 합니다';
-  return null;
+  return reservedError((k) => (p as Record<string, unknown>)[k], false);
 }
 
 export interface ScenarioRecord {
